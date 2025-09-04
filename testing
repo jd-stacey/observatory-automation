@@ -1,114 +1,25 @@
-# Add this method to your ImagingSession class in session.py:
-
-def test_acquisition_flow(self, simulate_corrections: bool = True) -> bool:
-    """
-    Test acquisition phase logic without taking actual images.
-    Returns True if test completed successfully.
-    """
-    if not self.acquisition_enabled:
-        logger.info("Acquisition mode disabled - nothing to test")
-        return True
-        
-    logger.info("="*60)
-    logger.info(" "*15+"TESTING ACQUISITION FLOW")
-    logger.info("="*60)
-    
-    # Test directory creation
-    logger.info(f"✓ Acquisition directory created: {self.acquisition_dir}")
-    logger.info(f"✓ Science directory ready: {self.science_dir}")
-    
-    # Test target JSON creation
-    logger.info(f"✓ Target JSON points to acquisition dir: {self.current_target_dir}")
-    
-    # Simulate acquisition phase
-    simulated_offsets = [15.2, 8.1, 4.5, 2.8, 1.9] if simulate_corrections else [0.5]
-    
-    for i, offset in enumerate(simulated_offsets, 1):
-        logger.info(f"[ACQUISITION] Simulated frame {i}: offset = {offset:.1f}\"")
-        self.acquisition_count += 1
-        
-        # Simulate correction decision
-        if offset > self.acquisition_config.get('max_total_offset_arcsec', 3.0):
-            logger.info(f"  → Offset too large ({offset:.1f}\" > threshold), continuing acquisition")
-        else:
-            logger.info(f"  → Offset acceptable ({offset:.1f}\" ≤ threshold), switching to science")
-            break
-            
-        # Check max attempts
-        if self.acquisition_count >= self.acquisition_config.get('max_attempts', 20):
-            logger.warning("  → Maximum acquisition attempts reached")
-            break
-    
-    # Test phase switch
-    if self._check_acquisition_complete():
-        self._switch_to_science_phase()
-        logger.info(f"✓ Phase switched successfully")
-        logger.info(f"✓ Target JSON now points to science dir: {self.current_target_dir}")
-        
-        # Simulate a few science frames
-        for i in range(3):
-            self.science_count += 1
-            logger.info(f"[SCIENCE] Simulated frame {self.science_count}: normal exposure")
-    
-    # Test stats
-    stats = self.get_session_stats()
-    logger.info("="*60)
-    logger.info("TEST RESULTS:")
-    logger.info(f"  Acquisition frames: {stats.get('acquisition_count', 0)}")
-    logger.info(f"  Science frames: {stats.get('science_count', 0)}")
-    logger.info(f"  Final phase: {stats.get('current_phase', 'unknown')}")
-    logger.info(f"  Current directory: {stats.get('current_directory', 'unknown')}")
-    logger.info("="*60)
-    
-    return True
-
-# Add this method to simulate correction status (for testing without corrector)
-def _simulate_correction_status(self, offset_arcsec: float) -> Dict[str, Any]:
-    """Simulate correction status for testing"""
-    return {
-        'json_file_ready': True,
-        'pending_total_offset_arcsec': offset_arcsec,
-        'pending_ra_offset_arcsec': offset_arcsec * 0.7,
-        'pending_dec_offset_arcsec': offset_arcsec * 0.3,
-        'pending_rotation_offset_deg': 0.5
-    }
-
-# Modify the _check_acquisition_complete method to support testing:
-def _check_acquisition_complete(self, test_offset: Optional[float] = None) -> bool:
-    """Check if acquisition phase should end"""
-    if self.current_phase != SessionPhase.ACQUISITION:
-        return True
-        
-    if not self.corrector and test_offset is None:
-        logger.warning("No corrector available, skipping acquisition")
-        return True
-        
-    # Check maximum attempts
-    max_attempts = self.acquisition_config.get('max_attempts', 20)
-    if self.acquisition_count >= max_attempts:
-        logger.warning(f"Maximum acquisition attempts reached ({max_attempts})")
-        return True
-        
-    # Use test offset if provided, otherwise get real correction status
-    if test_offset is not None:
-        total_offset = test_offset
-    else:
+if args.test_acquisition:
         try:
-            correction_status = self.corrector.get_correction_status()
-            if correction_status.get('json_file_ready', False):
-                total_offset = correction_status.get('pending_total_offset_arcsec', float('inf'))
-            else:
-                return False  # No data available yet
-        except Exception as e:
-            logger.warning(f"Could not check observability: {e}")
-            return False
-            
-    threshold = self.acquisition_config.get('max_total_offset_arcsec', 3.0)
-    
-    if total_offset <= threshold:
-        logger.info(f"Target acquired! Total offset: {total_offset:.2f}\" (threshold: {threshold}\")")
-        return True
+            session = ImagingSession(
+                camera_manager=None,  # No camera needed for test
+                corrector=None,       # No corrector needed for test
+                config_loader=config_loader,
+                target_info=target_info, 
+                filter_code=args.filter.upper(),
+                ignore_twilight=args.ignore_twilight,
+                exposure_override=args.exposure_time
+            )
+        except ImagingSessionError:
+            logger.warning("Could not create session for testing - continuing with dry run")
+            session = None
+
+# ADD THE TEST CODE HERE - OUTSIDE BOTH IF/ELSE BLOCKS:
+if args.test_acquisition and session:
+    logger.info("Running acquisition flow test...")
+    test_success = session.test_acquisition_flow(simulate_corrections=True)
+    if test_success:
+        logger.info("Acquisition test completed successfully")
+        return 0
     else:
-        logger.debug(f"Still acquiring - offset: {total_offset:.2f}\" (threshold: {threshold}\")")
-        
-    return False
+        logger.error("Acquisition test failed")
+        return 1
