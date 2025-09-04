@@ -1,55 +1,23 @@
-def _initialize_components(self):
-    try:
-        # Handle camera initialization - allow None for testing
-        if self.camera_manager:
-            self.main_camera = self.camera_manager.get_main_camera()
-            if not self.main_camera:
-                raise ImagingSessionError("Main camera not found")
-            
-            if not self.main_camera.connected:
-                if not self.main_camera.connect():
-                    raise ImagingSessionError("Failed to connect to main camera")
-        else:
-            # For testing mode - create a mock camera object or set to None
-            self.main_camera = None
-            logger.info("Running in test mode - no camera initialized")
-        
-        self.file_manager = FileManager(self.config_loader)
-        
-        # Create both acquisition and science directories
-        base_target_dir = self.file_manager.create_target_directory(self.target_info.tic_id)
-        
-        if self.acquisition_enabled:
-            # Create acquisition directory
-            folder_suffix = self.acquisition_config.get('folder_suffix', '_acq')
-            acq_dir_name = base_target_dir.name + folder_suffix
-            self.acquisition_dir = base_target_dir.parent / acq_dir_name
-            self.acquisition_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Science directory is the normal one
-            self.science_dir = base_target_dir
-            
-            # Start with acquisition directory
-            self.current_target_dir = self.acquisition_dir
-            self.current_phase = SessionPhase.ACQUISITION
-            logger.info(f"Acquisition mode enabled - starting in: {self.acquisition_dir}")
-        else:
-            # Skip acquisition, go straight to science
-            self.science_dir = base_target_dir
-            self.current_target_dir = self.science_dir
-            self.current_phase = SessionPhase.SCIENCE
-            logger.info("Acquisition mode disabled - starting science imaging")
-        
-        # Create initial target JSON pointing to current directory
-        self._create_complete_target_json(self.current_target_dir)
-        
-        observatory_config = self.config_loader.get_config('observatory')
-        self.observability_checker = ObservabilityChecker(observatory_config)
-        
-        logger.debug(f"Session initialized: {self.target_info.tic_id}, Filter: {self.filter_code}")
-        if self.main_camera:
-            logger.debug(f"Camera: {self.main_camera.name}")
-        logger.debug(f"Current phase: {self.current_phase.value}")
-        
-    except Exception as e:
-        raise ImagingSessionError(f"Failed to initialize session: {e}")
+def _create_complete_target_json(self, target_dir: Path):
+    """Update target JSON to point to the specified directory"""
+    from autopho.targets.resolver import TICTargetResolver
+    resolver = TICTargetResolver()
+    target_json_data = resolver.create_target_json(self.target_info)
+    
+    # Handle case where main_camera is None (for testing)
+    camera_name = self.main_camera.name if self.main_camera else "test_camera"
+    camera_device_id = self.main_camera.device_id if self.main_camera else "test_device"
+    
+    target_json_data.update({
+        "camera_name": camera_name,
+        "camera_device_id": camera_device_id,
+        "filter_code": self.filter_code,
+        "raw_images_directory": str(target_dir),
+        "tel": self.file_manager.telescope_id.replace('T', ''),
+        "imaging_phase": self.current_phase.value
+    })
+    
+    if self.config_loader.write_target_json(target_json_data):
+        logger.info(f"Target JSON updated for {self.current_phase.value} phase: {target_dir}")
+    else:
+        logger.warning("Failed to write target JSON for external platesolver")
