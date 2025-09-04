@@ -112,6 +112,12 @@ def main():
         help="Manual coordinates: 'RA_HOURS DEC_DEGREES (overrides TIC lookup)"
     )
     
+    parser.add_argument(
+        '--test-acquisition',
+        action='store_true',
+        help="Test acquisition flow without taking images (for daytime testing)"
+    )
+    
     args = parser.parse_args()
     
     setup_logging(args.log_level)
@@ -345,11 +351,7 @@ def main():
             
            
             logger.info(f"Starting imaging session...")
-            
-            
-                      
-            
-                       
+                     
             
             try:
                 
@@ -392,7 +394,30 @@ def main():
             logger.info(f"  Would set filter to {args.filter.upper()}")
             logger.info("DRY RUN: Skipping rotator operations")
             logger.info("DRY RUN: Skipping camera/imaging operations")
+            if args.test_acquisition:
+                try:
+                    session = ImagingSession(
+                        camera_manager=None,  # No camera needed for test
+                        corrector=None,       # No corrector needed for test
+                        config_loader=config_loader,
+                        target_info=target_info, 
+                        filter_code=args.filter.upper(),
+                        ignore_twilight=args.ignore_twilight,
+                        exposure_override=args.exposure_time
+                    )
+                except ImagingSessionError:
+                    logger.warning("Could not create session for testing - continuing with dry run")
+                    session = None
             
+        if args.test_acquisition and session:
+            logger.info("Running acquisition flow test...")
+            test_success = session.test_acquisition_flow(simulate_corrections=True)
+            if test_success:
+                logger.info("Acquisition test completed successfully")
+                return 0
+            else:
+                logger.error("Acquisition test failed")
+                return 1
             
         logger.info("="*75)
         logger.info(" "*30+"SESSION SUMMARY")

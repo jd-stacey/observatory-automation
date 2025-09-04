@@ -81,9 +81,10 @@ class FileManager:
             return 1
         
     def save_fits_file(self, hdu: fits.PrimaryHDU, tic_id: str, filter_code: str, 
-                        exposure_time: float, sequence_number: int) -> Optional[Path]:
+                        exposure_time: float, sequence_number: int, target_dir: Optional[Path] = None) -> Optional[Path]:
         try:
-            target_dir = self.create_target_directory(tic_id)
+            if target_dir is None:
+                target_dir = self.create_target_directory(tic_id)
             if sequence_number is None:
                 sequence_number = self.get_next_sequence_number(target_dir)
             timestamp = datetime.now(timezone.utc)

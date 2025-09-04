@@ -4,12 +4,17 @@ import numpy as np
 from typing import Optional, Dict, Any, Tuple
 from datetime import datetime
 from pathlib import Path
+from enum import Enum
 
 from autopho.imaging.fits_utils import create_fits_file
 from autopho.imaging.file_manager import FileManager
 from autopho.targets.observability import ObservabilityChecker
 
 logger = logging.getLogger(__name__)
+
+class SessionPhase(Enum):
+    ACQUISITION = "acquisition"
+    SCIENCE = "science"
 
 class ImagingSessionError(Exception):
     pass
@@ -28,61 +33,256 @@ class ImagingSession:
         self.session_start_time = None
         self.last_correction_exposure = 0
         self.consecutive_failures = 0
-        self.correction_interval = 5            # Apply correction every N exposures
+        self.correction_interval = 5            # Apply correction every N exposures (science phase)
         self.max_consecutive_failures = 3
         self.main_camera = None
         self.file_manager = None
         self.observability_checker = None
+        
+        # Acquisition phase tracking
+        self.current_phase = SessionPhase.ACQUISITION
+        self.acquisition_count = 0
+        self.science_count = 0
+        self.acquisition_dir = None
+        self.science_dir = None
+        
+        # Load acquisition config
+        self.platesolve_config = config_loader.get_config('platesolving')
+        self.acquisition_config = self.platesolve_config.get('acquisition', {})
+        self.acquisition_enabled = self.acquisition_config.get('enabled', True)
+        
         self._initialize_components()
         
     def _initialize_components(self):
         try:
-            self.main_camera = self.camera_manager.get_main_camera()
-            if not self.main_camera:
-                raise ImagingSessionError("Main camera not found")
-            
-            if not self.main_camera.connected:
-                if not self.main_camera.connect():
-                    raise ImagingSessionError("Failed to connect to main camera")
+            # Handle camera initialization - allow None for testing
+            if self.camera_manager:
+                self.main_camera = self.camera_manager.get_main_camera()
+                if not self.main_camera:
+                    raise ImagingSessionError("Main camera not found")
+                
+                if not self.main_camera.connected:
+                    if not self.main_camera.connect():
+                        raise ImagingSessionError("Failed to connect to main camera")
+            else:
+                # For testing mode - create a mock camera object or set to None
+                self.main_camera = None
+                logger.info("Running in test mode - no camera initialized")
             
             self.file_manager = FileManager(self.config_loader)
             
-            self.target_dir = self.file_manager.create_target_directory(self.target_info.tic_id)
+            # Create both acquisition and science directories
+            base_target_dir = self.file_manager.create_target_directory(self.target_info.tic_id)
             
-            self._create_complete_target_json(self.target_dir)
+            if self.acquisition_enabled:
+                # Create acquisition directory
+                folder_suffix = self.acquisition_config.get('folder_suffix', '_acq')
+                acq_dir_name = base_target_dir.name + folder_suffix
+                self.acquisition_dir = base_target_dir.parent / acq_dir_name
+                self.acquisition_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Science directory is the normal one
+                self.science_dir = base_target_dir
+                
+                # Start with acquisition directory
+                self.current_target_dir = self.acquisition_dir
+                self.current_phase = SessionPhase.ACQUISITION
+                logger.info(f"Acquisition mode enabled - starting in: {self.acquisition_dir}")
+            else:
+                # Skip acquisition, go straight to science
+                self.science_dir = base_target_dir
+                self.current_target_dir = self.science_dir
+                self.current_phase = SessionPhase.SCIENCE
+                logger.info("Acquisition mode disabled - starting science imaging")
+            
+            # Create initial target JSON pointing to current directory
+            self._create_complete_target_json(self.current_target_dir)
             
             observatory_config = self.config_loader.get_config('observatory')
             self.observability_checker = ObservabilityChecker(observatory_config)
+            
             logger.debug(f"Session initialized: {self.target_info.tic_id}, Filter: {self.filter_code}")
-            logger.debug(f"Camera: {self.main_camera.name}")
+            if self.main_camera:
+                logger.debug(f"Camera: {self.main_camera.name}")
+            logger.debug(f"Current phase: {self.current_phase.value}")
             
         except Exception as e:
             raise ImagingSessionError(f"Failed to initialize session: {e}")
+
         
     def _create_complete_target_json(self, target_dir: Path):
+        """Update target JSON to point to the specified directory"""
         from autopho.targets.resolver import TICTargetResolver
         resolver = TICTargetResolver()
         target_json_data = resolver.create_target_json(self.target_info)
         
+        # Handle case where main_camera is None (for testing)
+        camera_name = self.main_camera.name if self.main_camera else "test_camera"
+        camera_device_id = self.main_camera.device_id if self.main_camera else "test_device"
+        
         target_json_data.update({
-            "camera_name": self.main_camera.name,
-            "camera_device_id": self.main_camera.device_id,
+            "camera_name": camera_name,
+            "camera_device_id": camera_device_id,
             "filter_code": self.filter_code,
             "raw_images_directory": str(target_dir),
-            "tel": self.file_manager.telescope_id.replace('T', '')
+            "tel": self.file_manager.telescope_id.replace('T', ''),
+            "imaging_phase": self.current_phase.value
         })
+        
         if self.config_loader.write_target_json(target_json_data):
-            logger.info(f"Target JSON created with camera: {self.main_camera.name}")
-            logger.debug(f"Raw images directory: {target_dir}")
+            logger.info(f"Target JSON updated for {self.current_phase.value} phase: {target_dir}")
         else:
             logger.warning("Failed to write target JSON for external platesolver")
     
+    
+    def test_acquisition_flow(self, simulate_corrections: bool = True) -> bool:
+        """Test the acquisition phase flow without taking actual images"""
+        try:
+            logger.info("Testing acquisition flow...")
+            
+            if not self.acquisition_enabled:
+                logger.info("Acquisition disabled - test complete")
+                return True
+                
+            logger.info(f"Acquisition directory: {self.acquisition_dir}")
+            logger.info(f"Science directory: {self.science_dir}")
+            logger.info(f"Current phase: {self.current_phase.value}")
+            
+            # Simulate acquisition phase
+            max_attempts = self.acquisition_config.get('max_attempts', 20)
+            exposure_time = self.acquisition_config.get('exposure_time', 3.0)
+            correction_interval = self.acquisition_config.get('correction_interval', 1)
+            threshold = self.acquisition_config.get('max_total_offset_arcsec', 3.0)
+            
+            logger.info(f"Test config: {exposure_time}s exposures, max {max_attempts} attempts")
+            logger.info(f"Correction interval: every {correction_interval} frame(s)")
+            logger.info(f"Acquisition threshold: {threshold} arcseconds")
+            
+            # Simulate some acquisition attempts
+            for attempt in range(1, min(6, max_attempts + 1)):  # Test up to 5 attempts
+                logger.info(f"[ACQUISITION] Simulated frame {attempt}")
+                self.acquisition_count = attempt
+                
+                if simulate_corrections and (attempt % correction_interval) == 0:
+                    # Simulate improving accuracy over time
+                    simulated_offset = max(10.0 - (attempt * 2.0), 0.5)
+                    logger.info(f"Simulated correction applied - offset: {simulated_offset:.1f}\"")
+                    
+                    # Check if we've reached acquisition threshold
+                    if simulated_offset <= threshold:
+                        logger.info(f"Simulated acquisition complete! Offset: {simulated_offset:.1f}\" <= {threshold}\"")
+                        break
+                
+                if attempt >= max_attempts:
+                    logger.warning(f"Simulated max attempts reached ({max_attempts})")
+                    break
+            
+            # Test phase transition
+            logger.info("Testing phase transition...")
+            self._switch_to_science_phase()
+            
+            if self.current_phase == SessionPhase.SCIENCE:
+                logger.info("Phase transition successful")
+                logger.info(f"Now in science phase, directory: {self.science_dir}")
+                return True
+            else:
+                logger.error("Phase transition failed")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Acquisition flow test failed: {e}")
+            return False
+    
+    
+    
+    
+    def _switch_to_science_phase(self):
+        """Transition from acquisition to science imaging"""
+        if self.current_phase == SessionPhase.SCIENCE:
+            return  # Already in science phase
+            
+        logger.info("="*60)
+        logger.info(" "*15+"SWITCHING TO SCIENCE PHASE")
+        logger.info("="*60)
+        
+        self.current_phase = SessionPhase.SCIENCE
+        self.current_target_dir = self.science_dir
+        
+        # Update target JSON to point to science directory
+        self._create_complete_target_json(self.science_dir)
+        
+        # Reset exposure count for science phase
+        self.science_count = 0
+        self.last_correction_exposure = 0
+        
+        logger.info(f"Acquisition complete: {self.acquisition_count} frames")
+        logger.info(f"Now saving science frames to: {self.science_dir}")
+    
+    def _get_current_exposure_time(self) -> float:
+        """Get exposure time based on current phase"""
+        if self.exposure_override is not None:
+            return self.exposure_override
+            
+        if self.current_phase == SessionPhase.ACQUISITION:
+            return self.acquisition_config.get('exposure_time', 3.0)
+        else:
+            return self.config_loader.get_exposure_time(
+                self.target_info.gaia_g_mag,
+                self.filter_code
+            )
+    
+    def _get_current_correction_interval(self) -> int:
+        """Get correction interval based on current phase"""
+        if self.current_phase == SessionPhase.ACQUISITION:
+            return self.acquisition_config.get('correction_interval', 1)
+        else:
+            return self.correction_interval
+    
+    def _check_acquisition_complete(self) -> bool:
+        """Check if acquisition phase should end"""
+        if self.current_phase != SessionPhase.ACQUISITION:
+            return True
+            
+        if not self.corrector:
+            logger.warning("No corrector available, skipping acquisition")
+            return True
+            
+        # Check maximum attempts
+        max_attempts = self.acquisition_config.get('max_attempts', 20)
+        if self.acquisition_count >= max_attempts:
+            logger.warning(f"Maximum acquisition attempts reached ({max_attempts})")
+            return True
+            
+        # Check if we have recent correction status with acceptable offset
+        try:
+            correction_status = self.corrector.get_correction_status()
+            if correction_status.get('json_file_ready', False):
+                total_offset = correction_status.get('pending_total_offset_arcsec', float('inf'))
+                threshold = self.acquisition_config.get('max_total_offset_arcsec', 3.0)
+                
+                if total_offset <= threshold:
+                    logger.info(f"Target acquired! Total offset: {total_offset:.2f}\" (threshold: {threshold}\")")
+                    return True
+                else:
+                    logger.debug(f"Still acquiring - offset: {total_offset:.2f}\" (threshold: {threshold}\")")
+                    
+        except Exception as e:
+            logger.warning(f"Could not check acquisition status: {e}")
+            
+        return False
+
     def start_imaging_loop(self, max_exposures: Optional[int] = None,
                            duration_hours: Optional[float] = None) -> bool:
         
         logger.info("="*75)
         logger.info(" "*25+"STARTING IMAGING SESSION")
         logger.info("="*75)
+        
+        if self.acquisition_enabled and self.current_phase == SessionPhase.ACQUISITION:
+            logger.info("Starting with target acquisition phase")
+            acq_exp_time = self.acquisition_config.get('exposure_time', 3.0)
+            max_acq_attempts = self.acquisition_config.get('max_attempts', 20)
+            logger.info(f"Acquisition: {acq_exp_time}s exposures, max {max_acq_attempts} attempts")
         
         if max_exposures:
             logger.info(f"Maximum exposures: {max_exposures}")
@@ -95,18 +295,26 @@ class ImagingSession:
         
         try:
             while True:
-                
                 try:
                     image_filepath = self.capture_single_exposure()
                     if image_filepath:
                         self.exposure_count += 1
                         self.consecutive_failures = 0
+                        
+                        # Update phase-specific counters
+                        if self.current_phase == SessionPhase.ACQUISITION:
+                            self.acquisition_count += 1
+                        else:
+                            self.science_count += 1
+                        
                         elapsed_time = (time.time() - self.session_start_time) / 3600
-                        logger.info(f"Exposure {self.exposure_count}: {Path(image_filepath).name} "
-                                     f"(Session: {elapsed_time:.1f} h)")
+                        phase_info = f"[{self.current_phase.value.upper()}]"
+                        logger.info(f"{phase_info} Exposure {self.exposure_count}: {Path(image_filepath).name} "
+                                   f"(Session: {elapsed_time:.1f} h)")
                     else:
                         self.consecutive_failures += 1
                         logger.warning(f"Capture failed ({self.consecutive_failures}/{self.max_consecutive_failures})")
+                        
                 except Exception as e:
                     self.consecutive_failures += 1
                     logger.error(f"Exposure error: {e} ({self.consecutive_failures}/{self.max_consecutive_failures})")
@@ -115,25 +323,35 @@ class ImagingSession:
                         logger.error("Too many consecutive failures, terminating session")
                         return False
                 
+                # Check if acquisition phase should end
+                if (self.current_phase == SessionPhase.ACQUISITION and 
+                    self.acquisition_count > 0 and  # At least one acquisition frame
+                    self._check_acquisition_complete()):
+                    self._switch_to_science_phase()
+                
+                # Check general termination conditions
                 should_terminate, reason = self.check_termination_conditions(max_exposures, duration_hours)
                 if should_terminate:
                     logger.info(f"Session terminating: {reason}")
                     break
                 
+                # Apply corrections based on current phase
                 if self._should_apply_correction():
                     self._apply_periodic_correction()
-                
-                
-                
                 
             session_duration = (time.time() - self.session_start_time) / 3600
             logger.info("="*75)
             logger.info(" "*30+"IMAGING COMPLETED")
             logger.info("="*75)
             logger.info(f"Total exposures: {self.exposure_count}")
-            logger.info(f"Files saved to: {self.target_dir}")
+            if self.acquisition_enabled:
+                logger.info(f"  Acquisition: {self.acquisition_count}")
+                logger.info(f"  Science: {self.science_count}")
+            logger.info(f"Final phase: {self.current_phase.value}")
+            logger.info(f"Files saved to: {self.current_target_dir}")
             logger.info(f"Session duration: {session_duration:.1f} hours")
             return True
+            
         except KeyboardInterrupt:
             logger.info("Session interrupted by user")
             return True
@@ -143,24 +361,19 @@ class ImagingSession:
         
     def capture_single_exposure(self) -> Optional[str]:
         try:
-            if self.exposure_override is not None:
-                exposure_time = self.exposure_override
-            else:
-                exposure_time = self.config_loader.get_exposure_time(
-                self.target_info.gaia_g_mag,
-                self.filter_code
-                )
+            exposure_time = self._get_current_exposure_time()
             camera_config = self.main_camera.config
             binning = camera_config.get('default_binning', 4)
             gain = camera_config.get('default_gain', 100)
             
-            logger.debug(f"Starting exposure: {exposure_time} s, binning={binning}, gain={gain}")
+            phase_prefix = "ACQ" if self.current_phase == SessionPhase.ACQUISITION else "SCI"
+            logger.debug(f"{phase_prefix} exposure: {exposure_time} s, binning={binning}, gain={gain}")
             
             image_array = self.main_camera.capture_image(
-            exposure_time=exposure_time,
-            binning=binning, 
-            gain=gain, 
-            light=True
+                exposure_time=exposure_time,
+                binning=binning, 
+                gain=gain, 
+                light=True
             )
             if image_array is None:
                 logger.error("Camera returned no image data")
@@ -175,13 +388,33 @@ class ImagingSession:
                 exposure_time=exposure_time
             )
             
+            # Add acquisition phase info to FITS header
+            if hasattr(hdu, 'header'):
+                hdu.header['IMGTYPE'] = (
+                    'Acquisition' if self.current_phase == SessionPhase.ACQUISITION else 'Light',
+                    'Type of image'
+                )
+                hdu.header['PHASE'] = (self.current_phase.value, 'Imaging phase')
+            
+            # Use phase-appropriate sequence number and directory
+            if self.current_phase == SessionPhase.ACQUISITION:
+                sequence_number = self.acquisition_count + 1
+                save_dir = self.acquisition_dir
+            else:
+                sequence_number = self.science_count + 1
+                save_dir = self.science_dir
+            
+                       
             filepath = self.file_manager.save_fits_file(
                 hdu=hdu,
                 tic_id=self.target_info.tic_id,
                 filter_code=self.filter_code, 
                 exposure_time=exposure_time,
-                sequence_number=self.exposure_count + 1
+                sequence_number=sequence_number,
+                target_dir=save_dir
             )
+            
+            
             
             return str(filepath) if filepath else None
         
@@ -192,8 +425,11 @@ class ImagingSession:
     def check_termination_conditions(self, max_exposures: Optional[int], 
                                      duration_hours: Optional[float]) -> Tuple[bool, str]:
         
-        if max_exposures and self.exposure_count >= max_exposures:
-            return True, f"Maximum exposures reached ({max_exposures})"
+        # Only count science exposures toward max_exposures limit
+        science_exposures = self.science_count if self.acquisition_enabled else self.exposure_count
+        
+        if max_exposures and science_exposures >= max_exposures:
+            return True, f"Maximum science exposures reached ({max_exposures})"
         
         if duration_hours and self.session_start_time:
             elapsed_hours = (time.time() - self.session_start_time) / 3600
@@ -215,43 +451,57 @@ class ImagingSession:
             
         if self.consecutive_failures >= self.max_consecutive_failures:
             return True, f"Too many consecutive failures ({self.consecutive_failures})"
+            
         return False, "Session continuing"
     
     def _should_apply_correction(self) -> bool:
         if not self.corrector:
             return False
-        if self.exposure_count > 0 and (self.exposure_count % self.correction_interval) == 0:
-            if self.exposure_count != self.last_correction_exposure:
-                return True
-        # Checks for platesolve correction before first image
-        # if self.exposure_count == 0:
-        #     return True
+            
+        current_interval = self._get_current_correction_interval()
+        current_count = self.acquisition_count if self.current_phase == SessionPhase.ACQUISITION else self.science_count
+        
+        if current_count > 0 and (current_count % current_interval) == 0:
+            # Make sure we don't repeat corrections
+            if self.current_phase == SessionPhase.ACQUISITION:
+                return current_count != self.last_correction_exposure
+            else:
+                return self.exposure_count != self.last_correction_exposure
+                
         return False
     
     def _apply_periodic_correction(self) -> bool:
         if not self.corrector:
             return False
         try:
-            logger.debug(f"Checking for platesolve correction...")
-            result = self.corrector.apply_single_correction(timeout_seconds=1)
+            phase_prefix = "ACQ" if self.current_phase == SessionPhase.ACQUISITION else "SCI"
+            logger.debug(f"{phase_prefix} correction check...")
+            
+            # During acquisition, use shorter timeout
+            # timeout = 30 if self.current_phase == SessionPhase.ACQUISITION else 60
+            result = self.corrector.apply_single_correction()   #timeout_seconds=timeout
+            
             if result.applied:
-                logger.info(f"Correction applied: {result.reason} "
+                logger.info(f"{phase_prefix} correction applied: {result.reason} "
                             f"(Total offset: {result.total_offset_arcsec:.2f}\")")
                 self.last_correction_exposure = self.exposure_count
                 return True
             else:
-                logger.debug(f"No correction needed: {result.reason}")
+                logger.debug(f"{phase_prefix} no correction needed: {result.reason}")
                 return False
         except Exception as e:
             logger.warning(f"Correction check failed: {e}")
             return False
+
     def get_session_stats(self) -> Dict[str, Any]:
         if not self.session_start_time:
             return {'status': 'not_started'}
+            
         elapsed_time = time.time() - self.session_start_time
-        return {
+        stats = {
             'status': 'running',
-            'exposure_count': self.exposure_count,
+            'current_phase': self.current_phase.value,
+            'total_exposures': self.exposure_count,
             'elapsed_hours': elapsed_time / 3600,
             'consecutive_failures': self.consecutive_failures,
             'target': self.target_info.tic_id,
@@ -260,3 +510,14 @@ class ImagingSession:
             'corrector_available': self.corrector is not None
         }
         
+        if self.acquisition_enabled:
+            stats.update({
+                'acquisition_enabled': True,
+                'acquisition_count': self.acquisition_count,
+                'science_count': self.science_count,
+                'current_directory': str(self.current_target_dir)
+            })
+        else:
+            stats['acquisition_enabled'] = False
+            
+        return stats

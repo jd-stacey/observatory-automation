@@ -11,3 +11,11 @@ correction_thresholds:
   min_arcsec: 1.0     # dont correct below this
   small_offset: 1.0   # use scale factor 0
   large_offset: 5.0   # use scale factor 0.5
+
+acquisition:
+  enabled: true
+  exposure_time: 3.0              # exposure time during acquisition phase
+  correction_interval: 3          # checks for correction required between N frames during acquisition
+  max_total_offset_arcsec: 3.0    # once total offset >= this number, switch to science frames/folder
+  max_attempts: 30                # dont acquire forever and ever and ever and ever and ever
+  folder_suffix: "_acq"           
