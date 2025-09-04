@@ -1,0 +1,22 @@
+default_exposure: 5.0
+
+magnitude_ranges:
+  - { min: 0.0, max: 5.0, exposure: 1.0 }
+  - { min: 5.0, max: 10.0, exposure: 10.0 }
+  - { min: 10.0, max: 12.0, exposure: 20.0 }
+  - { min: 12.0, max: 15.0, exposure: 30.0 }
+  - { min: 15.0, max: 18.0, exposure: 60.0 }
+
+filter_scaling:
+  Clear: 1.0
+  B: 1.2
+  V: 1.0
+  R: 0.8
+  Lum: 1.0
+  I: 1.5
+  Ha: 2.0
+  
+
+continuous_until_unobservable: true
+max_exposures_per_session: null
+timing_intervals: null

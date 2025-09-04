@@ -1,0 +1,7 @@
+raw_images: "P:\\Photometry"                  # M or P drive???
+logs: "M:\\Data\\Logs"
+
+target_json: "P:\\temp\\target_2.json"              # For minerva photometry to read target info
+platesolve_json: "P:\\temp\\wcssolution_2.json"     # Where minerva photometry dumps mount correction info
+solver_status_json : "session\\solver_status_json"
+

@@ -1,0 +1,13 @@
+file_max_age_seconds: 200
+check_interval_seconds: 5
+correction_scale_factor: 1.0
+timeout_seconds: 600
+
+settle_time:
+  min: 10
+  max: 140
+
+correction_thresholds:
+  min_arcsec: 1.0     # dont correct below this
+  small_offset: 1.0   # use scale factor 0
+  large_offset: 5.0   # use scale factor 0.5

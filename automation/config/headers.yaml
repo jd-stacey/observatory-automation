@@ -1,0 +1,19 @@
+observatory:
+  OBSERVAT: "Mt Kent Observatory"
+  OBSERVER: "T2 Automated Photometry"
+  SITELONG: 151.8547855
+  SITELAT: -27.7983683
+  SITELEV: 680.0
+
+defaults:
+  EPOCH: 2000.0
+  IMAGETYP: 'LIGHT'
+
+filter_names:
+  C: 'Clear'
+  B: 'Blue'
+  G: 'Green'
+  R: 'Sloan-r'
+  L: 'Lum'
+  I: 'Sloan-i'
+  H: 'H-alpha'
