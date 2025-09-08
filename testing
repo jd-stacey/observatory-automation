@@ -1,50 +1,12 @@
-def initialize_field_rotation(self, observatory_config, field_rotation_config):
-    """Initialize field rotation tracker"""
-    try:
-        self.field_tracker = FieldRotationTracker(
-            self, observatory_config, field_rotation_config
-        )
-        return True
-    except Exception as e:
-        logger.error(f"Failed to initialize field rotation: {e}")
-        return False
-
-def set_tracking_target(self, ra_hours, dec_deg, reference_pa_deg=None):
-    """Set target for field rotation tracking"""
-    if hasattr(self, 'field_tracker'):
-        self.field_tracker.set_target(ra_hours, dec_deg, reference_pa_deg)
-
-def start_field_tracking(self):
-    """Start continuous field rotation"""
-    if hasattr(self, 'field_tracker'):
-        self.field_tracker.start_tracking()
-        return True
-    return False
-
-def stop_field_tracking(self):
-    """Stop continuous field rotation"""
-    if hasattr(self, 'field_tracker'):
-        self.field_tracker.stop_tracking()
-        return True
-    return False
-
-def apply_platesolve_feedback(self, theta_offset_deg):
-    """Apply platesolve rotation feedback to calibration"""
-    if not hasattr(self, 'field_tracker'):
-        return False
-        
-    try:
-        platesolve_sign = getattr(self, '_platesolve_sign', 1)
-        correction = platesolve_sign * theta_offset_deg
-        self.field_tracker.mechanical_zero += correction
-        logger.info(f"Updated mechanical zero: {correction:+.3f}° -> {self.field_tracker.mechanical_zero:.3f}°")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to apply platesolve feedback: {e}")
-        return False
-
-def check_wrap_status(self):
-    """Check if wrap management is needed"""
-    if hasattr(self, 'field_tracker'):
-        return self.field_tracker.check_wrap_needed()
-    return False
+if rotation_correction_needed:
+    logger.info(f"Applying rotation feedback: {rot_offset_deg:+.2f}°")
+    if hasattr(self.rotator_driver, 'apply_platesolve_feedback'):
+        # Use as calibration feedback (preferred - no image jump)
+        rotation_success = self.rotator_driver.apply_platesolve_feedback(rot_offset_deg)
+        if rotation_success:
+            corrections_applied.append("rotation-calibration")
+    else:
+        # Fallback to discrete move
+        rotation_success = self.rotator_driver.apply_rotation_correction(rot_offset_deg)
+        if rotation_success:
+            corrections_applied.append("rotation-discrete")
