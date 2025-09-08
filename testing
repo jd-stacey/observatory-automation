@@ -1,12 +1,29 @@
-if rotation_correction_needed:
-    logger.info(f"Applying rotation feedback: {rot_offset_deg:+.2f}°")
-    if hasattr(self.rotator_driver, 'apply_platesolve_feedback'):
-        # Use as calibration feedback (preferred - no image jump)
-        rotation_success = self.rotator_driver.apply_platesolve_feedback(rot_offset_deg)
-        if rotation_success:
-            corrections_applied.append("rotation-calibration")
-    else:
-        # Fallback to discrete move
-        rotation_success = self.rotator_driver.apply_rotation_correction(rot_offset_deg)
-        if rotation_success:
-            corrections_applied.append("rotation-discrete")
+def capture_single_exposure(self) -> Optional[str]:
+    try:
+        exposure_time = self._get_current_exposure_time()
+        camera_config = self.main_camera.config
+        binning = camera_config.get('default_binning', 4)
+        gain = camera_config.get('default_gain', 100)
+        
+        phase_prefix = "ACQ" if self.current_phase == SessionPhase.ACQUISITION else "SCI"
+        logger.debug(f"{phase_prefix} exposure: {exposure_time} s, binning={binning}, gain={gain}")
+        
+        # Start field rotation tracking before exposure
+        rotator_tracking = False
+        if (self.corrector and hasattr(self.corrector, 'rotator_driver') and 
+            self.corrector.rotator_driver and hasattr(self.corrector.rotator_driver, 'start_field_tracking')):
+            rotator_tracking = self.corrector.rotator_driver.start_field_tracking()
+        
+        try:
+            image_array = self.main_camera.capture_image(
+                exposure_time=exposure_time,
+                binning=binning, 
+                gain=gain, 
+                light=True
+            )
+        finally:
+            # Stop tracking after exposure
+            if rotator_tracking and hasattr(self.corrector.rotator_driver, 'stop_field_tracking'):
+                self.corrector.rotator_driver.stop_field_tracking()
+        
+        # ... rest of method unchanged ...
