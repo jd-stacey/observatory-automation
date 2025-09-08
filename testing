@@ -1,29 +1,16 @@
-def capture_single_exposure(self) -> Optional[str]:
+# After rotator connection and initialization, add this:
+if rotator_driver:
     try:
-        exposure_time = self._get_current_exposure_time()
-        camera_config = self.main_camera.config
-        binning = camera_config.get('default_binning', 4)
-        gain = camera_config.get('default_gain', 100)
-        
-        phase_prefix = "ACQ" if self.current_phase == SessionPhase.ACQUISITION else "SCI"
-        logger.debug(f"{phase_prefix} exposure: {exposure_time} s, binning={binning}, gain={gain}")
-        
-        # Start field rotation tracking before exposure
-        rotator_tracking = False
-        if (self.corrector and hasattr(self.corrector, 'rotator_driver') and 
-            self.corrector.rotator_driver and hasattr(self.corrector.rotator_driver, 'start_field_tracking')):
-            rotator_tracking = self.corrector.rotator_driver.start_field_tracking()
-        
-        try:
-            image_array = self.main_camera.capture_image(
-                exposure_time=exposure_time,
-                binning=binning, 
-                gain=gain, 
-                light=True
-            )
-        finally:
-            # Stop tracking after exposure
-            if rotator_tracking and hasattr(self.corrector.rotator_driver, 'stop_field_tracking'):
-                self.corrector.rotator_driver.stop_field_tracking()
-        
-        # ... rest of method unchanged ...
+        field_rotation_config = config_loader.get_config('field_rotation')
+        if field_rotation_config.get('enabled', True):
+            observatory_config = config_loader.get_config('observatory')
+            if rotator_driver.initialize_field_rotation(observatory_config, field_rotation_config):
+                # Set the platesolve sign from config
+                rotator_driver._platesolve_sign = field_rotation_config['calibration']['platesolve_sign']
+                logger.info("Field rotation system initialized")
+            else:
+                logger.warning("Field rotation initialization failed")
+        else:
+            logger.info("Field rotation disabled in config")
+    except Exception as e:
+        logger.warning(f"Field rotation setup failed: {e}")
