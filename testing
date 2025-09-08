@@ -1,7 +1,9 @@
-# Start continuous field rotation tracking for entire session
-if (self.corrector and hasattr(self.corrector, 'rotator_driver') and 
-    self.corrector.rotator_driver and hasattr(self.corrector.rotator_driver, 'start_field_tracking')):
-    if self.corrector.rotator_driver.start_field_tracking():
-        logger.info("Continuous field rotation tracking started")
-    else:
-        logger.warning("Failed to start field rotation tracking")
+finally:
+    # Stop continuous tracking when session ends
+    try:
+        if (self.corrector and hasattr(self.corrector, 'rotator_driver') and 
+            self.corrector.rotator_driver and hasattr(self.corrector.rotator_driver, 'stop_field_tracking')):
+            self.corrector.rotator_driver.stop_field_tracking()
+            logger.info("Field rotation tracking stopped")
+    except Exception as e:
+        logger.warning(f"Error stopping field rotation: {e}")
