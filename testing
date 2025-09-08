@@ -1,14 +1,152 @@
-# Field rotation control for Alt/Az mounts
-enabled: true
-tracking:
-  update_rate_hz: 2.0           # How often to update rotator during exposures
-  move_threshold_deg: 0.02      # Minimum movement to avoid jitter
-  settle_time_sec: 0.1          # Brief pause after each move
-calibration:
-  rotator_sign: 1               # +1 or -1, test to determine correct direction
-  platesolve_sign: 1            # +1 or -1 for theta_offset feedback direction
-  mechanical_zero_deg: 0.0      # Sky PA when rotator at mechanical zero
-wrap_management:
-  enabled: true
-  lookahead_minutes: 30.0       # How far ahead to check for limits
-  flip_margin_deg: 15.0         # Margin from limits to trigger 180° flip
+import threading
+from astropy.coordinates import SkyCoord, AltAz, EarthLocation
+from astropy.time import Time
+import astropy.units as u
+
+
+
+class FieldRotationTracker:
+    """Continuous field rotation tracking during exposures"""
+    
+    def __init__(self, rotator_driver, observatory_config, field_rotation_config):
+        self.rotator = rotator_driver
+        self.obs_config = observatory_config
+        self.fr_config = field_rotation_config
+        
+        # Observatory location
+        self.location = EarthLocation(
+            lat=observatory_config['latitude'] * u.deg,
+            lon=observatory_config['longitude'] * u.deg,
+            height=observatory_config.get('altitude', 0) * u.m
+        )
+        
+        # Tracking state
+        self.target_coord = None  # J2000 SkyCoord
+        self.reference_pa = None  # Fixed detector PA
+        self.is_tracking = False
+        self.tracking_thread = None
+        self.stop_tracking = threading.Event()
+        
+        # Calibration parameters
+        self.rotator_sign = field_rotation_config['calibration']['rotator_sign']
+        self.mechanical_zero = field_rotation_config['calibration']['mechanical_zero_deg']
+        
+        logger.debug("FieldRotationTracker initialized")
+    
+    def set_target(self, ra_hours, dec_deg, reference_pa_deg=None):
+        """Set target coordinates and reference PA"""
+        self.target_coord = SkyCoord(
+            ra=ra_hours * u.hour,
+            dec=dec_deg * u.deg,
+            frame='icrs'  # J2000
+        )
+        if reference_pa_deg is not None:
+            self.reference_pa = reference_pa_deg
+        logger.debug(f"Tracking target set: RA={ra_hours:.4f}h Dec={dec_deg:.4f}°")
+    
+    def calculate_required_pa(self, obs_time=None):
+        """Calculate required sky PA to maintain fixed detector orientation"""
+        if not self.target_coord:
+            return None
+            
+        if obs_time is None:
+            obs_time = Time.now()
+            
+        # Transform to Alt/Az at current time
+        altaz = self.target_coord.transform_to(
+            AltAz(obstime=obs_time, location=self.location)
+        )
+        
+        # Get parallactic angle (rotation needed to keep north up)
+        parallactic_angle = altaz.parallactic_angle.to(u.deg).value
+        
+        # If we have a reference PA, maintain that orientation
+        if self.reference_pa is not None:
+            required_pa = self.reference_pa - parallactic_angle
+        else:
+            required_pa = -parallactic_angle  # Default: keep north up
+            
+        return required_pa
+    
+    def pa_to_rotator_position(self, sky_pa_deg):
+        """Convert sky PA to rotator mechanical position"""
+        return self.rotator_sign * (sky_pa_deg + self.mechanical_zero)
+    
+    def check_wrap_needed(self):
+        """Check if rotator will hit limits soon"""
+        if not self.fr_config['wrap_management']['enabled']:
+            return False
+            
+        lookahead_min = self.fr_config['wrap_management']['lookahead_minutes']
+        future_time = Time.now() + lookahead_min * u.minute
+        
+        future_pa = self.calculate_required_pa(future_time)
+        if future_pa is None:
+            return False
+            
+        future_pos = self.pa_to_rotator_position(future_pa)
+        margin = self.fr_config['wrap_management']['flip_margin_deg']
+        
+        return (future_pos < self.rotator.min_limit + margin or 
+                future_pos > self.rotator.max_limit - margin)
+    
+    def start_tracking(self):
+        """Start continuous tracking thread"""
+        if self.is_tracking:
+            return
+            
+        self.stop_tracking.clear()
+        self.is_tracking = True
+        self.tracking_thread = threading.Thread(target=self._tracking_loop, daemon=True)
+        self.tracking_thread.start()
+        logger.info("Field rotation tracking started")
+    
+    def stop_tracking(self):
+        """Stop tracking thread"""
+        self.stop_tracking.set()
+        if self.tracking_thread:
+            self.tracking_thread.join(timeout=2.0)
+        self.is_tracking = False
+        logger.info("Field rotation tracking stopped")
+    
+    def _tracking_loop(self):
+        """Main tracking loop - runs during exposures only"""
+        update_rate = self.fr_config['tracking']['update_rate_hz']
+        move_threshold = self.fr_config['tracking']['move_threshold_deg']
+        settle_time = self.fr_config['tracking']['settle_time_sec']
+        
+        sleep_interval = 1.0 / update_rate
+        
+        while not self.stop_tracking.is_set():
+            try:
+                if not self.rotator.is_connected() or not self.target_coord:
+                    time.sleep(sleep_interval)
+                    continue
+                
+                # Calculate required position
+                required_pa = self.calculate_required_pa()
+                if required_pa is None:
+                    time.sleep(sleep_interval)
+                    continue
+                
+                required_position = self.pa_to_rotator_position(required_pa)
+                current_position = self.rotator.get_position()
+                
+                # Calculate shortest rotation
+                error = (required_position - current_position + 180) % 360 - 180
+                
+                # Only move if error exceeds threshold
+                if abs(error) > move_threshold:
+                    target_position = current_position + error
+                    
+                    # Safety check
+                    is_safe, _ = self.rotator.check_position_safety(target_position)
+                    if is_safe:
+                        self.rotator.rotator.MoveAbsolute(target_position)
+                        if settle_time > 0:
+                            time.sleep(settle_time)
+                
+            except Exception as e:
+                logger.warning(f"Tracking loop error: {e}")
+            
+            time.sleep(sleep_interval)
