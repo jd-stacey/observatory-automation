@@ -30,12 +30,12 @@ class TargetResolutionError(Exception):
 
 class TICTargetResolver:
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config_loader=None):
         if not ASTRO_AVAILABLE:
             raise TargetResolutionError(f"Required astronomy packages not available. Please install.")
         
-        # Default config values - override with config file
-        self.config = {
+        # Default config values (fallback only)
+        default_config = {
             'gaia_magnitude': {
                 'default_fallback': 12.5,
                 'tmag_to_gmag_offset': 0.4,
@@ -43,8 +43,27 @@ class TICTargetResolver:
             }
         }
         
-        if config:
-            self.config.update(config)
+        if config_loader:
+            try:
+                exposures_config = config_loader.get_config('exposures')
+                target_config = exposures_config.get('target_resolution', {})
+                
+                # Start with defaults and update if config is valid
+                self.config = default_config.copy()
+                if target_config and isinstance(target_config, dict):
+                    if 'gaia_magnitude' in target_config and isinstance(target_config['gaia_magnitude'], dict):
+                        self.config['gaia_magnitude'].update(target_config['gaia_magnitude'])
+                        logger.debug("Loaded target resolution config from exposures.yaml")
+                    else:
+                        logger.debug("No gaia_magnitude config found, using defaults")
+                else:
+                    logger.debug("No target_resolution config found, using defaults")
+                    
+            except Exception as e:
+                logger.warning(f"Could not load target resolution config, using defaults: {e}")
+                self.config = default_config
+        else:
+            self.config = default_config
         
     def resolve_tic_id(self, tic_id: str):
         logger.debug(f"Resolving TIC ID: {tic_id}")
