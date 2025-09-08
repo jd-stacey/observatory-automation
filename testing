@@ -1,16 +1,6 @@
-# After rotator connection and initialization, add this:
-if rotator_driver:
-    try:
-        field_rotation_config = config_loader.get_config('field_rotation')
-        if field_rotation_config.get('enabled', True):
-            observatory_config = config_loader.get_config('observatory')
-            if rotator_driver.initialize_field_rotation(observatory_config, field_rotation_config):
-                # Set the platesolve sign from config
-                rotator_driver._platesolve_sign = field_rotation_config['calibration']['platesolve_sign']
-                logger.info("Field rotation system initialized")
-            else:
-                logger.warning("Field rotation initialization failed")
-        else:
-            logger.info("Field rotation disabled in config")
-    except Exception as e:
-        logger.warning(f"Field rotation setup failed: {e}")
+if rotator_driver and hasattr(rotator_driver, 'set_tracking_target'):
+    rotator_driver.set_tracking_target(
+        target_info.ra_j2000_hours,
+        target_info.dec_j2000_deg
+    )
+    logger.info("Field rotation target set")
