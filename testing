@@ -1,6 +1,7 @@
-if rotator_driver and hasattr(rotator_driver, 'set_tracking_target'):
-    rotator_driver.set_tracking_target(
-        target_info.ra_j2000_hours,
-        target_info.dec_j2000_deg
-    )
-    logger.info("Field rotation target set")
+# Start continuous field rotation tracking for entire session
+if (self.corrector and hasattr(self.corrector, 'rotator_driver') and 
+    self.corrector.rotator_driver and hasattr(self.corrector.rotator_driver, 'start_field_tracking')):
+    if self.corrector.rotator_driver.start_field_tracking():
+        logger.info("Continuous field rotation tracking started")
+    else:
+        logger.warning("Failed to start field rotation tracking")
