@@ -17,5 +17,5 @@ acquisition:
   exposure_time: 3.0              # exposure time during acquisition phase
   correction_interval: 3          # checks for correction required between N frames during acquisition
   max_total_offset_arcsec: 3.0    # once total offset >= this number, switch to science frames/folder
-  max_attempts: 30                # dont acquire forever and ever and ever and ever and ever
+  max_attempts: 3 #30                # dont acquire forever and ever and ever and ever and ever
   folder_suffix: "_acq"           

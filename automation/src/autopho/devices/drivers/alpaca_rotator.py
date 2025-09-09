@@ -1,6 +1,11 @@
+import threading
+from astropy.coordinates import SkyCoord, AltAz, EarthLocation
+from astropy.time import Time
+import astropy.units as u
 import time
 import logging
 from typing import Dict, Any, Optional, Tuple
+from astroplan import Observer
 
 
 try:
@@ -23,6 +28,10 @@ class AlpacaRotatorDriver:
         self.rotator = None
         self.config = None
         self.connected = False
+        self.rotator_sign = 1          # overridden from field_rotation.yaml during init
+        self._platesolve_sign = 1      # overridden from field_rotation.yaml during init
+        self._platesolve_clamp_deg = 5.0  # hard default; leave as-is unless you add to YAML later
+
         
         
     def connect(self, config: Dict[str, Any]) -> bool:
@@ -107,7 +116,7 @@ class AlpacaRotatorDriver:
         
         try:
             position = self.rotator.Position
-            logger.debug(f"Current rotator position: {position:.2f}°")
+            # logger.debug(f"Current rotator position: {position:.2f}°")
             return position
         
         except Exception as e:
@@ -208,36 +217,69 @@ class AlpacaRotatorDriver:
             return False
         
     def apply_rotation_correction(self, rotation_offset_deg: float) -> bool:
+        """
+        Actively de-rotate the camera by the platesolver's reported sky-PA delta (deg).
+        Positive rotation_offset_deg means: "rotate image by +theta to match reference".
+        We convert sky PA delta → mechanical angle delta using rotator_sign, then MoveAbsolute.
+        """
         if not self.is_connected():
             logger.error("Cannot apply rotation correction - rotator not connected")
             return False
-        
+
         try:
             current_pos = self.get_position()
-            
-            if abs(rotation_offset_deg) > 5.0:
-                logger.warning(f"Large rotation offset ({rotation_offset_deg:.2f}°) - setting to 0°")
-                rotation_offset_deg = 0.0
-            else:
-                rotation_offset_deg *= 0.5      # Scale factor
-                
-            if abs(rotation_offset_deg) < 0.1:
-                logger.debug(f"Rotation correction too small ({rotation_offset_deg:.4f}°), skipping")
-                return True
-            
-            new_position = current_pos + rotation_offset_deg
-            
-            is_safe, safety_msg = self.check_position_safety(new_position)
-            
+
+            # Map sky PA delta to mechanical delta:
+            # mech = sign * (sky_pa + mechanical_zero) => Δmech = sign * Δsky
+            rotator_sign = getattr(self, "rotator_sign", +1)
+            mech_delta = rotator_sign * float(rotation_offset_deg)
+
+            # Optional clamp to ignore wild solves
+            clamp_deg = float(getattr(self, "_platesolve_clamp_deg", 5.0))
+            if abs(mech_delta) > clamp_deg:
+                logger.warning(f"Rotation correction clamped from {mech_delta:+.2f}° to "
+                            f"{clamp_deg if mech_delta > 0 else -clamp_deg:+.2f}°")
+                mech_delta = clamp_deg if mech_delta > 0 else -clamp_deg
+
+            target_pos = current_pos + mech_delta
+
+            # Wrap / limit safety
+            is_safe, safety_msg = self.check_position_safety(target_pos)
             if not is_safe:
-                logger.warning(f"Cannot apply rotation correction: {safety_msg}")
-                logger.info("Continuing without rotation correction - field will rotate naturally")
-                return True
-            logger.info(f"Applying rotation correction: {rotation_offset_deg:+.2f}°"
-                        f"(from {current_pos:.2f}° to {new_position:.2f}°)")
+                logger.warning(f"Rotation correction refused: {safety_msg}")
+                return False
+
+            logger.info(f"Applying platesolve de-rotation: sky Δ={rotation_offset_deg:+.2f}°, "
+                        f"mech Δ={mech_delta:+.2f}° (from {current_pos:.2f}° → {target_pos:.2f}°)")
+            self.rotator.MoveAbsolute(target_pos)
+
+            # minimal settle (configurable)
+            settle_time = float(self.config.get('settle_time', 0.0))
+            if settle_time > 0:
+                time.sleep(settle_time)
+
+            # --- RESYNC TRACKER STATE AFTER A DISCRETE THETA MOVE ---
+            try:
+                if hasattr(self, "field_tracker") and self.field_tracker:
+                    # 1) short cooldown so the next tick doesn't immediately re-command
+                    #    (use max with settle_time if you have a non-zero settle)
+                    cooldown = max(0.3, float(self.config.get('settle_time', 0.0)))
+                    self.field_tracker._cooldown_until = time.time() + cooldown
+
+                    # 2) refresh tracker’s last commanded PA to the *current* setpoint
+                    #    so future platesolve feedback compares to this baseline
+                    pa_now = self.field_tracker.calculate_required_pa(Time.now())
+                    if pa_now is not None:
+                        self.field_tracker._last_pa_cmd = float(pa_now)
+            except Exception:
+                pass
+            # ---------------------------------------------------------
             
-            return self.move_to_position(new_position)
-        
+            
+            final_pos = self.get_position()
+            logger.debug(f"Rotator now at {final_pos:.2f}°")
+            return True
+
         except Exception as e:
             logger.error(f"Rotation correction failed: {e}")
             return False
@@ -290,8 +332,302 @@ class AlpacaRotatorDriver:
             logger.error(f"Failed to get rotator info: {e}")
             return {'connected': True, "error": str(e)}
         
+    def initialize_field_rotation(self, observatory_config, field_rotation_config):
+        """Initialize field rotation tracker"""
+        try:
+            # ---- NEW: wire calibration values from field_rotation.yaml into the driver ----
+            cal = field_rotation_config.get('calibration', {})
+            self.rotator_sign = int(cal.get('rotator_sign', self.rotator_sign))
+            self._platesolve_sign = int(cal.get('platesolve_sign', self._platesolve_sign))
+            # optional: keep a hard-coded clamp unless you later add one to YAML
+            # self._platesolve_clamp_deg = float(field_rotation_config.get('platesolve', {}).get('clamp_deg', self._platesolve_clamp_deg))
+            # ------------------------------------------------------------------------------
+
+            self.field_tracker = FieldRotationTracker(
+                self, observatory_config, field_rotation_config
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to initialize field rotation: {e}")
+            return False
+
+
+    def set_tracking_target(self, ra_hours, dec_deg, reference_pa_deg=None):
+        """Set target for field rotation tracking"""
+        if hasattr(self, 'field_tracker'):
+            self.field_tracker.set_target(ra_hours, dec_deg, reference_pa_deg)
+
+    def start_field_tracking(self):
+        """Start continuous field rotation"""
+        if hasattr(self, 'field_tracker'):
+            self.field_tracker.start_tracking()
+            return True
+        return False
+
+    def stop_field_tracking(self):
+        """Stop continuous field rotation"""
+        if hasattr(self, 'field_tracker'):
+            self.field_tracker.stop_tracking()
+            return True
+        return False
+
+    def apply_platesolve_feedback(self, theta_offset_deg):
+        """Apply platesolve rotation feedback to calibration"""
+        if not hasattr(self, 'field_tracker'):
+            return False
+            
+        try:
+            platesolve_sign = getattr(self, '_platesolve_sign', 1)
+            correction = platesolve_sign * theta_offset_deg
+            self.field_tracker.mechanical_zero += correction
+            logger.info(f"Updated mechanical zero: {correction:+.3f}° -> {self.field_tracker.mechanical_zero:.3f}°")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to apply platesolve feedback: {e}")
+            return False
+
+    def check_wrap_status(self):
+        """Check if wrap management is needed"""
+        if hasattr(self, 'field_tracker'):
+            return self.field_tracker.check_wrap_needed()
+        return False
+    
+    def tracking_notify_exposure_start(self):
+        if hasattr(self, 'field_tracker'):
+            self.field_tracker.notify_exposure_start()
+
+    def tracking_notify_exposure_end(self):
+        if hasattr(self, 'field_tracker'):
+            self.field_tracker.notify_exposure_end()
+    
         
+
+class FieldRotationTracker:
+
+    """Continuous field rotation tracking during exposures"""
+
+    
+
+    def __init__(self, rotator_driver, observatory_config, field_rotation_config):
+
+        self.rotator = rotator_driver
+        self.obs_config = observatory_config
+        self.fr_config = field_rotation_config
+        self._cooldown_until = 0.0
+
+
+        # Observatory location
+
+        self.location = EarthLocation(
+            lat=observatory_config['latitude'] * u.deg,
+            lon=observatory_config['longitude'] * u.deg,
+            height=observatory_config.get('altitude', 0) * u.m
+        )
+
+        # create astroplan Observer for parallactic angle calculations
+        self.observer = Observer(location=self.location)
         
+        # Tracking state
+
+        self.target_coord = None  # J2000 SkyCoord
+        self.reference_pa = None  # Fixed detector PA
+        self.is_tracking = False
+        self.tracking_thread = None
+        self.stop_event = threading.Event()
+
+        # Calibration parameters
+
+        self.rotator_sign = field_rotation_config['calibration']['rotator_sign']
+        self.mechanical_zero = field_rotation_config['calibration']['mechanical_zero_deg']
+        
+        self.in_exposure = False
+        self.pending_flip = False
+
+        logger.debug("FieldRotationTracker initialized")
+
+
+    def set_target(self, ra_hours, dec_deg, reference_pa_deg=None):
+        """Set target coordinates and (if not supplied) freeze the current view as reference PA."""
+        self.target_coord = SkyCoord(
+            ra=ra_hours * u.hour,
+            dec=dec_deg * u.deg,
+            frame='icrs'  # J2000
+        )
+
+        if reference_pa_deg is not None:
+            # user/config explicitly sets the desired detector PA wrt sky
+            self.reference_pa = float(reference_pa_deg)
+        else:
+            # Freeze to the *current* view so the first command is a no-op.
+            t0 = Time.now()
+            q0 = self.observer.parallactic_angle(t0, self.target_coord).to(u.deg).value  # east-of-north
+            mech0 = self.rotator.get_position()
+            # mech = sign * (sky_pa + mechanical_zero)  =>  sky_pa = (mech / sign) - mechanical_zero
+            sky_pa0 = (mech0 / self.rotator_sign) - self.mechanical_zero
+            self.reference_pa = sky_pa0 + q0
+            logger.info(f"[field-rot] reference_pa frozen at start: {self.reference_pa:.3f}°")
+
+        logger.debug(f"Tracking target set: RA={ra_hours:.4f} h Dec={dec_deg:.4f}°")
+
+
+    
+
+    def calculate_required_pa(self, obs_time=None):
+        """Calculate sky PA that keeps detector fixed to the frozen reference."""
+        if not self.target_coord:
+            return None
+
+        if obs_time is None:
+            obs_time = Time.now()
+
+        q = self.observer.parallactic_angle(obs_time, self.target_coord).to(u.deg).value
+
+        if self.reference_pa is None:
+            # One-time bootstrap in case set_target() was not called with freeze logic
+            mech = self.rotator.get_position()
+            q0 = self.observer.parallactic_angle(Time.now(), self.target_coord).to(u.deg).value
+            sky_pa0 = (mech / self.rotator_sign) - self.mechanical_zero
+            self.reference_pa = sky_pa0 + q0
+            logger.info(f"[field-rot] reference_pa auto-bootstrapped: {self.reference_pa:.3f}°")
+
+        # Hold frozen ref forever: desired sky PA = ref - q(now)
+        return self.reference_pa - q
+
+
+
+    def pa_to_rotator_position(self, sky_pa_deg):
+
+        """Convert sky PA to rotator mechanical position"""
+
+        return self.rotator_sign * (sky_pa_deg + self.mechanical_zero)
+
+
+    def check_wrap_needed(self):
+
+        """Check if rotator will hit limits soon"""
+
+        if not self.fr_config['wrap_management']['enabled']:
+            return False      
+
+        lookahead_min = self.fr_config['wrap_management']['lookahead_minutes']
+        future_time = Time.now() + lookahead_min * u.minute
+
+        future_pa = self.calculate_required_pa(future_time)
+        if future_pa is None:
+            return False
+
+        future_pos = self.pa_to_rotator_position(future_pa)
+        margin = self.fr_config['wrap_management']['flip_margin_deg']
+
+        return (future_pos < self.rotator.min_limit + margin or 
+                future_pos > self.rotator.max_limit - margin)
+
+    
+
+    def start_tracking(self):
+
+        """Start continuous tracking thread"""
+
+        if self.is_tracking:
+            return
+
+        self.stop_event.clear()
+        self.is_tracking = True
+        self.tracking_thread = threading.Thread(target=self._tracking_loop, daemon=True)
+        self.tracking_thread.start()
+        logger.info("Field rotation tracking started")
+
+    
+
+    def stop_tracking(self):
+
+        """Stop tracking thread"""
+
+        self.stop_event.set()
+        if self.tracking_thread:
+            self.tracking_thread.join(timeout=2.0)
+        self.is_tracking = False
+        logger.info("Field rotation tracking stopped")
+
+    
+
+    def _tracking_loop(self):
+
+        """Main tracking loop - runs during exposures only"""
+
+        update_rate = self.fr_config['tracking']['update_rate_hz']
+        move_threshold = self.fr_config['tracking']['move_threshold_deg']
+        settle_time = self.fr_config['tracking']['settle_time_sec']
+        sleep_interval = 1.0 / update_rate
+
+        import time as _t  # add once here
+
+        while not self.stop_event.is_set():
+            try:
+                if not self.rotator.is_connected() or not self.target_coord:
+                    time.sleep(sleep_interval)
+                    continue
+
+                # Calculate required position
+                required_pa = self.calculate_required_pa()
+                if required_pa is None:
+                    time.sleep(sleep_interval)
+                    continue
+
+                required_position = self.pa_to_rotator_position(required_pa)
+                current_position = self.rotator.get_position()
+
+                # Calculate shortest rotation
+                error = (required_position - current_position + 180) % 360 - 180
+
+                logger.debug(f"err={error:.3f}°, thr={move_threshold}°, move={abs(error) > move_threshold}")
+
+                # Defer or perform a 180° reference flip if we’re about to hit limits
+                if self.check_wrap_needed():
+                    if self.in_exposure:
+                        self.pending_flip = True       # defer to after exposure
+                        logger.info("[field-rot] deferring 180° flip until exposure end")
+                    else:
+                        self.reference_pa = (self.reference_pa + 180.0) % 360.0
+                        logger.info("[field-rot] immediate 180° flip to avoid limits")
+                        # Optional: recompute required position immediately after flip
+                        required_pa = self.calculate_required_pa()
+                        required_position = self.pa_to_rotator_position(required_pa)
+                        current_position = self.rotator.get_position()
+                        error = (required_position - current_position + 180) % 360 - 180
+
+                # Only move if error exceeds threshold AND cooldown has expired
+                if _t.time() >= getattr(self, "_cooldown_until", 0.0):
+                    if abs(error) > move_threshold:
+                        target_position = current_position + error
+
+                        # Safety check
+                        is_safe, _ = self.rotator.check_position_safety(target_position)
+                        if is_safe:
+                            self.rotator.rotator.MoveAbsolute(target_position)
+                            if settle_time > 0:
+                                time.sleep(settle_time)
+
+                            # set a short cooldown (e.g., 0.3 s) to avoid spamming near-identical MoveAbsolute
+                            self._cooldown_until = _t.time() + 0.3
+
+            except Exception as e:
+                logger.warning(f"Tracking loop error: {e}")
+
+            time.sleep(sleep_interval)
+
+    
+    
+    def notify_exposure_start(self):
+        self.in_exposure = True
+
+    def notify_exposure_end(self):
+        self.in_exposure = False
+        if self.pending_flip:
+            self.reference_pa = (self.reference_pa + 180.0) % 360.0
+            self.pending_flip = False
+            logger.info("[field-rot] executed deferred 180° flip after exposure")
+    
     
             
             

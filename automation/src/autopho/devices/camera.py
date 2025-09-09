@@ -33,6 +33,9 @@ class CameraDevice:
             self.connected = self.camera.Connected
             if self.connected:
                 logger.info(f"Connected to {self.role} camera: {self.name} (ID: {self.device_id})")
+                
+                #Initialize cooler after camera connection
+                self.initialize_cooler()
             
             return self.connected
         except Exception as e:
@@ -158,6 +161,66 @@ class CameraDevice:
             raise CameraError(f"Capture failed: {e}")
         
         
+    def initialize_cooler(self, target_temp: float = -10.0) -> bool:
+        """Initialize camera cooler to target temperature"""
+        if not self.connected:
+            logger.error(f"Camera {self.name} not connected")
+            return False
+        
+        try:
+            cam = self.camera
+            
+            # Check if cooler is available
+            if not hasattr(cam, 'CoolerOn') or not hasattr(cam, 'SetCCDTemperature'):
+                logger.warning(f"Camera {self.name} does not support cooling")
+                return True  # Not an error if cooler not available
+            
+            # Get target temperature from config or use default
+            target_temp = self.config.get('target_temperature', target_temp)
+            
+            logger.debug(f"Setting cooler target: {target_temp}°C")
+            cam.SetCCDTemperature = target_temp
+            cam.CoolerOn = True
+            
+            # Give it a moment to start
+            time.sleep(1.0)
+            
+            current_temp = cam.CCDTemperature
+            logger.debug(f"Cooler enabled: current {current_temp:.1f}°C, target {target_temp}°C")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize cooler: {e}")
+            return False
+    
+    def turn_cooler_off(self) -> bool:
+        if not self.connected:
+            logger.error(f"Camera {self.name} not connected")
+            return False
+        
+        try:
+            cam = self.camera
+            
+            # Check if cooler is available
+            if not hasattr(cam, 'CoolerOn') or not hasattr(cam, 'SetCCDTemperature'):
+                logger.warning(f"Camera {self.name} does not support cooling")
+                return True  # Not an error if cooler not available
+            
+            logger.debug("Turning cooler off...")
+            cam.CoolerOn = False
+            time.sleep(0.5)
+            if cam.CoolerOn:
+                logger.warning("Cooler did not turn off correctly - check manually")
+                return True     # continue even if unsuccessful
+            else:
+                logger.debug("Cooler turned off successfully")
+                return True
+        except Exception as e:
+            logger.warning(f"Failed to turn cooler off: {e}")
+            return True         # continue even if unsuccessful
+                
+    
+        
 class CameraManager:
     
     def __init__(self):
@@ -250,6 +313,15 @@ class CameraManager:
             if not camera.disconnect():
                 success = False
         return success
+    
+    def shutdown_all_coolers(self):
+        for role, camera in self.cameras.items():
+            if camera and camera.connected:
+                try:
+                    logger.debug(f"Turning off cooler for {role} camera...")
+                    camera.turn_cooler_off()
+                except Exception as e:
+                    logger.warning(f"Error shutting down {role} camera cooler: {e}")
     
     
     def get_camera(self, role: str):

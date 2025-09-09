@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 from autopho.config.loader import ConfigLoader, ConfigurationError
-from autopho.targets.resolver import TICTargetResolver, TargetResolutionError
+from autopho.targets.resolver import TICTargetResolver, TargetResolutionError, TargetInfo
 from autopho.devices.drivers.alpaca_telescope import AlpacaTelescopeDriver, AlpacaTelescopeError
 from autopho.devices.drivers.alpaca_cover import AlpacaCoverDriver, AlpacaCoverError
 from autopho.devices.drivers.alpaca_filterwheel import AlpacaFilterWheelDriver, AlpacaFilterWheelError
@@ -49,6 +49,7 @@ def main():
     )
     parser.add_argument(
         "tic_id",
+        nargs='?',
         help="TID ID to observe (e.g. TIC-123456789 or 123456789)"
     )
     parser.add_argument(
@@ -118,7 +119,18 @@ def main():
         help="Test acquisition flow without taking images (for daytime testing)"
     )
     
+    parser.add_argument(
+        '--no-park',
+        action='store_true',
+        help="Skip parking telescope at end of session (default: auto-park)"
+    )
+    
     args = parser.parse_args()
+    
+    if not args.tic_id and not args.coords:
+        parser.error("Must provide either tic_id or --coords")
+    if args.tic_id and args.coords:
+        parser.error("Cannot use both tic_id and --coords - choose one")
     
     setup_logging(args.log_level)
     logger = logging.getLogger(__name__)
@@ -142,9 +154,45 @@ def main():
         config_loader.load_all_configs()
         logger.info('Configuration loaded successfully')
         
-        logger.info(f"Resolving target: {args.tic_id}")
-        target_resolver = TICTargetResolver()
-        target_info = target_resolver.resolve_tic_id(args.tic_id)
+        # logger.info(f"Resolving target: {args.tic_id}")
+        # target_resolver = TICTargetResolver(config_loader)
+        # target_info = target_resolver.resolve_tic_id(args.tic_id)
+        
+        if args.coords:
+            logger.info(f"Using manual coordinates: {args.coords}")
+            # Parse coordinates
+            try:
+                coords_parts = args.coords.strip().split()
+                if len(coords_parts) != 2:
+                    raise ValueError("Expected 'RA_HOURS DEC_DEGREES'")
+                ra_hours = float(coords_parts[0])
+                dec_deg = float(coords_parts[1])
+                
+                # Validate ranges
+                if not (0 <= ra_hours < 24):
+                    raise ValueError(f"RA must be 0-24 hours, got {ra_hours}")
+                if not (-90 <= dec_deg <= 90):
+                    raise ValueError(f"Dec must be -90 to +90 degrees, got {dec_deg}")
+                    
+                # Create manual TargetInfo (no TIC data)
+                target_info = TargetInfo(
+                    tic_id=f"MANUAL-{ra_hours:.3f}h_{dec_deg:+.3f}d",
+                    ra_j2000_hours=ra_hours,
+                    dec_j2000_deg=dec_deg,
+                    gaia_g_mag=12.0,  # Default for exposure calculation
+                    magnitude_source="manual-default"
+                )
+                logger.info(f"Manual target: RA={ra_hours:.6f} h, Dec={dec_deg:.6f}°")
+                
+            except (ValueError, IndexError) as e:
+                logger.error(f"Invalid coordinates format '{args.coords}': {e}")
+                logger.error("Use format: --coords 'RA_HOURS DEC_DEGREES' (e.g., '12.345 -67.890')")
+                return 1
+        else:
+            logger.info(f"Resolving target: {args.tic_id}")
+            target_resolver = TICTargetResolver(config_loader)
+            target_info = target_resolver.resolve_tic_id(args.tic_id)
+        
         
         exposure_time = config_loader.get_exposure_time(target_info.gaia_g_mag, args.filter.upper())
         logger.info(f"Calculated exposure time: {exposure_time} s for G={target_info.gaia_g_mag:.2f}, filter={args.filter.upper()}")
@@ -321,6 +369,7 @@ def main():
             
             logger.info('Telescope positioned at target coordinates')
             
+            
             # Now open cover once telescope is in position
             if cover_driver:
                 logger.info("Opening cover...")
@@ -474,17 +523,24 @@ def main():
         return 1
     finally:
         try:
+            if camera_manager:
+                logger.info("Shutting down camera coolers...")
+                camera_manager.shutdown_all_coolers()
             if cover_driver:
                 logger.info("Closing cover...")
                 cover_driver.close_cover()
             if filter_driver:
                 filter_driver.disconnect()
             if telescope_driver:
-                telescope_driver.park()
-                if telescope_driver.is_parked():
-                    logger.info("Turning telescope motor off...")
-                    telescope_driver.motor_off()
-                    telescope_driver.disconnect()
+                if not args.no_park:
+                    logger.info("Parking telescope...")
+                    telescope_driver.park()
+                else:
+                    logger.info("Skipping telescope parking (--no-park specified)")
+                    
+                logger.info("Turning telescope motor off...")
+                telescope_driver.motor_off()
+                telescope_driver.disconnect()
             logger.info("="*75)
             logger.info(" "*29+"PROGRAM TERMINATED")
             logger.info("="*75)

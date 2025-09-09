@@ -24,6 +24,7 @@ class ImagingSession:
                  ignore_twilight: bool = False, exposure_override: Optional[float] = None):
         self.camera_manager = camera_manager
         self.corrector = corrector
+        self.rotator_driver = getattr(corrector, "rotator_driver", None)
         self.config_loader = config_loader
         self.target_info = target_info
         self.filter_code = filter_code
@@ -278,6 +279,14 @@ class ImagingSession:
         logger.info(" "*25+"STARTING IMAGING SESSION")
         logger.info("="*75)
         
+        # Start continuous field rotation tracking for entire session
+        if (self.corrector and hasattr(self.corrector, 'rotator_driver') and 
+            self.corrector.rotator_driver and hasattr(self.corrector.rotator_driver, 'start_field_tracking')):
+            if self.corrector.rotator_driver.start_field_tracking():
+                logger.info("Continuous field rotation tracking started")
+            else:
+                logger.warning("Failed to start field rotation tracking")
+        
         if self.acquisition_enabled and self.current_phase == SessionPhase.ACQUISITION:
             logger.info("Starting with target acquisition phase")
             acq_exp_time = self.acquisition_config.get('exposure_time', 3.0)
@@ -292,6 +301,26 @@ class ImagingSession:
         self.session_start_time = time.time()
         self.exposure_count = 0
         self.consecutive_failures = 0
+        
+        # ----- start continuous field-rotation tracking for the entire session -----
+        try:
+            if self.rotator_driver:
+                fr_cfg = self.config_loader.get_config('field_rotation')
+                if fr_cfg.get('enabled', True):
+                    obs_cfg = self.config_loader.get_config('observatory')
+                    if self.rotator_driver.initialize_field_rotation(obs_cfg, fr_cfg):
+                        # Freeze *current* view: pass reference_pa_deg=None
+                        self.rotator_driver.set_tracking_target(
+                            self.target_info.ra_j2000_hours,
+                            self.target_info.dec_j2000_deg,
+                            reference_pa_deg=None
+                        )
+                        self.rotator_driver.start_field_tracking()
+                        logger.info("Field-rotation tracking: started (continuous for session)")
+        except Exception as e:
+            logger.warning(f"Field-rotation start failed: {e}")
+        # --------------------------------------------------------------------------
+
         
         try:
             while True:
@@ -358,6 +387,14 @@ class ImagingSession:
         except Exception as e:
             logger.error(f"Session failed: {e}")
             return False
+        finally:
+            # Stop continuous tracking when session ends
+            try:
+                if self.rotator_driver:
+                    self.rotator_driver.stop_field_tracking()
+                    logger.info("Field-rotation tracking: stopped")
+            except Exception:
+                pass
         
     def capture_single_exposure(self) -> Optional[str]:
         try:
@@ -369,12 +406,20 @@ class ImagingSession:
             phase_prefix = "ACQ" if self.current_phase == SessionPhase.ACQUISITION else "SCI"
             logger.debug(f"{phase_prefix} exposure: {exposure_time} s, binning={binning}, gain={gain}")
             
+            if self.rotator_driver and hasattr(self.rotator_driver, "tracking_notify_exposure_start"):
+                self.rotator_driver.tracking_notify_exposure_start()
+
+            
             image_array = self.main_camera.capture_image(
                 exposure_time=exposure_time,
                 binning=binning, 
                 gain=gain, 
                 light=True
             )
+            
+            if self.rotator_driver and hasattr(self.rotator_driver, "tracking_notify_exposure_end"):
+                self.rotator_driver.tracking_notify_exposure_end()
+
             if image_array is None:
                 logger.error("Camera returned no image data")
                 return None

@@ -29,11 +29,23 @@ except Exception as e:
     
 
 try:
-    print(f"Is installed?: {R.Action('isinstalled','')}")
-    print(type(R.Action('isinstalled', '')))
+    print(f"Is installed?: {R.Action('isinstalled','')} + {type(R.Action('isinstalled', ''))}")
     pass
 except Exception as e:
     print(f"isinstalled ERROR: {e}")
+    
+try:
+    print(f"maxspeed SuppAction?: {R.Action('maxspeed','')} + {type(R.Action('maxspeed', ''))}")
+    pass
+except Exception as e:
+    print(f"maxspeed ERROR: {e}")    
+
+
+try:
+    print(f"velspeed SuppAction?: {R.Action('velspeed','')} + {type(R.Action('velspeed', ''))}")
+    pass
+except Exception as e:
+    print(f"velxspeed ERROR: {e}")    
 
 # try:
 #     print(f"Device State: {R.DeviceState}")

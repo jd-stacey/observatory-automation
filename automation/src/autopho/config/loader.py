@@ -29,7 +29,8 @@ class ConfigLoader:
             "exposures.yaml",
             "paths.yaml",
             "headers.yaml",
-            "platesolving.yaml"
+            "platesolving.yaml",
+            'field_rotation.yaml'
         ]
         
         missing = []
@@ -60,7 +61,8 @@ class ConfigLoader:
             'exposures': 'exposures.yaml',
             'paths': 'paths.yaml',
             'headers': 'headers.yaml',
-            'platesolving': 'platesolving.yaml'
+            'platesolving': 'platesolving.yaml',
+            'field_rotation': 'field_rotation.yaml'
         }
                             
         self._configs = {}
@@ -198,7 +200,8 @@ class ConfigLoader:
                     self._header_config = yaml.safe_load(f)
         return self._header_config
     
-    
+    def get_field_rotation_config(self):
+        return self.get_config('field_rotation')
     
     def get_fits_headers(self):
         return self.get_config('headers')

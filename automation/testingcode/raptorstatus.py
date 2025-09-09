@@ -54,6 +54,13 @@ def main():
             except:
                 print("Eq. System: Unable to retrieve")
                 
+                
+            try:
+                align_mode = T.AlignmentMode
+                print(f"Align. Mode: {align_mode}")
+            except:
+                print("Align. Mode: Unable to retrieve")
+                
             print('\n--- POSITION ---')
             
             try:
@@ -71,6 +78,20 @@ def main():
                 print(f"Current Azimuth: {az:.6f} deg")
             except Exception as e:
                 print(f"Alt/Az: Unable to retrieve ({e})")
+                
+                
+            try:
+                track_rate = T.TrackingRate
+                print(f"Track. Rate: {track_rate}")
+            except:
+                print("Track. Rate: Unable to retrieve")
+                
+                
+            try:
+                track_rates = T.TrackingRates
+                print(f"Track. Rates: {track_rates}")
+            except:
+                print("Track. Rates: Unable to retrieve")
             
             print('\n--- OPERATIONAL STATUS ---') 
 

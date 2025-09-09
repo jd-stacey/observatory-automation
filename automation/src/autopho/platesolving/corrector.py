@@ -98,7 +98,7 @@ class PlatesolveCorrector:
                 settle_time = base_settle_time * 5.0
                 logger.debug("Small offset, no correction applied")
             elif total_offset_arcsec > large_threshold:
-                scale_factor = 0.5
+                scale_factor = 0.9
                 settle_time = base_settle_time * 5.0
                 logger.debug("Large offset, reduced correction applied")
             else:
@@ -232,8 +232,14 @@ class PlatesolveCorrector:
                     logger.error("Coordinate correction failed")
                     
             if rotation_correction_needed:
-                logger.info(f"Applying rotation correction: {rot_offset_deg:+.2f}°")
-                rotation_success = self.rotator_driver.apply_rotation_correction(rot_offset_deg)
+                # Actively de-rotate using the platesolver's theta (this MOVES the rotator)
+                logger.info(f"Applying platesolve de-rotation: {rot_offset_deg:+.2f}°")
+                try:
+                    rotation_success = self.rotator_driver.apply_rotation_correction(rot_offset_deg)
+                except Exception as e:
+                    logger.error(f"Rotation correction call failed: {e}")
+                    rotation_success = False
+
                 if rotation_success:
                     corrections_applied.append("rotation")
                 else:

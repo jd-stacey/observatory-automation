@@ -20,3 +20,9 @@ filter_scaling:
 continuous_until_unobservable: true
 max_exposures_per_session: null
 timing_intervals: null
+
+target_resolution:
+  gaia_magnitude:
+  default_fallback: 12.5
+  tmag_to_gmag_offset: 0.4
+  use_tmag_conversion: true

@@ -5,9 +5,6 @@ from datetime import datetime
 
 try:
     from astroquery.mast import Catalogs
-    from astroquery.gaia import Gaia
-    from astropy.coordinates import SkyCoord
-    import astropy.units as u
     ASTRO_AVAILABLE = True
 except ImportError:
     ASTRO_AVAILABLE = False
@@ -26,30 +23,61 @@ class TargetInfo:
     object_type: Optional[str] = None
     proper_motion_ra: Optional[float] = None
     proper_motion_dec: Optional[float] = None
+    magnitude_source: Optional[str] = None  # Track where G mag came from
     
 class TargetResolutionError(Exception):
     pass
 
 class TICTargetResolver:
     
-    def __init__(self):
+    def __init__(self, config_loader=None):
         if not ASTRO_AVAILABLE:
             raise TargetResolutionError(f"Required astronomy packages not available. Please install.")
         
-        Gaia.MAIN_GAIA_TABLE = 'gaiadr3.gaia_source'
-        Gaia.ROW_LIMIT = 50
+        # Default config values (fallback only)
+        default_config = {
+            'gaia_magnitude': {
+                'default_fallback': 12.5,
+                'tmag_to_gmag_offset': 0.4,
+                'use_tmag_conversion': True
+            }
+        }
+        
+        if config_loader:
+            try:
+                exposures_config = config_loader.get_config('exposures')
+                target_config = exposures_config.get('target_resolution', {})
+                
+                # Start with defaults and update if config is valid
+                self.config = default_config.copy()
+                if target_config and isinstance(target_config, dict):
+                    if 'gaia_magnitude' in target_config and isinstance(target_config['gaia_magnitude'], dict):
+                        self.config['gaia_magnitude'].update(target_config['gaia_magnitude'])
+                        logger.debug("Loaded target resolution config from exposures.yaml")
+                    else:
+                        logger.debug("No gaia_magnitude config found, using defaults")
+                else:
+                    logger.debug("No target_resolution config found, using defaults")
+                    
+            except Exception as e:
+                logger.warning(f"Could not load target resolution config, using defaults: {e}")
+                self.config = default_config
+        else:
+            self.config = default_config
         
     def resolve_tic_id(self, tic_id: str):
-        logger.debug(f"Checking against TIC catalog: {tic_id}")
+        logger.debug(f"Resolving TIC ID: {tic_id}")
         clean_tic = self._clean_tic_id(tic_id)
         
         try:
             tic_data = self._query_tic_catalog(clean_tic)
-            gaia_data = self._cross_match_gaia(tic_data)
-            target_info = self._build_target_info(clean_tic, tic_data, gaia_data)
+            target_info = self._build_target_info(clean_tic, tic_data)
+            
             logger.info(f"Successfully resolved {tic_id}: RA={target_info.ra_j2000_hours:.6f} h, "
-                        f"Dec={target_info.dec_j2000_deg:.6f}°, G={target_info.gaia_g_mag:.2f}")
+                       f"Dec={target_info.dec_j2000_deg:.6f}°, G={target_info.gaia_g_mag:.2f} "
+                       f"(from {target_info.magnitude_source})")
             return target_info
+            
         except Exception as e:
             logger.error(f"Failed to resolve {tic_id}: {e}")
             raise TargetResolutionError(f"Cannot resolve TIC ID {tic_id}: {e}")
@@ -86,89 +114,70 @@ class TICTargetResolver:
                 'ra_deg': float(tic_row.get('ra', 0)),
                 'dec_deg': float(tic_row.get('dec', 0)),
                 'tess_mag': float(tic_row.get('Tmag', 99)) if tic_row.get('Tmag') else None,
+                'gaia_g_mag': float(tic_row.get('GAIAmag', 99)) if tic_row.get('GAIAmag') else None,
                 'gaia_id': str(tic_row.get('GAIA', '')) if tic_row.get('GAIA') else None,
                 'object_type': str(tic_row.get('objType', '')) if tic_row.get('objType') else None,
                 'pm_ra': float(tic_row.get('pmRA', 0)) if tic_row.get('pmRA') else None,
                 'pm_dec': float(tic_row.get('pmDEC', 0)) if tic_row.get('pmDEC') else None
             }
+            
             logger.debug(f"TIC query successful: RA={tic_data['ra_deg']:.6f}°, Dec={tic_data['dec_deg']:.6f}°")
             
             return tic_data
         
         except Exception as e:
             raise TargetResolutionError(f"TIC catalog query failed: {e}")
+            
+    def _build_target_info(self, tic_id: str, tic_data: Dict[str, Any]):
+        # Convert RA from degrees to hours
+        ra_hours = tic_data['ra_deg'] / 15.0
         
-        
-    def _cross_match_gaia(self, tic_data: Dict[str, Any]):
-        logger.debug("Cross-matching with Gaia catalog")
-        
-        try:
-            coord = SkyCoord(
-                ra=tic_data['ra_deg'] * u.degree,
-                dec=tic_data['dec_deg'] * u.degree,
-                frame='icrs'
-            )
-            
-            gaia_table = Gaia.cone_search_async(
-                coordinate=coord, 
-                radius=5 * u.arcsec
-            ).get_results()
-            
-            if len(gaia_table) == 0:
-                logger.warning(f"No Gaia sources found near TIC position")
-                return {
-                    'gaia_g_mag': 15.0,
-                    'gaia_source_id': None
-                }
-            gaia_table.sort('phot_g_mean_mag')
-            gaia_row = gaia_table[0]
-            
-            gaia_data = {
-                'gaia_g_mag': float(gaia_row['phot_g_mean_mag']),
-                'gaia_source_id': str(gaia_row['source_id']),
-                'gaia_ra_deg': float(gaia_row['ra']),
-                'gaia_dec_deg': float(gaia_row['dec'])
-            }
-            logger.debug(f"Gaia cross-match successful: G={gaia_data['gaia_g_mag']:.2f}")
-            return gaia_data
-        
-        except Exception as e:
-            logger.warning(f"Gaia cross-match failed: {e}")
-            return {
-                'gaia_g_mag': 15.0,
-                'gaia_source_id': None
-            }
-            
-    def _build_target_info(self, tic_id: str, tic_data: Dict[str, Any],
-                           gaia_data: Dict[str, Any]):
-        coord_diff = ((gaia_data['gaia_ra_deg'] - tic_data['ra_deg']) ** 2 +
-                      (gaia_data['gaia_dec_deg'] - tic_data['dec_deg']) ** 2) ** 0.5
-        
-        if coord_diff < 2.0 / 3600.0:
-            ra_deg = gaia_data['gaia_ra_deg']
-            dec_deg = gaia_data['gaia_dec_deg']
-            logger.debug(f"Using Gaia coordinates (close match)")
-            
-        else:
-            ra_deg = tic_data['ra_deg']
-            dec_deg = tic_data['dec_deg']
-            
-        ra_hours = ra_deg / 15.0
+        # Determine Gaia G magnitude with fallback hierarchy
+        gaia_g_mag, mag_source = self._get_gaia_magnitude(tic_data)
         
         return TargetInfo(
             tic_id=f"TIC-{tic_id}",
             ra_j2000_hours=ra_hours,
-            dec_j2000_deg=dec_deg,
-            gaia_g_mag=gaia_data.get('gaia_g_mag'),
-            gaia_source_id=gaia_data.get('gaia_source_id'),
+            dec_j2000_deg=tic_data['dec_deg'],
+            gaia_g_mag=gaia_g_mag,
+            gaia_source_id=tic_data.get('gaia_id'),
             tess_mag=tic_data.get('tess_mag'),
             object_type=tic_data.get('object_type'),
             proper_motion_ra=tic_data.get('pm_ra'),
-            proper_motion_dec=tic_data.get('pm_dec')
+            proper_motion_dec=tic_data.get('pm_dec'),
+            magnitude_source=mag_source
         )
+    
+    def _get_gaia_magnitude(self, tic_data: Dict[str, Any]) -> Tuple[float, str]:
+        """
+        Get Gaia G magnitude using fallback hierarchy:
+        1. Direct GAIAmag from TIC
+        2. Convert from Tmag if available
+        3. Use configured default
+        """
+        
+        # First choice: Direct Gaia magnitude from TIC
+        if tic_data.get('gaia_g_mag') is not None and tic_data['gaia_g_mag'] < 50:
+            logger.debug(f"Using direct GAIAmag from TIC: {tic_data['gaia_g_mag']:.2f}")
+            return tic_data['gaia_g_mag'], "TIC-GAIAmag"
+        
+        # Second choice: Convert from TESS magnitude
+        if (self.config['gaia_magnitude']['use_tmag_conversion'] and 
+            tic_data.get('tess_mag') is not None and 
+            tic_data['tess_mag'] < 50):
+            
+            converted_g = tic_data['tess_mag'] + self.config['gaia_magnitude']['tmag_to_gmag_offset']
+            logger.debug(f"Converting Tmag {tic_data['tess_mag']:.2f} to Gmag {converted_g:.2f}")
+            logger.warning(f"Using converted magnitude from Tmag for TIC-{tic_data['tic_id']}: "
+                          f"G≈{converted_g:.2f} (T+{self.config['gaia_magnitude']['tmag_to_gmag_offset']})")
+            return converted_g, "Tmag-converted"
+        
+        # Last resort: Use default
+        default_g = self.config['gaia_magnitude']['default_fallback']
+        logger.warning(f"No reliable magnitude found for TIC-{tic_data['tic_id']}, using default G={default_g}")
+        return default_g, "default-fallback"
         
     def create_target_json(self, target_info: TargetInfo):
-        
         now = datetime.now()
         
         return {
@@ -176,16 +185,15 @@ class TICTargetResolver:
             "ra_j2000_hours": target_info.ra_j2000_hours,
             "dec_j2000_deg": target_info.dec_j2000_deg,
             "gaia_g_mag": target_info.gaia_g_mag,
+            "magnitude_source": target_info.magnitude_source,
             "session_id": now.strftime("%Y%m%d_%H%M%S"),
             "timestamp": now.isoformat(),
-            "gaia_source_id":target_info.gaia_source_id ,
+            "gaia_source_id": target_info.gaia_source_id,
             "tess_mag": target_info.tess_mag,
             "object_type": target_info.object_type
         }
     
 
-def resolve_target(tic_id: str):
-    resolver = TICTargetResolver()
+def resolve_target(tic_id: str, config_loader=None):
+    resolver = TICTargetResolver(config_loader)
     return resolver.resolve_tic_id(tic_id)
-
-    

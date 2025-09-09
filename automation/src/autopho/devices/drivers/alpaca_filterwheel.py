@@ -51,7 +51,7 @@ class AlpacaFilterWheelDriver:
             return False
         
     def _build_filter_map(self):
-        code_map = ['C', 'B', 'G', 'R', 'L', 'I', 'H']
+        code_map = ['L', 'B', 'G', 'R', 'C', 'I', 'H']
         self.filter_map = {}
         
         for i, code in enumerate(code_map[:len(self.filter_names)]):
@@ -139,7 +139,7 @@ class AlpacaFilterWheelDriver:
             return {'connected': True, 'error': str(e)}
         
     def get_filter_code_from_position(self, position: int) -> Optional[str]:
-        code_map = ['C', 'B', 'G', 'R', 'L', 'I', 'H']
+        code_map = ['L', 'B', 'G', 'R', 'C', 'I', 'H']
         if 0 <= position < len(code_map):
             return code_map[position]
         return None
