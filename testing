@@ -8,6 +8,7 @@ import time
 import threading
 from datetime import datetime
 from typing import Optional, Dict, Any
+import fcntl
 
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
@@ -42,19 +43,37 @@ class TelescopeMirror:
         self.last_timestamp = None
         self.last_coordinates = None
         self.failed_targets = set()  # Track targets that failed to avoid retry loops
+        self.logger = logging.getLogger(__name__)
 
     def check_for_new_target(self) -> Optional[Dict[str, Any]]:
+        """Check for new target with file locking and race condition protection"""
         try:
             if not self.mirror_file.exists():
                 return None
+                
+            # Use file locking to prevent race conditions
             with open(self.mirror_file, 'r') as f:
-                data = json.load(f)
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)  # Non-blocking shared lock
+                    data = json.load(f)
+                except (BlockingIOError, OSError):
+                    # File is locked by another process, skip this check
+                    self.logger.debug("Mirror file locked by another process, skipping")
+                    return None
+                finally:
+                    try:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    except:
+                        pass
+            
             latest_move = data.get('latest_move')
             if not latest_move:
                 return None
+                
             timestamp_str = latest_move.get('timestamp')
             if not timestamp_str:
                 return None
+                
             timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
             
             # Skip if we've already processed this timestamp or it failed
@@ -64,26 +83,43 @@ class TelescopeMirror:
                 
             ra_deg = latest_move.get('ra_deg')
             dec_deg = latest_move.get('dec_deg')
-            if ra_deg is not None and dec_deg is not None:
-                ra_hours = ra_deg / 15.0
-                new_target = {
-                    'timestamp': timestamp,
-                    'ra_hours': ra_hours,
-                    'dec_deg': dec_deg,
-                    'ra_deg': ra_deg,
-                    'source': 'mirrored_telescope',
-                    'target_key': target_key
-                }
-                self.last_timestamp = timestamp
-                self.last_coordinates = (ra_hours, dec_deg)
-                return new_target
+            
+            if ra_deg is None or dec_deg is None:
+                self.logger.warning("Missing coordinates in mirror file")
+                return None
+                
+            # Validate coordinates are reasonable
+            if not (0 <= ra_deg <= 360) or not (-90 <= dec_deg <= 90):
+                self.logger.error(f"Invalid coordinates in mirror file: RA={ra_deg}°, Dec={dec_deg}°")
+                self.failed_targets.add(target_key)
+                return None
+            
+            ra_hours = ra_deg / 15.0
+            new_target = {
+                'timestamp': timestamp,
+                'ra_hours': ra_hours,
+                'dec_deg': dec_deg,
+                'ra_deg': ra_deg,
+                'source': 'mirrored_telescope',
+                'target_key': target_key
+            }
+            self.last_timestamp = timestamp
+            self.last_coordinates = (ra_hours, dec_deg)
+            return new_target
+            
+        except json.JSONDecodeError as e:
+            self.logger.warning(f"Invalid JSON in mirror file: {e}")
         except Exception as e:
-            logging.getLogger(__name__).warning(f"Error reading mirror file: {e}")
+            self.logger.warning(f"Error reading mirror file: {e}")
         return None
     
     def mark_target_failed(self, target_key: str):
         """Mark a target as failed to avoid retry loops"""
         self.failed_targets.add(target_key)
+        # Limit the size of failed targets set to prevent memory growth
+        if len(self.failed_targets) > 100:
+            # Remove oldest failed targets (simple FIFO approximation)
+            self.failed_targets = set(list(self.failed_targets)[-50:])
 
     def get_current_target(self) -> Optional[Dict[str, Any]]:
         if self.last_coordinates:
@@ -101,6 +137,10 @@ class SpectroscopyImagingSession(ImagingSession):
     def __init__(self, camera_manager, corrector, config_loader, target_info: TargetInfo,
                  ignore_twilight: bool = False, exposure_override: Optional[float] = None,
                  dry_run: bool = False):
+        
+        self.dry_run = dry_run
+        self.logger = logging.getLogger(__name__)
+        
         # Calculate exposure based on magnitude if not overridden
         if exposure_override is None and hasattr(target_info, 'gaia_g_mag'):
             # Simple exposure calculation for spectroscopy: brighter = shorter exposure
@@ -109,38 +149,72 @@ class SpectroscopyImagingSession(ImagingSession):
             mag_diff = target_info.gaia_g_mag - 12.0
             calculated_exp = base_exp * (2.5 ** mag_diff)  # 2.5x per magnitude
             exposure_override = max(1.0, min(calculated_exp, 300.0))  # Clamp 1-300s
+            self.logger.debug(f"Calculated exposure time: {exposure_override:.1f}s for magnitude {target_info.gaia_g_mag}")
         
-        super().__init__(camera_manager, corrector, config_loader, target_info,
-                         filter_code='C', ignore_twilight=ignore_twilight,
-                         exposure_override=exposure_override)
-        self.logger = logging.getLogger(__name__)
+        # Override camera selection for spectroscopy - use guide camera as main
+        if camera_manager and not dry_run:
+            guide_camera = camera_manager.get_guide_camera()
+            if not guide_camera:
+                raise ImagingSessionError("Guide camera not found for spectroscopy")
+            if not guide_camera.connected and not guide_camera.connect():
+                raise ImagingSessionError("Failed to connect to guide camera")
+            
+            # Temporarily replace main camera with guide camera for session
+            original_main = camera_manager.cameras.get('main')
+            camera_manager.cameras['main'] = guide_camera
+            
+        try:
+            # Initialize parent with 'C' filter (clear) for spectroscopy
+            super().__init__(camera_manager, corrector, config_loader, target_info,
+                             filter_code='C', ignore_twilight=ignore_twilight,
+                             exposure_override=exposure_override)
+        finally:
+            # Restore original main camera mapping
+            if camera_manager and not dry_run and 'original_main' in locals():
+                if original_main:
+                    camera_manager.cameras['main'] = original_main
+                else:
+                    camera_manager.cameras.pop('main', None)
+        
+        # Update acquisition settings for tighter spectroscopy requirements
+        if hasattr(self, 'acquisition_config'):
+            # Tighten acquisition threshold for spectroscopy (fiber alignment critical)
+            self.acquisition_config['max_total_offset_arcsec'] = 1.0
+            self.logger.debug("Tightened acquisition threshold to 1.0\" for spectroscopy")
+        
         self._running = False
         self._stop_event = threading.Event()
-        self.dry_run = dry_run
         
-        # Use guide camera only
-        if camera_manager and not dry_run:
-            self.main_camera = camera_manager.get_guide_camera()
-            if not self.main_camera:
-                raise ImagingSessionError("Guide camera not found for spectroscopy")
-            if not self.main_camera.connected and not self.main_camera.connect():
-                raise ImagingSessionError("Failed to connect to guide camera")
+        if dry_run:
+            self.main_camera = None
+            self.logger.info("DRY RUN MODE - No camera operations will be performed")
 
     def run_simulated_acquisition(self):
-        """Simulate acquisition + science frames (5x2s each)"""
-        self.logger.info("Starting simulated acquisition/science sequence...")
+        """Simulate acquisition + science frames for testing"""
+        self.logger.info("Starting simulated spectroscopy sequence...")
         self._running = True
         
         try:
-            for phase in ["acquisition", "science"]:
-                if self._stop_event.is_set():
-                    break
-                self.logger.info(f"Phase: {phase}")
-                for i in range(5):
+            # Simulate acquisition phase
+            if self.acquisition_enabled:
+                self.logger.info("Phase: acquisition")
+                for i in range(3):
                     if self._stop_event.is_set():
                         break
-                    self.logger.info(f"  Frame {i+1}/5, exposure 2s")
+                    self.logger.info(f"  ACQ Frame {i+1}/3, exposure 3s")
                     time.sleep(0.1)  # fast-forward in simulation
+                
+                self.logger.info("Acquisition complete, switching to science...")
+                
+            # Simulate science phase  
+            self.logger.info("Phase: science")
+            for i in range(5):
+                if self._stop_event.is_set():
+                    break
+                exposure_time = self.exposure_override or 30.0
+                self.logger.info(f"  SCI Frame {i+1}/5, exposure {exposure_time:.1f}s")
+                time.sleep(0.1)  # fast-forward in simulation
+                
         finally:
             self._running = False
             
@@ -177,6 +251,76 @@ class SpectroscopyImagingSession(ImagingSession):
         return self._running
 
 
+class SpectroscopyCorrector(PlatesolveCorrector):
+    """Platesolve corrector with rotator functionality stripped for spectroscopy"""
+    
+    def __init__(self, telescope_driver, config_loader):
+        # Initialize without rotator driver
+        super().__init__(telescope_driver, config_loader, rotator_driver=None)
+        
+        # Use spectro-specific platesolve path if configured
+        paths_config = config_loader.get_config('paths')
+        self.json_file_path = Path(paths_config.get('spectro_platesolve_json', 
+                                                   paths_config.get('platesolve_json')))
+        
+        logger.info("SpectroscopyCorrector initialized (no rotator support)")
+    
+    def process_platesolve_data(self, data: Dict[str, Any]):
+        """Override to ignore rotation data for spectroscopy"""
+        try:
+            ra_offset_deg = float(data['ra_offset']["0"])
+            dec_offset_deg = float(data['dec_offset']["0"])
+            # Ignore rotation offset for spectroscopy
+            rot_offset_deg = 0.0  
+            base_settle_time = float(data['exptime']["0"])
+            
+            ra_offset_arcsec = ra_offset_deg * 3600.0
+            dec_offset_arcsec = dec_offset_deg * 3600.0
+            total_offset_arcsec = (ra_offset_arcsec**2 + dec_offset_arcsec**2)**0.5
+            
+            logger.debug(f"Spectro offsets: RA={ra_offset_arcsec:.2f}\", Dec={dec_offset_arcsec:.2f}\", "
+                         f"Total={total_offset_arcsec:.2f}\" (rotation ignored)")
+            
+            thresholds = self.platesolve_config.get('correction_thresholds', {})
+            min_threshold = thresholds.get('min_arcsec', 0.5)  # Tighter for spectroscopy
+            small_threshold = thresholds.get('small_offset', 0.5)
+            large_threshold = thresholds.get('large_offset', 3.0)
+            
+            if total_offset_arcsec < min_threshold:
+                scale_factor = 0.0
+                settle_time = 2.0
+                logger.debug("Offset below minimum threshold, no correction")
+            elif total_offset_arcsec < small_threshold:
+                scale_factor = 0.0
+                settle_time = base_settle_time * 3.0
+                logger.debug("Small offset, no correction applied")
+            elif total_offset_arcsec > large_threshold:
+                scale_factor = 0.9
+                settle_time = base_settle_time * 4.0
+                logger.debug("Large offset, reduced correction applied")
+            else:
+                scale_factor = self.platesolve_config.get('correction_scale_factor', 1.0)
+                settle_time = base_settle_time * 5.0
+                logger.debug("Normal offset, full correction applied")
+                
+            ra_offset_deg *= scale_factor
+            dec_offset_deg *= scale_factor
+            
+            settle_limits = self.platesolve_config.get('settle_time', {})
+            min_settle = settle_limits.get('min', 5)
+            max_settle = settle_limits.get('max', 60)  # Shorter for spectroscopy
+            settle_time = max(min_settle, min(max_settle, settle_time))
+            
+            return ra_offset_deg, dec_offset_deg, rot_offset_deg, settle_time
+            
+        except KeyError as e:
+            logger.error(f"Missing key in platesolve data: {e}")
+            raise PlatesolveCorrectorError(f"Invalid platesolve data format: missing {e}")
+        except (ValueError, TypeError) as e:
+            logger.error(f"Invalid data type in platesolve data: {e}")
+            raise PlatesolveCorrectorError(f"Invalid platesolve data values: {e}")
+
+
 class SpectroscopySession:
     """Manages spectroscopy sessions with optional mirror support"""
 
@@ -194,6 +338,10 @@ class SpectroscopySession:
         self.current_session = None
         self.current_target = None
         self.logger = logging.getLogger(__name__)
+        
+        # Initialize observability checker for target validation
+        observatory_config = config_loader.get_config('observatory')
+        self.obs_checker = ObservabilityChecker(observatory_config)
 
     def start_monitoring(self, poll_interval: float = 10.0):
         self.logger.info("="*60)
@@ -212,13 +360,19 @@ class SpectroscopySession:
                         self.logger.info("NEW TARGET DETECTED")
                         self.logger.info(f"RA={new_target['ra_hours']:.6f} h, Dec={new_target['dec_deg']:.6f}°")
                         
+                        # Check observability before attempting to use target
+                        if not self._validate_target_observability(new_target):
+                            self.logger.warning("Target not observable, marking as failed")
+                            self.mirror.mark_target_failed(new_target['target_key'])
+                            continue
+                        
                         # Properly stop current session before starting new one
                         if self.current_session and self.current_session.is_running():
                             self.logger.info("Stopping current session...")
                             try:
                                 self.current_session.stop_session()
                                 # Wait a moment for cleanup
-                                time.sleep(1.0)
+                                time.sleep(2.0)
                             except Exception as e:
                                 self.logger.warning(f"Error stopping session: {e}")
                             finally:
@@ -253,6 +407,27 @@ class SpectroscopySession:
                     self.current_session = None
             self.logger.info("Spectroscopy monitoring ended")
 
+    def _validate_target_observability(self, target_data: Dict[str, Any]) -> bool:
+        """Check if target is observable before attempting to use it"""
+        try:
+            obs_status = self.obs_checker.check_target_observability(
+                target_data['ra_hours'],
+                target_data['dec_deg'],
+                ignore_twilight=self.ignore_twilight
+            )
+            
+            if obs_status.observable:
+                self.logger.debug(f"Target is observable (alt={obs_status.target_altitude:.1f}°)")
+                return True
+            else:
+                reasons = "; ".join(obs_status.reasons)
+                self.logger.info(f"Target not observable: {reasons}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error checking target observability: {e}")
+            return False
+
     def _start_new_session(self, target_data: Dict[str, Any]) -> bool:
         """Start new session with proper error handling and safety checks"""
         try:
@@ -264,11 +439,6 @@ class SpectroscopySession:
                 magnitude_source="spectro-default"
             )
 
-            # Safety check: validate coordinates are reasonable
-            if not (0 <= target_data['ra_hours'] <= 24) or not (-90 <= target_data['dec_deg'] <= 90):
-                self.logger.error(f"Invalid coordinates: RA={target_data['ra_hours']}, Dec={target_data['dec_deg']}")
-                return False
-
             # Slew telescope (with safety checks)
             if not self.dry_run:
                 self.logger.info("Slewing telescope to target...")
@@ -277,16 +447,6 @@ class SpectroscopySession:
                 ):
                     self.logger.error("Failed to slew to target")
                     return False
-                    
-                # Apply platesolve correction if available
-                if self.corrector:
-                    self.logger.info("Applying platesolve correction...")
-                    try:
-                        # This would typically involve taking a test image and correcting
-                        # For now, we just log that correction is available
-                        self.logger.info("Platesolve corrector available for pointing refinement")
-                    except Exception as e:
-                        self.logger.warning(f"Platesolve correction failed: {e}")
             else:
                 self.logger.info(f"DRY RUN: Would slew to RA={target_info.ra_j2000_hours:.6f}h, Dec={target_info.dec_j2000_deg:.6f}°")
 
@@ -320,7 +480,7 @@ def main():
     parser.add_argument("--config-dir", default="config")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG","INFO","WARNING","ERROR"])
     parser.add_argument("--ignore-twilight", action="store_true", 
-                        help="Bypass twilight checks for daytime observation")
+                        help="Bypass twilight checks for daytime testing")
     parser.add_argument("--dry-run", action="store_true", 
                         help="Simulate without any hardware movement")
     parser.add_argument("--duration", type=float, help="Duration in hours")
@@ -350,12 +510,12 @@ def main():
                 logger.error("Camera discovery failed")
                 return 1
             
-            # Verify guide camera exists
+            # Verify guide camera exists for spectroscopy
             guide_camera = camera_manager.get_guide_camera()
             if not guide_camera:
                 logger.error("Guide camera not found - required for spectroscopy")
                 return 1
-            logger.info(f"Using guide camera: {guide_camera.name}")
+            logger.info(f"Using guide camera for spectroscopy: {guide_camera.name}")
 
             logger.info("Connecting to telescope...")
             telescope_driver = AlpacaTelescopeDriver()
@@ -396,11 +556,11 @@ def main():
                 logger.warning(f"Cover error: {e} - continuing without")
                 cover_driver = None
 
-            # Initialize platesolve corrector
-            logger.info("Initializing platesolve corrector...")
+            # Initialize spectroscopy platesolve corrector (no rotator)
+            logger.info("Initializing platesolve corrector for spectroscopy...")
             try:
-                corrector = PlatesolveCorrector(telescope_driver, config_loader, rotator_driver=None)
-                logger.info("Platesolve corrector initialized")
+                corrector = SpectroscopyCorrector(telescope_driver, config_loader)
+                logger.info("Spectroscopy corrector initialized")
             except Exception as e:
                 logger.warning(f"Corrector initialization failed: {e} - continuing without")
                 corrector = None
