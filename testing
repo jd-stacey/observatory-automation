@@ -103,6 +103,7 @@ class TelescopeMirror:
             self.logger.debug("Mirror file disappeared during read")
         except Exception as e:
             self.logger.warning(f"Error reading mirror file: {e}")
+            self.logger.debug("Full traceback:", exc_info=True)
         return None
     
     def mark_target_failed(self, target_key: str):
