@@ -279,8 +279,14 @@ class SpectroscopyImagingSession(ImagingSession):
             self.acquisition_config.update({
                 'max_total_offset_arcsec': 1.0,  # Tighter tolerance for fiber
                 'max_attempts': 30,  # More attempts for precision
-                'correction_interval': 1  # Check every frame
+                'correction_interval': 1  # Check every frame during acquisition
             })
+            logger.debug("Updated acquisition config for spectroscopy fiber centering")
+        
+        # Note: Still uses same acquisition -> science phase workflow
+        # Platesolve corrections applied (without rotator component)
+        logger.debug(f"Spectroscopy session: acquisition enabled={self.acquisition_enabled}")
+        logger.debug(f"Using camera: {self.main_camera.name if self.main_camera else 'None'}")
 
 def main():
     parser = argparse.ArgumentParser(
