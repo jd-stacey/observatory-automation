@@ -91,6 +91,7 @@ class TelescopeMirror:
                 'source': 'mirrored_telescope',
                 'target_key': target_key
             }
+            self.logger.debug(f"Found new target: RA={ra_hours:.6f}h, Dec={dec_deg:.6f}°, timestamp={timestamp_str}")
             self.last_timestamp = timestamp
             self.last_coordinates = (ra_hours, dec_deg)
             return new_target
