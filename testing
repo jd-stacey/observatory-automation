@@ -8,7 +8,6 @@ import time
 import threading
 from datetime import datetime
 from typing import Optional, Dict, Any
-import fcntl
 
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
@@ -46,25 +45,14 @@ class TelescopeMirror:
         self.logger = logging.getLogger(__name__)
 
     def check_for_new_target(self) -> Optional[Dict[str, Any]]:
-        """Check for new target with file locking and race condition protection"""
+        """Check for new target - relies on atomic writes from writer"""
         try:
             if not self.mirror_file.exists():
                 return None
                 
-            # Use file locking to prevent race conditions
+            # Simple read - writer should use atomic .tmp -> rename pattern
             with open(self.mirror_file, 'r') as f:
-                try:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)  # Non-blocking shared lock
-                    data = json.load(f)
-                except (BlockingIOError, OSError):
-                    # File is locked by another process, skip this check
-                    self.logger.debug("Mirror file locked by another process, skipping")
-                    return None
-                finally:
-                    try:
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-                    except:
-                        pass
+                data = json.load(f)
             
             latest_move = data.get('latest_move')
             if not latest_move:
@@ -109,6 +97,9 @@ class TelescopeMirror:
             
         except json.JSONDecodeError as e:
             self.logger.warning(f"Invalid JSON in mirror file: {e}")
+        except FileNotFoundError:
+            # File disappeared between exists check and read - normal race condition
+            self.logger.debug("Mirror file disappeared during read")
         except Exception as e:
             self.logger.warning(f"Error reading mirror file: {e}")
         return None
