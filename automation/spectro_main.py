@@ -1,4 +1,3 @@
-
 import sys
 import logging
 from rich.logging import RichHandler
@@ -624,8 +623,7 @@ def main():
             if cover_driver:
                 logger.info("Closing cover...")
                 cover_driver.close_cover()
-            if filter_driver:
-                filter_driver.disconnect()
+            # Skip filter wheel cleanup for spectroscopy
             if telescope_driver:
                 if not args.no_park:
                     logger.info("Parking telescope...")
