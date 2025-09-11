@@ -46,27 +46,43 @@ class TelescopeMirror:
 
     def check_for_new_target(self) -> Optional[Dict[str, Any]]:
         """Check for new target - relies on atomic writes from writer"""
+        self.logger.debug(f"=== check_for_new_target() called, checking file: {self.mirror_file} ===")
         try:
             if not self.mirror_file.exists():
+                self.logger.debug("Mirror file does not exist")
                 return None
                 
             # Simple read - writer should use atomic .tmp -> rename pattern
+            self.logger.debug("Reading mirror file...")
             with open(self.mirror_file, 'r') as f:
                 data = json.load(f)
             
             latest_move = data.get('latest_move')
             if not latest_move:
+                self.logger.debug("No latest_move found in mirror file")
                 return None
                 
             timestamp_str = latest_move.get('timestamp')
             if not timestamp_str:
+                self.logger.debug("No timestamp in latest_move")
                 return None
-                
+            
+            self.logger.debug(f"Raw timestamp from file: '{timestamp_str}'")
             timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            self.logger.debug(f"Parsed timestamp: {timestamp}")
             
             # Skip if we've already processed this timestamp or it failed
             target_key = f"{timestamp.isoformat()}"
-            if (self.last_timestamp is not None and timestamp <= self.last_timestamp) or target_key in self.failed_targets:
+            self.logger.debug(f"Generated target_key: '{target_key}'")
+            self.logger.debug(f"Current last_timestamp: {self.last_timestamp}")
+            self.logger.debug(f"Failed targets set has {len(self.failed_targets)} entries: {list(self.failed_targets)}")
+            
+            if self.last_timestamp is not None and timestamp <= self.last_timestamp:
+                self.logger.debug(f"SKIPPING: Target timestamp {timestamp} <= last processed {self.last_timestamp}")
+                return None
+                
+            if target_key in self.failed_targets:
+                self.logger.debug(f"SKIPPING: Target {target_key} previously failed")
                 return None
                 
             ra_deg = latest_move.get('ra_deg')
@@ -91,7 +107,7 @@ class TelescopeMirror:
                 'source': 'mirrored_telescope',
                 'target_key': target_key
             }
-            self.logger.debug(f"Found new target: RA={ra_hours:.6f}h, Dec={dec_deg:.6f}°, timestamp={timestamp_str}")
+            self.logger.debug(f"SUCCESS: Found new target: RA={ra_hours:.6f}h, Dec={dec_deg:.6f}°, timestamp={timestamp_str}")
             self.last_timestamp = timestamp
             self.last_coordinates = (ra_hours, dec_deg)
             return new_target
@@ -104,6 +120,8 @@ class TelescopeMirror:
         except Exception as e:
             self.logger.warning(f"Error reading mirror file: {e}")
             self.logger.debug("Full traceback:", exc_info=True)
+        
+        self.logger.debug("=== check_for_new_target() returning None ===")
         return None
     
     def mark_target_failed(self, target_key: str):
