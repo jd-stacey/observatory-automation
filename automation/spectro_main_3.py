@@ -1,0 +1,523 @@
+import sys
+import logging
+from rich.logging import RichHandler
+import argparse
+from pathlib import Path
+import json
+import time
+import threading
+from datetime import datetime
+from typing import Optional, Dict, Any
+
+sys.path.insert(0, str(Path(__file__).parent / 'src'))
+
+from autopho.config.loader import ConfigLoader, ConfigurationError
+from autopho.targets.resolver import TICTargetResolver, TargetInfo
+from autopho.devices.drivers.alpaca_telescope import AlpacaTelescopeDriver
+from autopho.devices.drivers.alpaca_cover import AlpacaCoverDriver
+from autopho.devices.camera import CameraManager, CameraError
+from autopho.targets.observability import ObservabilityChecker
+from autopho.platesolving.corrector import PlatesolveCorrector
+from autopho.imaging.session import ImagingSession, ImagingSessionError
+
+
+def setup_logging(log_level: str = "INFO"):
+    numeric_level = getattr(logging, log_level.upper(), None)
+    if not isinstance(numeric_level, int):
+        raise ValueError(f"Invalid log level: {log_level}")
+    
+    logging.basicConfig(
+        level=numeric_level,
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=[RichHandler(rich_tracebacks=True, markup=True, show_path=True)]
+    )
+
+
+class TelescopeMirror:
+    """Handles mirroring coordinates from another telescope via JSON file"""
+
+    def __init__(self, mirror_file: str):
+        self.mirror_file = Path(mirror_file)
+        self.last_timestamp = None
+        self.last_coordinates = None
+        self.failed_targets = set()  # Track targets that failed to avoid retry loops
+
+    def check_for_new_target(self) -> Optional[Dict[str, Any]]:
+        try:
+            if not self.mirror_file.exists():
+                return None
+            with open(self.mirror_file, 'r') as f:
+                data = json.load(f)
+            latest_move = data.get('latest_move')
+            if not latest_move:
+                return None
+            timestamp_str = latest_move.get('timestamp')
+            if not timestamp_str:
+                return None
+            timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            
+            # Skip if we've already processed this timestamp or it failed
+            target_key = f"{timestamp.isoformat()}"
+            if (self.last_timestamp is not None and timestamp <= self.last_timestamp) or target_key in self.failed_targets:
+                return None
+                
+            ra_deg = latest_move.get('ra_deg')
+            dec_deg = latest_move.get('dec_deg')
+            if ra_deg is not None and dec_deg is not None:
+                ra_hours = ra_deg / 15.0
+                new_target = {
+                    'timestamp': timestamp,
+                    'ra_hours': ra_hours,
+                    'dec_deg': dec_deg,
+                    'ra_deg': ra_deg,
+                    'source': 'mirrored_telescope',
+                    'target_key': target_key
+                }
+                self.last_timestamp = timestamp
+                self.last_coordinates = (ra_hours, dec_deg)
+                return new_target
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Error reading mirror file: {e}")
+        return None
+    
+    def mark_target_failed(self, target_key: str):
+        """Mark a target as failed to avoid retry loops"""
+        self.failed_targets.add(target_key)
+
+    def get_current_target(self) -> Optional[Dict[str, Any]]:
+        if self.last_coordinates:
+            return {
+                'ra_hours': self.last_coordinates[0],
+                'dec_deg': self.last_coordinates[1],
+                'source': 'mirrored_telescope'
+            }
+        return None
+
+
+class SpectroscopyImagingSession(ImagingSession):
+    """Imaging session using only the guide camera for spectroscopy"""
+
+    def __init__(self, camera_manager, corrector, config_loader, target_info: TargetInfo,
+                 ignore_twilight: bool = False, exposure_override: Optional[float] = None,
+                 dry_run: bool = False):
+        # Calculate exposure based on magnitude if not overridden
+        if exposure_override is None and hasattr(target_info, 'gaia_g_mag'):
+            # Simple exposure calculation for spectroscopy: brighter = shorter exposure
+            # Base exposure of 30s for mag 12, scaled exponentially
+            base_exp = 30.0
+            mag_diff = target_info.gaia_g_mag - 12.0
+            calculated_exp = base_exp * (2.5 ** mag_diff)  # 2.5x per magnitude
+            exposure_override = max(1.0, min(calculated_exp, 300.0))  # Clamp 1-300s
+        
+        super().__init__(camera_manager, corrector, config_loader, target_info,
+                         filter_code='C', ignore_twilight=ignore_twilight,
+                         exposure_override=exposure_override)
+        self.logger = logging.getLogger(__name__)
+        self._running = False
+        self._stop_event = threading.Event()
+        self.dry_run = dry_run
+        
+        # Use guide camera only
+        if camera_manager and not dry_run:
+            self.main_camera = camera_manager.get_guide_camera()
+            if not self.main_camera:
+                raise ImagingSessionError("Guide camera not found for spectroscopy")
+            if not self.main_camera.connected and not self.main_camera.connect():
+                raise ImagingSessionError("Failed to connect to guide camera")
+
+    def run_simulated_acquisition(self):
+        """Simulate acquisition + science frames (5x2s each)"""
+        self.logger.info("Starting simulated acquisition/science sequence...")
+        self._running = True
+        
+        try:
+            for phase in ["acquisition", "science"]:
+                if self._stop_event.is_set():
+                    break
+                self.logger.info(f"Phase: {phase}")
+                for i in range(5):
+                    if self._stop_event.is_set():
+                        break
+                    self.logger.info(f"  Frame {i+1}/5, exposure 2s")
+                    time.sleep(0.1)  # fast-forward in simulation
+        finally:
+            self._running = False
+            
+    def start_imaging_loop_async(self, duration_hours: float = 1.0):
+        """Start imaging loop in separate thread"""
+        def imaging_worker():
+            try:
+                if self.dry_run:
+                    self.run_simulated_acquisition()
+                else:
+                    self.start_imaging_loop(duration_hours=duration_hours)
+            except Exception as e:
+                self.logger.error(f"Imaging loop error: {e}")
+            finally:
+                self._running = False
+        
+        self._running = True
+        self.imaging_thread = threading.Thread(target=imaging_worker, daemon=True)
+        self.imaging_thread.start()
+            
+    def stop_session(self):
+        """Stop the current imaging session"""
+        self.logger.info("Stopping spectroscopy session...")
+        self._stop_event.set()
+        self._running = False
+        
+        # Wait for imaging thread to finish (with timeout)
+        if hasattr(self, 'imaging_thread') and self.imaging_thread.is_alive():
+            self.imaging_thread.join(timeout=5.0)
+            if self.imaging_thread.is_alive():
+                self.logger.warning("Imaging thread did not stop cleanly")
+    
+    def is_running(self) -> bool:
+        return self._running
+
+
+class SpectroscopySession:
+    """Manages spectroscopy sessions with optional mirror support"""
+
+    def __init__(self, camera_manager, corrector, config_loader, telescope_driver,
+                 mirror_file: str = None, ignore_twilight: bool = False,
+                 dry_run: bool = False):
+        self.camera_manager = camera_manager
+        self.corrector = corrector
+        self.config_loader = config_loader
+        self.telescope_driver = telescope_driver
+        self.ignore_twilight = ignore_twilight
+        self.dry_run = dry_run
+
+        self.mirror = TelescopeMirror(mirror_file) if mirror_file else None
+        self.current_session = None
+        self.current_target = None
+        self.logger = logging.getLogger(__name__)
+
+    def start_monitoring(self, poll_interval: float = 10.0):
+        self.logger.info("="*60)
+        self.logger.info("STARTING SPECTROSCOPY MONITORING")
+        self.logger.info("="*60)
+        if self.mirror:
+            self.logger.info(f"Monitoring mirror file: {self.mirror.mirror_file}")
+        if self.dry_run:
+            self.logger.info("DRY RUN MODE - No telescope movement")
+
+        try:
+            while True:
+                if self.mirror:
+                    new_target = self.mirror.check_for_new_target()
+                    if new_target:
+                        self.logger.info("NEW TARGET DETECTED")
+                        self.logger.info(f"RA={new_target['ra_hours']:.6f} h, Dec={new_target['dec_deg']:.6f}°")
+                        
+                        # Properly stop current session before starting new one
+                        if self.current_session and self.current_session.is_running():
+                            self.logger.info("Stopping current session...")
+                            try:
+                                self.current_session.stop_session()
+                                # Wait a moment for cleanup
+                                time.sleep(1.0)
+                            except Exception as e:
+                                self.logger.warning(f"Error stopping session: {e}")
+                            finally:
+                                self.current_session = None
+                                self.current_target = None
+                        
+                        # Try to start new session
+                        if not self._start_new_session(new_target):
+                            # Mark as failed to avoid retry loops
+                            self.mirror.mark_target_failed(new_target['target_key'])
+                
+                # Clean up finished sessions
+                if self.current_session and not self.current_session.is_running():
+                    self.logger.info("Current session finished")
+                    self.current_session = None
+                    self.current_target = None
+                            
+                time.sleep(poll_interval)
+                
+        except KeyboardInterrupt:
+            self.logger.info("Monitoring interrupted by user")
+        except Exception as e:
+            self.logger.error(f"Critical error in monitoring loop: {e}")
+        finally:
+            # Cleanup current session
+            if self.current_session:
+                try:
+                    self.current_session.stop_session()
+                except Exception as e:
+                    self.logger.warning(f"Error during session cleanup: {e}")
+                finally:
+                    self.current_session = None
+            self.logger.info("Spectroscopy monitoring ended")
+
+    def _start_new_session(self, target_data: Dict[str, Any]) -> bool:
+        """Start new session with proper error handling and safety checks"""
+        try:
+            target_info = TargetInfo(
+                tic_id=f"SPECTRO-{target_data['timestamp'].strftime('%Y%m%d_%H%M%S')}",
+                ra_j2000_hours=target_data['ra_hours'],
+                dec_j2000_deg=target_data['dec_deg'],
+                gaia_g_mag=12.0,
+                magnitude_source="spectro-default"
+            )
+
+            # Safety check: validate coordinates are reasonable
+            if not (0 <= target_data['ra_hours'] <= 24) or not (-90 <= target_data['dec_deg'] <= 90):
+                self.logger.error(f"Invalid coordinates: RA={target_data['ra_hours']}, Dec={target_data['dec_deg']}")
+                return False
+
+            # Slew telescope (with safety checks)
+            if not self.dry_run:
+                self.logger.info("Slewing telescope to target...")
+                if not self.telescope_driver or not self.telescope_driver.slew_to_coordinates(
+                    target_info.ra_j2000_hours, target_info.dec_j2000_deg
+                ):
+                    self.logger.error("Failed to slew to target")
+                    return False
+                    
+                # Apply platesolve correction if available
+                if self.corrector:
+                    self.logger.info("Applying platesolve correction...")
+                    try:
+                        # This would typically involve taking a test image and correcting
+                        # For now, we just log that correction is available
+                        self.logger.info("Platesolve corrector available for pointing refinement")
+                    except Exception as e:
+                        self.logger.warning(f"Platesolve correction failed: {e}")
+            else:
+                self.logger.info(f"DRY RUN: Would slew to RA={target_info.ra_j2000_hours:.6f}h, Dec={target_info.dec_j2000_deg:.6f}°")
+
+            self.logger.info("Starting spectroscopy imaging session...")
+            session = SpectroscopyImagingSession(
+                camera_manager=self.camera_manager,
+                corrector=self.corrector,
+                config_loader=self.config_loader,
+                target_info=target_info,
+                ignore_twilight=self.ignore_twilight,
+                dry_run=self.dry_run
+            )
+
+            # Start imaging asynchronously so monitoring can continue
+            session.start_imaging_loop_async(duration_hours=1.0)
+
+            self.current_session = session
+            self.current_target = target_data
+            self.logger.info("Session started successfully")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to start new session: {e}")
+            return False
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Automated Spectroscopy")
+    parser.add_argument("target_mode", choices=["tic", "coords", "mirror"])
+    parser.add_argument("target_value", nargs="?", help="TIC ID, coordinates, or mirror file")
+    parser.add_argument("--config-dir", default="config")
+    parser.add_argument("--log-level", default="INFO", choices=["DEBUG","INFO","WARNING","ERROR"])
+    parser.add_argument("--ignore-twilight", action="store_true", 
+                        help="Bypass twilight checks for daytime observation")
+    parser.add_argument("--dry-run", action="store_true", 
+                        help="Simulate without any hardware movement")
+    parser.add_argument("--duration", type=float, help="Duration in hours")
+    parser.add_argument("--poll-interval", type=float, default=10.0)
+    args = parser.parse_args()
+
+    if args.target_mode in ['tic', 'coords'] and not args.target_value:
+        parser.error(f"Target mode '{args.target_mode}' requires a target value")
+
+    setup_logging(args.log_level)
+    logger = logging.getLogger(__name__)
+
+    # Initialize variables for cleanup
+    camera_manager = None
+    telescope_driver = None
+    cover_driver = None
+    corrector = None
+
+    try:
+        config_loader = ConfigLoader(args.config_dir)
+        config_loader.load_all_configs()
+
+        if not args.dry_run:
+            logger.info("Discovering cameras...")
+            camera_manager = CameraManager()
+            if not camera_manager.discover_cameras(config_loader.get_camera_configs()):
+                logger.error("Camera discovery failed")
+                return 1
+            
+            # Verify guide camera exists
+            guide_camera = camera_manager.get_guide_camera()
+            if not guide_camera:
+                logger.error("Guide camera not found - required for spectroscopy")
+                return 1
+            logger.info(f"Using guide camera: {guide_camera.name}")
+
+            logger.info("Connecting to telescope...")
+            telescope_driver = AlpacaTelescopeDriver()
+            if not telescope_driver.connect(config_loader.get_telescope_config()):
+                logger.error("Failed to connect to telescope")
+                return 1
+            
+            # Safety check: verify telescope is not parked before turning on motor
+            tel_info = telescope_driver.get_telescope_info()
+            if tel_info.get('at_park', False):
+                logger.info("Telescope is parked - unparking...")
+                if not telescope_driver.unpark():
+                    logger.error("Failed to unpark telescope")
+                    return 1
+            
+            if not telescope_driver.motor_on():
+                logger.error("Failed to turn telescope motor on")
+                return 1
+            
+            logger.info(f"Telescope connected: RA={tel_info.get('ra_hours', 0):.6f}h, Dec={tel_info.get('dec_degrees', 0):.6f}°")
+
+            # Cover handling with error recovery
+            logger.info("Connecting to cover...")
+            try:
+                cover_driver = AlpacaCoverDriver()
+                if cover_driver.connect(config_loader.get_cover_config()):
+                    cover_info = cover_driver.get_cover_info()
+                    if cover_info.get('cover_state') != 'Open':
+                        logger.info("Opening cover...")
+                        if not cover_driver.open_cover():
+                            logger.warning("Failed to open cover - continuing anyway")
+                    else:
+                        logger.info("Cover already open")
+                else:
+                    logger.warning("Failed to connect to cover - continuing without")
+                    cover_driver = None
+            except Exception as e:
+                logger.warning(f"Cover error: {e} - continuing without")
+                cover_driver = None
+
+            # Initialize platesolve corrector
+            logger.info("Initializing platesolve corrector...")
+            try:
+                corrector = PlatesolveCorrector(telescope_driver, config_loader, rotator_driver=None)
+                logger.info("Platesolve corrector initialized")
+            except Exception as e:
+                logger.warning(f"Corrector initialization failed: {e} - continuing without")
+                corrector = None
+        else:
+            logger.info("DRY RUN MODE - Simulating hardware initialization")
+
+        if args.target_mode == "mirror":
+            mirror_file = args.target_value or "mirror_telescope.json"
+            logger.info(f"Starting mirror mode with file: {mirror_file}")
+            
+            spectro_session = SpectroscopySession(
+                camera_manager, corrector, config_loader, telescope_driver,
+                mirror_file=mirror_file,
+                ignore_twilight=args.ignore_twilight,
+                dry_run=args.dry_run
+            )
+            spectro_session.start_monitoring(args.poll_interval)
+
+        else:
+            # Single target mode
+            if args.target_mode == "tic":
+                logger.info(f"Resolving TIC target: {args.target_value}")
+                resolver = TICTargetResolver(config_loader)
+                target_info = resolver.resolve_tic_id(args.target_value)
+            else:
+                logger.info(f"Using manual coordinates: {args.target_value}")
+                try:
+                    coords = args.target_value.strip().split()
+                    if len(coords) != 2:
+                        raise ValueError("Expected format: 'RA_HOURS DEC_DEGREES'")
+                    ra, dec = map(float, coords)
+                    
+                    # Validate coordinates
+                    if not (0 <= ra <= 24) or not (-90 <= dec <= 90):
+                        raise ValueError(f"Invalid coordinates: RA={ra}, Dec={dec}")
+                    
+                    target_info = TargetInfo(
+                        tic_id=f"SPECTRO-MANUAL-{ra:.3f}h_{dec:+.3f}d",
+                        ra_j2000_hours=ra,
+                        dec_j2000_deg=dec,
+                        gaia_g_mag=12.0,
+                        magnitude_source="manual-default"
+                    )
+                except (ValueError, AttributeError) as e:
+                    logger.error(f"Invalid coordinates format: {e}")
+                    return 1
+
+            # Check observability for single targets
+            logger.info("Checking target observability...")
+            obs_checker = ObservabilityChecker(config_loader.get_config("observatory"))
+            obs_status = obs_checker.check_target_observability(
+                target_info.ra_j2000_hours,
+                target_info.dec_j2000_deg,
+                ignore_twilight=args.ignore_twilight
+            )
+            logger.info(f"Target altitude: {obs_status.target_altitude:.1f}°")
+            if not obs_status.observable and not args.dry_run:
+                logger.error("Target not observable")
+                return 1
+
+            # Slew to target for single target mode
+            if not args.dry_run and telescope_driver:
+                logger.info("Slewing to target...")
+                if not telescope_driver.slew_to_coordinates(
+                    target_info.ra_j2000_hours, target_info.dec_j2000_deg
+                ):
+                    logger.error("Failed to slew to target")
+                    return 1
+
+            # Start single session
+            session = SpectroscopyImagingSession(
+                camera_manager, corrector, config_loader, target_info,
+                ignore_twilight=args.ignore_twilight,
+                dry_run=args.dry_run
+            )
+            
+            if args.dry_run:
+                session.run_simulated_acquisition()
+            else:
+                session.start_imaging_loop(duration_hours=args.duration or 1)
+
+        logger.info("Spectroscopy complete")
+        return 0
+
+    except Exception as e:
+        logger.error(f"Critical error: {e}")
+        logger.debug("Full traceback:", exc_info=True)
+        return 1
+
+    finally:
+        # Critical cleanup - ensure hardware is safe
+        logger.info("Cleaning up...")
+        try:
+            if camera_manager:
+                logger.info("Shutting down camera coolers...")
+                camera_manager.shutdown_all_coolers()
+        except Exception as e:
+            logger.error(f"Camera cleanup error: {e}")
+        
+        try:
+            if cover_driver:
+                logger.info("Closing cover...")
+                cover_driver.close_cover()
+        except Exception as e:
+            logger.error(f"Cover cleanup error: {e}")
+        
+        try:
+            if telescope_driver:
+                logger.info("Parking telescope...")
+                telescope_driver.park()
+                telescope_driver.motor_off()
+                telescope_driver.disconnect()
+        except Exception as e:
+            logger.error(f"Telescope cleanup error: {e}")
+        
+        logger.info("Program terminated")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

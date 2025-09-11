@@ -580,6 +580,7 @@ class FieldRotationTracker:
                 # Calculate shortest rotation
                 error = (required_position - current_position + 180) % 360 - 180
 
+####            ################## TEMP 
                 logger.debug(f"err={error:.3f}°, thr={move_threshold}°, move={abs(error) > move_threshold}")
 
                 # Defer or perform a 180° reference flip if we’re about to hit limits

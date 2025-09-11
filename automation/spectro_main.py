@@ -263,6 +263,7 @@ class SpectroscopyImagingSession(ImagingSession):
         super().__init__(camera_manager, corrector, config_loader, target_info, 
                         filter_code, ignore_twilight, exposure_override)
         
+        logger = logging.getLogger(__name__)
         # Override camera selection for spectroscopy
         if use_guide_camera and camera_manager:
             self.main_camera = camera_manager.get_guide_camera()

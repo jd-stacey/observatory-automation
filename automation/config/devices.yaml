@@ -57,6 +57,7 @@ cameras:
     role: 'guide'                
     default_binning: 4
     default_gain: 100
+    target_temperature: -10.0
     
   
 

@@ -9,6 +9,7 @@ from alpaca.camera import Camera
 # Filter wheel not alpaca compatible? Dome? Camera? etc
 
 servers = discovery.search_ipv4()
+# servers = discovery.search_ipv6()
 print(servers)
 
 for server in servers:

@@ -164,13 +164,13 @@ def main():
             try:
                 coords_parts = args.coords.strip().split()
                 if len(coords_parts) != 2:
-                    raise ValueError("Expected 'RA_HOURS DEC_DEGREES'")
-                ra_hours = float(coords_parts[0])
+                    raise ValueError("Expected 'RA_DEGREES DEC_DEGREES'")
+                ra_hours = float(coords_parts[0]) / 15.0
                 dec_deg = float(coords_parts[1])
                 
                 # Validate ranges
                 if not (0 <= ra_hours < 24):
-                    raise ValueError(f"RA must be 0-24 hours, got {ra_hours}")
+                    raise ValueError(f"RA must be 0-360 degrees, got {float(coords_parts[0])}")
                 if not (-90 <= dec_deg <= 90):
                     raise ValueError(f"Dec must be -90 to +90 degrees, got {dec_deg}")
                     
