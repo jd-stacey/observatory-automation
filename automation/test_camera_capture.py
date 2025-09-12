@@ -27,7 +27,7 @@ def test_camera_capture():
         if not camera_manager.discover_cameras(camera_configs):
             print("ERROR: Camera discovery failed")
             return False
-        if not camera_manager.connect_camera('main'):
+        if not camera_manager.connect_camera('guide'):
             print("ERROR: Failed to connect to main camera")
             return False
         main_camera = camera_manager.get_main_camera()

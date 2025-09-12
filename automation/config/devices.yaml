@@ -3,7 +3,7 @@ telescope:
   address: "127.0.0.1:11111"
   device_number: 0
   telescope_id: "T2"
-  settle_time: 0.1    # settle time after each slewing operation
+  settle_time: 2.0    # settle time after each slewing operation
 
 rotator:
   type: alpaca

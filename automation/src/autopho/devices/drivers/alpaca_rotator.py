@@ -28,6 +28,7 @@ class AlpacaRotatorDriver:
         self.rotator = None
         self.config = None
         self.connected = False
+        self.last_rotation_move_ts = 0.0
         self.rotator_sign = 1          # overridden from field_rotation.yaml during init
         self._platesolve_sign = 1      # overridden from field_rotation.yaml during init
         self._platesolve_clamp_deg = 5.0  # hard default; leave as-is unless you add to YAML later
@@ -252,6 +253,7 @@ class AlpacaRotatorDriver:
             logger.info(f"Applying platesolve de-rotation: sky Δ={rotation_offset_deg:+.2f}°, "
                         f"mech Δ={mech_delta:+.2f}° (from {current_pos:.2f}° → {target_pos:.2f}°)")
             self.rotator.MoveAbsolute(target_pos)
+            self.last_rotation_move_ts = time.time()
 
             # minimal settle (configurable)
             settle_time = float(self.config.get('settle_time', 0.0))

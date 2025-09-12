@@ -21,7 +21,8 @@ class ImagingSessionError(Exception):
 
 class ImagingSession:
     def __init__(self, camera_manager, corrector, config_loader, target_info, filter_code: str, 
-                 ignore_twilight: bool = False, exposure_override: Optional[float] = None):
+                 ignore_twilight: bool = False, exposure_override: Optional[float] = None, 
+                 images_base_path: Optional[Path] = None):
         self.camera_manager = camera_manager
         self.corrector = corrector
         self.rotator_driver = getattr(corrector, "rotator_driver", None)
@@ -39,6 +40,7 @@ class ImagingSession:
         self.main_camera = None
         self.file_manager = None
         self.observability_checker = None
+        self.images_base_path = images_base_path
         
         # Acquisition phase tracking
         self.current_phase = SessionPhase.ACQUISITION
@@ -73,7 +75,7 @@ class ImagingSession:
             self.file_manager = FileManager(self.config_loader)
             
             # Create both acquisition and science directories
-            base_target_dir = self.file_manager.create_target_directory(self.target_info.tic_id)
+            base_target_dir = self.file_manager.create_target_directory(self.target_info.tic_id, base_path=self.images_base_path)
             
             if self.acquisition_enabled:
                 # Create acquisition directory
@@ -216,6 +218,19 @@ class ImagingSession:
         self.science_count = 0
         self.last_correction_exposure = 0
         
+        if (self.corrector and hasattr(self.corrector, 'rotator_driver') and 
+            self.corrector.rotator_driver and hasattr(self.corrector.rotator_driver, 'start_field_tracking')):
+            time.sleep(1)
+            if self.corrector.rotator_driver.start_field_tracking():
+                logger.info("Continuous field rotation tracking started")
+                self.last_correction_exposure = self.exposure_count + 2
+                logger.debug("Supressing platesolve correction for 2 frames to stabilise field rotation")
+            else:
+                logger.warning("Failed to start field rotation tracking")
+        
+        
+        
+        
         logger.info(f"Acquisition complete: {self.acquisition_count} frames")
         logger.info(f"Now saving science frames to: {self.science_dir}")
     
@@ -225,7 +240,11 @@ class ImagingSession:
             return self.exposure_override
             
         if self.current_phase == SessionPhase.ACQUISITION:
-            return self.acquisition_config.get('exposure_time', 3.0)
+            return self.config_loader.get_exposure_time(
+                self.target_info.gaia_g_mag,
+                self.filter_code
+            ) / 2           # set acquisition exposure time to half that of science phase
+            # return self.acquisition_config.get('exposure_time', 3.0)
         else:
             return self.config_loader.get_exposure_time(
                 self.target_info.gaia_g_mag,
@@ -280,12 +299,12 @@ class ImagingSession:
         logger.info("="*75)
         
         # Start continuous field rotation tracking for entire session
-        if (self.corrector and hasattr(self.corrector, 'rotator_driver') and 
-            self.corrector.rotator_driver and hasattr(self.corrector.rotator_driver, 'start_field_tracking')):
-            if self.corrector.rotator_driver.start_field_tracking():
-                logger.info("Continuous field rotation tracking started")
-            else:
-                logger.warning("Failed to start field rotation tracking")
+        # if (self.corrector and hasattr(self.corrector, 'rotator_driver') and 
+        #     self.corrector.rotator_driver and hasattr(self.corrector.rotator_driver, 'start_field_tracking')):
+        #     if self.corrector.rotator_driver.start_field_tracking():
+        #         logger.info("Continuous field rotation tracking started")
+        #     else:
+        #         logger.warning("Failed to start field rotation tracking")
         
         if self.acquisition_enabled and self.current_phase == SessionPhase.ACQUISITION:
             logger.info("Starting with target acquisition phase")

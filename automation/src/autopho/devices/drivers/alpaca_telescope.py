@@ -235,12 +235,12 @@ class AlpacaTelescopeDriver:
         try:
             import math
             current_ra_hours, current_dec_deg = self.get_coordinates()
-            logger.info(f"Current position: RA={current_ra_hours:.6f}h, Dec={current_dec_deg}deg")
+            logger.info(f"Current position: RA={current_ra_hours:.6f} h, Dec={current_dec_deg} deg")
             
             new_ra_hours = current_ra_hours + (ra_offset_deg / (15.0 * math.cos(math.radians(current_dec_deg))))
             new_dec_deg = current_dec_deg + dec_offset_deg
             
-            new_ra_hours = new_ra_hours % 24.0
+            # new_ra_hours = new_ra_hours % 24.0
             if new_ra_hours < 0:
                 new_ra_hours += 24.0
             new_dec_deg = max (-90, min(90.0, new_dec_deg))

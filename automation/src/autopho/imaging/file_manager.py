@@ -32,12 +32,13 @@ class FileManager:
         logger.debug(f"FileManager initialized: {self.raw_images_path}")
         logger.debug(f"Telescope ID: {self.telescope_id}")
         
-    def create_target_directory(self, tic_id: str) -> Path:
+    def create_target_directory(self, tic_id: str, base_path: Optional[Path] = None) -> Path:
         try:
+            root = base_path or self.raw_images_path
             clean_tic = self._clean_tic_id(tic_id)
             current_year = datetime.now(timezone.utc).strftime("%Y")
             current_day = datetime.now(timezone.utc).strftime("%Y%m%d")
-            target_dir = self.raw_images_path / current_year / current_day / self.telescope_id / clean_tic
+            target_dir = root / current_year / current_day / self.telescope_id / clean_tic
             target_dir.mkdir(parents=True, exist_ok=True)
             logger.info(f"Target directory: {target_dir}")
             return target_dir

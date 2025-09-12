@@ -20,16 +20,16 @@ spectro_thresholds:
 
 acquisition:
   enabled: true
-  exposure_time: 3.0              # exposure time during acquisition phase
-  correction_interval: 3          # checks for correction required between N frames during acquisition
+  exposure_time: 10.0              # exposure time during acquisition phase
+  correction_interval: 2          # checks for correction required between N frames during acquisition
   max_total_offset_arcsec: 3.0    # once total offset >= this number, switch to science frames/folder
-  max_attempts: 3 #20                # dont acquire forever and ever and ever and ever and ever
+  max_attempts:  25             # dont acquire forever and ever and ever and ever and ever
   folder_suffix: "_acq"           
 
 spectro_acquisition:
   enabled: true
-  exposure_time: 3.0
-  correction_interval: 1
-  max_total_offset_arcsec: 1.0
-  max_attempts: 20
-  folder_suffix: "_spectro_acq"
+  exposure_time: 10.0 #15.0              # exposure time during acquisition phase
+  correction_interval: 1          # checks for correction required between N frames during acquisition
+  max_total_offset_arcsec: 2.0    # once total offset >= this number, switch to science frames/folder
+  max_attempts: 45
+  folder_suffix: "_acq"

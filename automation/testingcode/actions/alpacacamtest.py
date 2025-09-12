@@ -168,7 +168,7 @@ def take_exposure(scope=None, camera_id=None, exposure_time=5.0, binning=4, gain
 def main():
     # scope = 'main' for 6200MM 'guide' for 294MM
     # light = False for dark frame, True for light frame
-    take_exposure(scope='main', exposure_time=0.1, binning=4, gain=100, light=False, filename_prefix="quick_test")
+    take_exposure(scope='guide', exposure_time=2, binning=4, gain=100, light=True, filename_prefix="quick_test")
     
     
 if __name__ == "__main__":

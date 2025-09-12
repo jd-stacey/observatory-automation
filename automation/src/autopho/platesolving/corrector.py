@@ -208,6 +208,17 @@ class PlatesolveCorrector:
             coordinate_correction_needed = total_offset_arcsec >= min_correction
             rotation_correction_needed = self.rotator_driver and abs(rot_offset_deg) >= min_rotation
             
+            # --- NEW: suppress coord correction for a moment after a rotator move ---
+            try:
+                last_rot = getattr(self.rotator_driver, "last_rotation_move_ts", 0.0)
+                if (time.time() - last_rot) < 0.8:  # seconds
+                    coordinate_correction_needed = False
+                    logger.debug("Skipping RA/Dec correction (recent rotator move).")
+            except Exception:
+                pass
+            # -----------------------------------------------------------------------
+            
+            
             if not coordinate_correction_needed and not rotation_correction_needed:
                 return CorrectionResult(
                     applied=False,
