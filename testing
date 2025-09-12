@@ -1,41 +1,34 @@
-# In SpectroscopyImagingSession.__init__(), replace this section:
-
-class SpectroscopyImagingSession(ImagingSession):
-    """Imaging session using only the guide camera for spectroscopy"""
-
-    def __init__(self, camera_manager, corrector, config_loader, target_info: TargetInfo,
-                 ignore_twilight: bool = False, exposure_override: Optional[float] = None,  # Changed back to None
-                 dry_run: bool = False):
-        
-        self.dry_run = dry_run
-        self.logger = logging.getLogger(__name__)
-        
-        # Load platesolve config first to get spectro settings
-        platesolve_config = config_loader.get_config('platesolving')
-        spectro_acq_cfg = platesolve_config.get('spectro_acquisition', {})
-        
-        # Calculate exposure based on priority: override -> YAML -> magnitude calculation
-        if exposure_override is not None:
-            # Explicit override provided
-            final_exposure = exposure_override
-            self.logger.debug(f"Using explicit exposure override: {final_exposure:.1f}s")
+def _abort_current_exposure(self) -> bool:
+    """Abort current camera exposure if possible"""
+    if not self.main_camera or not self.main_camera.connected:
+        return False
+    
+    try:
+        cam = self.main_camera.camera
+        if hasattr(cam, 'AbortExposure'):
+            cam.AbortExposure()
+            self.logger.info("Aborted current exposure")
+            return True
         else:
-            # Try to get from YAML config first
-            yaml_exposure = spectro_acq_cfg.get('exposure_time')
-            if yaml_exposure is not None:
-                final_exposure = yaml_exposure
-                self.logger.debug(f"Using YAML spectro_acquisition.exposure_time: {final_exposure:.1f}s")
-            elif hasattr(target_info, 'gaia_g_mag'):
-                # Calculate from magnitude as fallback
-                base_exp = 30.0
-                mag_diff = target_info.gaia_g_mag - 12.0
-                calculated_exp = base_exp * (2.5 ** mag_diff)  # 2.5x per magnitude
-                final_exposure = max(1.0, min(calculated_exp, 300.0))  # Clamp 1-300s
-                self.logger.debug(f"Calculated exposure from magnitude {target_info.gaia_g_mag}: {final_exposure:.1f}s")
-            else:
-                # Final fallback
-                final_exposure = 10.0
-                self.logger.debug(f"Using fallback exposure time: {final_exposure:.1f}s")
-        
-        # Store the final exposure time
-        exposure_override = final_exposure
+            self.logger.warning("Camera does not support exposure abortion")
+            return False
+    except Exception as e:
+        self.logger.warning(f"Failed to abort exposure: {e}")
+        return False
+
+def stop_session(self):
+    """Stop the current imaging session"""
+    self.logger.info("Stopping spectroscopy session...")
+    
+    # Try to abort any ongoing exposure first
+    self._abort_current_exposure()
+    
+    # Then set stop flags
+    self._stop_event.set()
+    self._running = False
+    
+    # Wait for imaging thread to finish (with timeout)
+    if hasattr(self, 'imaging_thread') and self.imaging_thread.is_alive():
+        self.imaging_thread.join(timeout=5.0)
+        if self.imaging_thread.is_alive():
+            self.logger.warning("Imaging thread did not stop cleanly")
