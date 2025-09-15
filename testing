@@ -2,7 +2,7 @@
 """
 Emergency Telescope Shutdown Tool
 Safely shuts down telescope system after TCU restart or other emergencies.
-FIXED: Resolves DLL conflicts with Autoslew startup
+FIXED: Completely avoids DLL conflicts by using HTTP-only checks during startup
 """
 
 import tkinter as tk
@@ -15,6 +15,8 @@ import sys
 from pathlib import Path
 import psutil
 import os
+import requests
+import json
 from typing import Optional, Dict, Any
 
 # Import your existing drivers (assuming they're in the same directory or Python path)
@@ -60,15 +62,21 @@ class EmergencyShutdownGUI:
         
         self.autoslew_path = r"C:\Program Files (x86)\Autoslew\Autoslew.exe"
         
-        # Device drivers - Initialize as None to prevent early connections
+        # CRITICAL CHANGE: NO driver instances created until shutdown!
         self.telescope = None
         self.rotator = None  
         self.cover = None
         
+        # Device status via HTTP only
+        self.device_status = {
+            'telescope': {'connected': False, 'info': {}},
+            'rotator': {'connected': False, 'info': {}},
+            'cover': {'connected': False, 'info': {}}
+        }
+        
         # GUI state
         self.shutdown_in_progress = False
         self.autoslew_started = False
-        self.connections_delayed = True  # NEW: Delay connections until after Autoslew is fully ready
         
         self.setup_logging()
         self.create_widgets()
@@ -237,112 +245,116 @@ class EmergencyShutdownGUI:
         thread.daemon = True
         thread.start()
         
-    def _check_alpaca_service_ready(self, address, device_type, device_number):
-        """Check if ALPACA service responds without connecting"""
+    def _http_get_device_info(self, address: str, device_type: str, device_number: int, property_name: str):
+        """
+        CRITICAL FIX: Use ONLY HTTP requests - no driver instantiation
+        """
         try:
-            import requests
+            url = f"http://{address}/api/v1/{device_type}/{device_number}/{property_name}"
+            response = requests.get(url, timeout=3)
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('Value'), None
+            else:
+                return None, f"HTTP {response.status_code}"
+        except Exception as e:
+            return None, str(e)
+            
+    def _http_check_device_connected(self, address: str, device_type: str, device_number: int):
+        """Check if device is connected via HTTP only"""
+        try:
             url = f"http://{address}/api/v1/{device_type}/{device_number}/connected"
-            response = requests.get(url, timeout=2)
-            return response.status_code == 200
+            response = requests.get(url, timeout=3)
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('Value', False)
+            return False
         except:
             return False
             
-    def _wait_for_autoslew_full_startup(self):
-        """
-        CRITICAL FIX: Wait for Autoslew to fully initialize its drivers
-        before attempting any Python ASCOM connections
-        """
-        self.logger.info("Waiting for Autoslew to fully initialize all drivers...")
-        
-        # Extended wait time to ensure Autoslew has loaded all its DLLs
-        # and established hardware connections first
-        for i in range(60):  # Up to 60 seconds
-            if i % 10 == 0:  # Log every 10 seconds
-                self.logger.info(f"Autoslew initialization check... {i}/60 seconds")
-            
-            # Check if Autoslew HTTP services are responding
-            # This indicates Autoslew has finished loading
-            try:
-                telescope_ready = self._check_alpaca_service_ready("127.0.0.1:11111", "telescope", 0)
-                if telescope_ready:
-                    # Additional safety wait to ensure DLL initialization is complete
-                    self.logger.info("ALPACA service detected - waiting additional 15 seconds for full driver initialization...")
-                    time.sleep(15)
-                    return True
-            except:
-                pass
-                
-            time.sleep(1)
-            
-        self.logger.warning("Autoslew may not be fully initialized - proceeding with caution")
-        return False
+    def _check_alpaca_service_ready(self, address, device_type, device_number):
+        """Check if ALPACA service responds"""
+        return self._http_check_device_connected(address, device_type, device_number) is not None
         
     def _autoslew_and_check_worker(self):
-        """Worker thread for Autoslew startup and connection checking"""
+        """Worker thread for Autoslew startup and HTTP-only connection checking"""
         try:
-            # CRITICAL FIX: Do NOT create any driver instances until Autoslew is fully ready
-            if hasattr(self, 'telescope') and self.telescope:
-                self.telescope.disconnect()
-                self.telescope = None
-            if hasattr(self, 'rotator') and self.rotator:
-                self.rotator.disconnect()
-                self.rotator = None
-            if hasattr(self, 'cover') and self.cover:
-                self.cover.disconnect()
-                self.cover = None
-                
+            self.logger.info("🚀 Starting Autoslew launch sequence...")
+            
             # Check if Autoslew is already running
             if self.is_autoslew_running():
-                self.logger.info("Autoslew is already running")
+                self.logger.info("✅ Autoslew is already running")
                 self.update_status("Autoslew", "Running", "green")
                 self.autoslew_started = True
-                
-                # Even if running, wait to ensure it's fully connected
-                self._wait_for_autoslew_full_startup()
             else:
-                self.logger.info("Starting Autoslew...")
+                self.logger.info("🔧 Starting Autoslew...")
                 self.update_status("Autoslew", "Starting...", "orange")
                 
                 if not os.path.exists(self.autoslew_path):
                     raise FileNotFoundError(f"Autoslew not found at: {self.autoslew_path}")
                     
-                # Start Autoslew with specific parameters to minimize conflicts
+                # Start Autoslew with detached process
                 subprocess.Popen([
                     self.autoslew_path
-                    # Add any Autoslew command line parameters that might help
-                ], shell=True, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+                ], shell=True, 
+                   creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+                   stdin=subprocess.PIPE, 
+                   stdout=subprocess.PIPE, 
+                   stderr=subprocess.PIPE)
                 
-                self.logger.warning("🔥 IMPORTANT: Click any Autoslew pop-up windows and allow access!")
+                self.logger.warning("🔥 IMPORTANT: Allow Autoslew through any Windows firewall/security prompts!")
                 
-                # Wait for Autoslew to start
-                max_wait = 45  # Increased wait time
+                # Wait for Autoslew process to start
+                max_wait = 45
                 for i in range(max_wait):
-                    if i % 5 == 0:  # Log every 5 seconds
-                        self.logger.info(f"Waiting for Autoslew startup... {i}/{max_wait} seconds")
+                    if i % 5 == 0 and i > 0:
+                        self.logger.info(f"⏳ Waiting for Autoslew process... {i}/{max_wait} seconds")
                     if self.is_autoslew_running():
-                        self.logger.info("Autoslew process started - waiting for full initialization...")
+                        self.logger.info("✅ Autoslew process detected")
                         self.autoslew_started = True
                         break
                     time.sleep(1)
                 else:
-                    raise TimeoutError("Autoslew failed to start within 45 seconds")
-                    
-                # CRITICAL: Wait for full initialization
-                if not self._wait_for_autoslew_full_startup():
-                    self.logger.error("Autoslew initialization timeout - connections may fail")
+                    raise TimeoutError("❌ Autoslew failed to start within 45 seconds")
                     
                 self.update_status("Autoslew", "Running", "green")
             
-            # Additional safety delay before attempting Python connections
-            self.logger.info("Final safety delay before establishing Python connections...")
-            time.sleep(5)
+            # CRITICAL: Wait for Autoslew to fully initialize ALL drivers
+            self.logger.info("⏳ Waiting for Autoslew to fully initialize drivers...")
+            self.logger.info("   This prevents DLL conflicts by ensuring Autoslew gets exclusive access first")
             
-            # Now check device connections
-            self.logger.info("Establishing Python device connections...")
-            self._check_all_connections()
+            max_service_wait = 120  # 2 minutes max
+            service_ready = False
+            
+            for attempt in range(0, max_service_wait, 10):
+                self.logger.info(f"🔍 Testing ALPACA services... ({attempt}/{max_service_wait}s)")
+                
+                # Test each service
+                telescope_ready = self._check_alpaca_service_ready("127.0.0.1:11111", "telescope", 0)
+                rotator_ready = self._check_alpaca_service_ready("127.0.0.1:11112", "rotator", 0)  
+                cover_ready = self._check_alpaca_service_ready("127.0.0.1:11112", "covercalibrator", 0)
+                
+                if telescope_ready and (rotator_ready or cover_ready):  # At least telescope + one other
+                    self.logger.info("✅ ALPACA services are responding!")
+                    service_ready = True
+                    break
+                    
+                if attempt < max_service_wait - 10:
+                    time.sleep(10)
+            
+            if not service_ready:
+                self.logger.warning("⚠️ ALPACA services may not be fully ready - proceeding with caution")
+            
+            # Additional safety buffer - critical for avoiding DLL conflicts
+            self.logger.info("🛡️ Safety buffer: Waiting additional 20 seconds for complete driver initialization...")
+            time.sleep(20)
+            
+            # Now check device status using HTTP ONLY - no driver creation
+            self.logger.info("🔍 Checking device status via HTTP (no DLL conflicts)...")
+            self._check_all_connections_http_only()
             
         except Exception as e:
-            self.logger.error(f"Failed during Autoslew startup: {e}")
+            self.logger.error(f"❌ Failed during Autoslew startup: {e}")
         finally:
             # Re-enable UI on main thread
             self.root.after(0, self._finish_autoslew_check)
@@ -356,119 +368,88 @@ class EmergencyShutdownGUI:
         if self.autoslew_started:
             self.shutdown_btn.config(state='normal')
             
-    def _create_driver_with_retry(self, driver_class, config, device_name, max_retries=3):
+    def _check_all_connections_http_only(self):
         """
-        CRITICAL FIX: Create drivers with retry and proper error handling
-        to avoid DLL conflicts
+        CRITICAL FIX: Check connections using ONLY HTTP requests
+        No driver instantiation = No DLL conflicts
         """
-        for attempt in range(max_retries):
-            try:
-                self.logger.info(f"Creating {device_name} driver (attempt {attempt + 1}/{max_retries})...")
-                
-                # Small delay between attempts
-                if attempt > 0:
-                    time.sleep(2)
-                    
-                driver = driver_class()
-                
-                # Test connection
-                if driver.connect(config):
-                    return driver
-                else:
-                    driver.disconnect()
-                    driver = None
-                    if attempt < max_retries - 1:
-                        self.logger.warning(f"{device_name} connection failed, retrying...")
-                        time.sleep(3)
-                    
-            except Exception as e:
-                self.logger.warning(f"{device_name} driver creation failed (attempt {attempt + 1}): {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(5)  # Longer delay on exception
-                    
-        return None
-            
-    def _check_all_connections(self):
-        """Check connections to all devices with improved error handling"""
         
-        if not DRIVERS_AVAILABLE:
-            self.logger.error("Device drivers not available - cannot check connections")
-            return
-            
-        # Check telescope with retry mechanism
-        self.logger.info("Testing telescope connection...")
+        # Check telescope via HTTP
+        self.logger.info("🔭 Checking telescope via HTTP...")
         try:
-            self.telescope = self._create_driver_with_retry(
-                AlpacaTelescopeDriver, 
-                self.device_configs['telescope'], 
-                "telescope"
-            )
-            
-            if self.telescope and self.telescope.is_connected():
-                tel_info = self.telescope.get_telescope_info()
-                self.logger.info(f"✅ Telescope connected: {tel_info.get('name', 'Unknown')}")
-                self.update_status("Telescope", f"Connected - {tel_info.get('name', 'Unknown')}", "green")
-            else:
-                raise AlpacaTelescopeError("Connection failed after retries")
-        except Exception as e:
-            self.logger.warning(f"❌ Telescope connection failed: {e}")
-            self.update_status("Telescope", "Connection Failed", "red")
-            if self.telescope:
-                self.telescope.disconnect()
-                self.telescope = None
+            connected = self._http_check_device_connected("127.0.0.1:11111", "telescope", 0)
+            if connected:
+                # Get telescope info
+                name, err = self._http_get_device_info("127.0.0.1:11111", "telescope", 0, "name")
+                description, _ = self._http_get_device_info("127.0.0.1:11111", "telescope", 0, "description")
                 
-        # Small delay between device connections
-        time.sleep(1)
-            
-        # Check rotator with retry mechanism
-        self.logger.info("Testing rotator connection...")
-        try:
-            self.rotator = self._create_driver_with_retry(
-                AlpacaRotatorDriver,
-                self.device_configs['rotator'],
-                "rotator"
-            )
-            
-            if self.rotator and self.rotator.is_connected():
-                rot_info = self.rotator.get_rotator_info()
-                pos = rot_info.get('position_deg', 0)
-                self.logger.info(f"✅ Rotator connected: {rot_info.get('name', 'Unknown')} at {pos:.1f}°")
-                self.update_status("Rotator", f"Connected - {pos:.1f}°", "green")
+                tel_name = name or description or "Unknown Telescope"
+                self.logger.info(f"✅ Telescope connected: {tel_name}")
+                self.update_status("Telescope", f"Connected - {tel_name}", "green")
+                self.device_status['telescope']['connected'] = True
+                self.device_status['telescope']['info'] = {'name': tel_name}
             else:
-                raise AlpacaRotatorError("Connection failed after retries")
-        except Exception as e:
-            self.logger.warning(f"❌ Rotator connection failed: {e}")
-            self.update_status("Rotator", "Connection Failed", "red")
-            if self.rotator:
-                self.rotator.disconnect()
-                self.rotator = None
+                self.logger.warning("❌ Telescope not connected")
+                self.update_status("Telescope", "Not Connected", "red")
                 
-        # Small delay between device connections
-        time.sleep(1)
-            
-        # Check cover with retry mechanism
-        self.logger.info("Testing cover connection...")
-        try:
-            self.cover = self._create_driver_with_retry(
-                AlpacaCoverDriver,
-                self.device_configs['cover'],
-                "cover"
-            )
-            
-            if self.cover and self.cover.is_connected():
-                cover_info = self.cover.get_cover_info()
-                state = cover_info.get('cover_state', 'Unknown')
-                self.logger.info(f"✅ Cover connected: {cover_info.get('name', 'Unknown')} - {state}")
-                color = "orange" if state == "Open" else "green"
-                self.update_status("Cover", f"Connected - {state}", color)
-            else:
-                raise AlpacaCoverError("Connection failed after retries")
         except Exception as e:
-            self.logger.warning(f"❌ Cover connection failed: {e}")
-            self.update_status("Cover", "Connection Failed", "red")
-            if self.cover:
-                self.cover.disconnect()
-                self.cover = None
+            self.logger.warning(f"❌ Telescope HTTP check failed: {e}")
+            self.update_status("Telescope", "Check Failed", "red")
+            
+        # Check rotator via HTTP
+        self.logger.info("🔄 Checking rotator via HTTP...")
+        try:
+            connected = self._http_check_device_connected("127.0.0.1:11112", "rotator", 0)
+            if connected:
+                # Get rotator position
+                position, err = self._http_get_device_info("127.0.0.1:11112", "rotator", 0, "position")
+                name, _ = self._http_get_device_info("127.0.0.1:11112", "rotator", 0, "name")
+                
+                pos_deg = position if position is not None else 0.0
+                rot_name = name or "Unknown Rotator"
+                self.logger.info(f"✅ Rotator connected: {rot_name} at {pos_deg:.1f}°")
+                self.update_status("Rotator", f"Connected - {pos_deg:.1f}°", "green")
+                self.device_status['rotator']['connected'] = True
+                self.device_status['rotator']['info'] = {'name': rot_name, 'position_deg': pos_deg}
+            else:
+                self.logger.warning("❌ Rotator not connected")
+                self.update_status("Rotator", "Not Connected", "red")
+                
+        except Exception as e:
+            self.logger.warning(f"❌ Rotator HTTP check failed: {e}")
+            self.update_status("Rotator", "Check Failed", "red")
+            
+        # Check cover via HTTP
+        self.logger.info("🛡️ Checking cover via HTTP...")
+        try:
+            connected = self._http_check_device_connected("127.0.0.1:11112", "covercalibrator", 0)
+            if connected:
+                # Get cover state
+                cover_state, err = self._http_get_device_info("127.0.0.1:11112", "covercalibrator", 0, "coverstate")
+                name, _ = self._http_get_device_info("127.0.0.1:11112", "covercalibrator", 0, "name")
+                
+                # Cover state mapping (ASCOM standard)
+                state_map = {0: "Unknown", 1: "Closed", 2: "Moving", 3: "Open", 4: "Error"}
+                state_name = state_map.get(cover_state, f"State{cover_state}")
+                
+                cover_name = name or "Unknown Cover"
+                self.logger.info(f"✅ Cover connected: {cover_name} - {state_name}")
+                
+                color = "green" if state_name == "Closed" else "orange" if state_name == "Open" else "red"
+                self.update_status("Cover", f"Connected - {state_name}", color)
+                self.device_status['cover']['connected'] = True
+                self.device_status['cover']['info'] = {'name': cover_name, 'cover_state': state_name}
+            else:
+                self.logger.warning("❌ Cover not connected")
+                self.update_status("Cover", "Not Connected", "red")
+                
+        except Exception as e:
+            self.logger.warning(f"❌ Cover HTTP check failed: {e}")
+            self.update_status("Cover", "Check Failed", "red")
+        
+        # Summary
+        connected_count = sum(1 for dev in self.device_status.values() if dev['connected'])
+        self.logger.info(f"📊 Connection Summary: {connected_count}/3 devices connected via HTTP")
             
     def confirm_emergency_shutdown(self):
         """Show confirmation dialogs before emergency shutdown"""
@@ -522,115 +503,168 @@ class EmergencyShutdownGUI:
         thread.daemon = True
         thread.start()
         
+    def _create_driver_for_shutdown(self, driver_class, config, device_name):
+        """
+        ONLY create drivers during shutdown when absolutely necessary
+        """
+        try:
+            self.logger.info(f"🔧 Creating {device_name} driver for shutdown operations...")
+            driver = driver_class()
+            if driver.connect(config):
+                return driver
+            else:
+                driver.disconnect()
+                return None
+        except Exception as e:
+            self.logger.error(f"❌ Failed to create {device_name} driver: {e}")
+            return None
+        
     def _shutdown_worker(self):
-        """Worker thread for emergency shutdown"""
+        """Worker thread for emergency shutdown - drivers created ONLY here"""
         try:
             self.logger.info("="*50)
             self.logger.info("🚨 EMERGENCY SHUTDOWN INITIATED 🚨")
             self.logger.info("="*50)
             
+            if not DRIVERS_AVAILABLE:
+                self.logger.error("❌ Cannot perform shutdown - drivers not available")
+                return
+            
             success_count = 0
             total_operations = 0
             
-            # 1. Halt rotator if connected and moving
-            if self.rotator and self.rotator.is_connected():
-                self.logger.info("Step 1: Checking rotator status...")
-                try:
-                    if self.rotator.is_moving():
-                        total_operations += 1
-                        self.logger.info("Rotator is moving - halting...")
-                        if self.rotator.halt():
-                            self.logger.info("✅ Rotator halted successfully")
-                            self.update_status("Rotator", "Halted", "orange")
-                            success_count += 1
-                        else:
-                            self.logger.error("❌ Rotator halt failed")
-                    else:
-                        self.logger.info("✅ Rotator already stationary - no action needed")
-                        self.update_status("Rotator", "Stationary", "green")
-                except Exception as e:
-                    self.logger.error(f"❌ Rotator status/halt error: {e}")
-            else:
-                self.logger.info("Step 1: Rotator not connected - skipping halt")
+            # 1. Handle rotator if it was detected as connected
+            if self.device_status['rotator']['connected']:
+                self.logger.info("Step 1: Creating rotator driver for shutdown...")
+                self.rotator = self._create_driver_for_shutdown(
+                    AlpacaRotatorDriver, 
+                    self.device_configs['rotator'], 
+                    "rotator"
+                )
                 
-            # 2. Close covers if connected and not already closed
-            if self.cover:
-                self.logger.info("Step 2: Checking cover status...")
-                try:
-                    cover_state = self.cover.get_cover_state()
-                    if cover_state == "Error":
-                        self.logger.warning("Cover in error state - skipping close")
-                    elif cover_state == "Closed":
-                        self.logger.info("✅ Covers already closed - no action needed")
-                        self.update_status("Cover", "Closed", "green")
-                    elif cover_state == "Open":
-                        total_operations += 1
-                        self.logger.info("Covers are open - closing...")
-                        if self.cover.close_cover():
-                            self.logger.info("✅ Covers closed successfully")
-                            self.update_status("Cover", "Closed", "green")
-                            success_count += 1
-                        else:
-                            self.logger.error("❌ Cover close failed")
-                    else:
-                        self.logger.warning(f"Unknown cover state '{cover_state}' - attempting close...")
-                        total_operations += 1
-                        if self.cover.close_cover():
-                            self.logger.info("✅ Covers closed successfully")
-                            self.update_status("Cover", "Closed", "green")
-                            success_count += 1
-                        else:
-                            self.logger.error("❌ Cover close failed")
-                except Exception as e:
-                    self.logger.error(f"❌ Cover status/close error: {e}")
-            else:
-                self.logger.info("Step 2: Cover not connected - skipping close")
-                
-            # 3. Park telescope if connected and not already parked
-            if self.telescope and self.telescope.is_connected():
-                self.logger.info("Step 3: Checking telescope status...")
-                
-                # Check if already parked
-                park_needed = True
-                try:
-                    if self.telescope.is_parked():
-                        self.logger.info("✅ Telescope already parked - no action needed")
-                        park_needed = False
-                    elif self.telescope.is_slewing():
-                        self.logger.info("Telescope is slewing - aborting slew first...")
-                        self.telescope.abort_slew()
-                        time.sleep(1)
-                        self.logger.info("Slew aborted - proceeding to park...")
-                except Exception as e:
-                    self.logger.warning(f"Could not check telescope park status: {e} - attempting park anyway")
-                
-                # Park if needed
-                if park_needed:
-                    total_operations += 1
-                    self.logger.info("Parking telescope...")
+                if self.rotator and self.rotator.is_connected():
                     try:
-                        if self.telescope.park(max_wait=60):
-                            self.logger.info("✅ Telescope parked successfully") 
+                        if self.rotator.is_moving():
+                            total_operations += 1
+                            self.logger.info("🛑 Rotator is moving - halting...")
+                            if self.rotator.halt():
+                                self.logger.info("✅ Rotator halted successfully")
+                                self.update_status("Rotator", "Halted", "orange")
+                                success_count += 1
+                            else:
+                                self.logger.error("❌ Rotator halt failed")
+                        else:
+                            self.logger.info("✅ Rotator already stationary")
+                            self.update_status("Rotator", "Stationary", "green")
+                    except Exception as e:
+                        self.logger.error(f"❌ Rotator halt error: {e}")
+                    finally:
+                        self.rotator.disconnect()
+                        self.rotator = None
+                else:
+                    self.logger.warning("❌ Could not connect to rotator for shutdown")
+            else:
+                self.logger.info("Step 1: Rotator not detected - skipping")
+                
+            # 2. Handle cover if it was detected as connected  
+            if self.device_status['cover']['connected']:
+                self.logger.info("Step 2: Creating cover driver for shutdown...")
+                self.cover = self._create_driver_for_shutdown(
+                    AlpacaCoverDriver,
+                    self.device_configs['cover'],
+                    "cover"
+                )
+                
+                if self.cover and self.cover.is_connected():
+                    try:
+                        cover_state = self.cover.get_cover_state()
+                        if cover_state == "Closed":
+                            self.logger.info("✅ Covers already closed")
+                            self.update_status("Cover", "Closed", "green")
+                        elif cover_state == "Open":
+                            total_operations += 1
+                            self.logger.info("🔒 Closing covers...")
+                            if self.cover.close_cover():
+                                self.logger.info("✅ Covers closed successfully")
+                                self.update_status("Cover", "Closed", "green")
+                                success_count += 1
+                            else:
+                                self.logger.error("❌ Cover close failed")
+                        else:
+                            self.logger.warning(f"⚠️ Cover in {cover_state} state - attempting close...")
+                            total_operations += 1
+                            if self.cover.close_cover():
+                                self.logger.info("✅ Covers closed successfully")
+                                self.update_status("Cover", "Closed", "green")
+                                success_count += 1
+                            else:
+                                self.logger.error("❌ Cover close failed")
+                    except Exception as e:
+                        self.logger.error(f"❌ Cover operation error: {e}")
+                    finally:
+                        self.cover.disconnect()
+                        self.cover = None
+                else:
+                    self.logger.warning("❌ Could not connect to cover for shutdown")
+            else:
+                self.logger.info("Step 2: Cover not detected - skipping")
+                
+            # 3. Handle telescope if it was detected as connected
+            if self.device_status['telescope']['connected']:
+                self.logger.info("Step 3: Creating telescope driver for shutdown...")
+                self.telescope = self._create_driver_for_shutdown(
+                    AlpacaTelescopeDriver,
+                    self.device_configs['telescope'],
+                    "telescope"
+                )
+                
+                if self.telescope and self.telescope.is_connected():
+                    # Check if already parked
+                    park_needed = True
+                    try:
+                        if self.telescope.is_parked():
+                            self.logger.info("✅ Telescope already parked")
+                            park_needed = False
+                        elif self.telescope.is_slewing():
+                            self.logger.info("🛑 Telescope is slewing - aborting first...")
+                            self.telescope.abort_slew()
+                            time.sleep(2)
+                    except Exception as e:
+                        self.logger.warning(f"⚠️ Could not check telescope status: {e} - attempting park")
+                        
+                    # Park if needed
+                    if park_needed:
+                        total_operations += 1
+                        self.logger.info("🏠 Parking telescope...")
+                        try:
+                            if self.telescope.park(max_wait=60):
+                                self.logger.info("✅ Telescope parked successfully")
+                                success_count += 1
+                            else:
+                                self.logger.error("❌ Telescope park failed or timed out")
+                        except Exception as e:
+                            self.logger.error(f"❌ Telescope park error: {e}")
+                    
+                    # Turn off motors
+                    total_operations += 1
+                    self.logger.info("⚡ Turning off telescope motors...")
+                    try:
+                        if self.telescope.motor_off():
+                            self.logger.info("✅ Telescope motors turned off")
+                            self.update_status("Telescope", "Parked & Motors Off", "green")
                             success_count += 1
                         else:
-                            self.logger.error("❌ Telescope park failed or timed out")
+                            self.logger.error("❌ Motor shutdown failed")
                     except Exception as e:
-                        self.logger.error(f"❌ Telescope park error: {e}")
+                        self.logger.error(f"❌ Motor shutdown error: {e}")
                     
-                # 4. Turn off motors (always attempt - no way to check motor state)
-                total_operations += 1
-                self.logger.info("Step 4: Turning off telescope motors...")
-                try:
-                    if self.telescope.motor_off():
-                        self.logger.info("✅ Telescope motors turned off")
-                        self.update_status("Telescope", "Parked & Motors Off", "green")
-                        success_count += 1
-                    else:
-                        self.logger.error("❌ Motor shutdown failed")
-                except Exception as e:
-                    self.logger.error(f"❌ Motor shutdown error: {e}")
+                    # Cleanup
+                    self.telescope.disconnect()
+                    self.telescope = None
+                else:
+                    self.logger.warning("❌ Could not connect to telescope for shutdown")
             else:
-                self.logger.info("Steps 3-4: Telescope not connected - skipping park and motor off")
+                self.logger.info("Steps 3-4: Telescope not detected - skipping")
                 
             # Summary
             self.logger.info("="*50)
@@ -669,21 +703,8 @@ class EmergencyShutdownGUI:
                                      "Shutdown is in progress. Are you sure you want to exit?"):
                 return
         
-        # CRITICAL FIX: Proper cleanup to avoid DLL conflicts on exit
-        self.logger.info("Cleaning up connections...")
-        try:
-            if self.telescope:
-                self.telescope.disconnect()
-                self.telescope = None
-            if self.rotator:
-                self.rotator.disconnect()
-                self.rotator = None
-            if self.cover:
-                self.cover.disconnect()
-                self.cover = None
-        except Exception as e:
-            self.logger.warning(f"Cleanup warning: {e}")
-                
+        # Clean exit - no drivers to cleanup since they're only created during shutdown
+        self.logger.info("Exiting application...")
         self.root.quit()
         self.root.destroy()
         
@@ -694,16 +715,8 @@ class EmergencyShutdownGUI:
         except KeyboardInterrupt:
             self.logger.info("Application interrupted")
         finally:
-            # Cleanup on exit
-            try:
-                if hasattr(self, 'telescope') and self.telescope:
-                    self.telescope.disconnect()
-                if hasattr(self, 'rotator') and self.rotator:
-                    self.rotator.disconnect()  
-                if hasattr(self, 'cover') and self.cover:
-                    self.cover.disconnect()
-            except:
-                pass
+            # Minimal cleanup needed since no persistent driver connections
+            pass
 
 
 class LogHandler(logging.Handler):
@@ -741,7 +754,8 @@ def main():
         input("Press Enter to exit...")
         return 1
         
-            app = EmergencyShutdownGUI()
+    try:
+        app = EmergencyShutdownGUI()
         app.run()
         return 0
     except Exception as e:
