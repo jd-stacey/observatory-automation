@@ -2,7 +2,7 @@
 """
 Emergency Telescope Shutdown Tool
 Safely shuts down telescope system after TCU restart or other emergencies.
-FIXED: Completely avoids DLL conflicts by using HTTP-only checks during startup
+FIXED: Handles CLServo.dll missing error and provides alternative startup methods
 """
 
 import tkinter as tk
@@ -17,6 +17,7 @@ import psutil
 import os
 import requests
 import json
+import shutil
 from typing import Optional, Dict, Any
 
 # Import your existing drivers (assuming they're in the same directory or Python path)
@@ -33,7 +34,7 @@ class EmergencyShutdownGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Emergency Telescope Shutdown")
-        self.root.geometry("700x800")
+        self.root.geometry("700x850")  # Slightly taller for error handling
         self.root.configure(bg='#f0f0f0')
         
         # Make window stay on top initially
@@ -61,8 +62,9 @@ class EmergencyShutdownGUI:
         }
         
         self.autoslew_path = r"C:\Program Files (x86)\Autoslew\Autoslew.exe"
+        self.autoslew_dir = r"C:\Program Files (x86)\Autoslew"
         
-        # CRITICAL CHANGE: NO driver instances created until shutdown!
+        # Device drivers - only created during shutdown
         self.telescope = None
         self.rotator = None  
         self.cover = None
@@ -77,10 +79,14 @@ class EmergencyShutdownGUI:
         # GUI state
         self.shutdown_in_progress = False
         self.autoslew_started = False
+        self.manual_mode = False  # For when automatic startup fails
         
         self.setup_logging()
         self.create_widgets()
         self.center_window()
+        
+        # Check for common issues on startup
+        self.check_autoslew_installation()
         
     def setup_logging(self):
         """Setup logging to display in GUI"""
@@ -146,6 +152,18 @@ class EmergencyShutdownGUI:
         )
         self.autoslew_btn.pack(fill='x', pady=5)
         
+        # Manual check button (initially hidden)
+        self.manual_btn = tk.Button(
+            button_frame,
+            text="1b. Manual Check (if Autoslew won't start)",
+            command=self.manual_check_connections,
+            bg='#FF9800',
+            fg='white',
+            font=('Arial', 10, 'bold'),
+            height=2
+        )
+        # Don't pack initially
+        
         # Emergency shutdown button (initially disabled)
         self.shutdown_btn = tk.Button(
             button_frame,
@@ -158,6 +176,17 @@ class EmergencyShutdownGUI:
             state='disabled'
         )
         self.shutdown_btn.pack(fill='x', pady=5)
+        
+        # Fix DLL button (initially hidden)
+        self.fix_dll_btn = tk.Button(
+            button_frame,
+            text="🔧 Try to Fix CLServo.dll Issue",
+            command=self.try_fix_dll_issue,
+            bg='#9C27B0',
+            fg='white',
+            font=('Arial', 10)
+        )
+        # Don't pack initially
         
         # Exit button
         self.exit_btn = tk.Button(
@@ -194,7 +223,7 @@ class EmergencyShutdownGUI:
         
         self.log_display = scrolledtext.ScrolledText(
             log_frame, 
-            height=10, 
+            height=12, 
             bg='black', 
             fg='lime',
             font=('Consolas', 9),
@@ -207,7 +236,69 @@ class EmergencyShutdownGUI:
         self.progress.pack(fill='x', padx=10, pady=5)
         
         self.logger.info("Emergency Shutdown Tool initialized")
+        
+    def check_autoslew_installation(self):
+        """Check for common Autoslew installation issues"""
+        if not os.path.exists(self.autoslew_path):
+            self.logger.error(f"❌ Autoslew not found at: {self.autoslew_path}")
+            self.logger.error("   Please verify Autoslew installation path")
+            return
+            
+        # Check for CLServo.dll
+        clservo_path = os.path.join(self.autoslew_dir, "CLServo.dll")
+        if not os.path.exists(clservo_path):
+            self.logger.warning("⚠️ CLServo.dll not found - this may cause Autoslew startup errors")
+            self.fix_dll_btn.pack(fill='x', pady=2)
+            self.logger.info("   Click '🔧 Try to Fix CLServo.dll Issue' button below if Autoslew fails to start")
+        else:
+            self.logger.info("✅ CLServo.dll found")
+            
         self.logger.info("Click 'Start Autoslew & Check Connections' to begin")
+        
+    def try_fix_dll_issue(self):
+        """Attempt to fix the CLServo.dll issue"""
+        self.logger.info("🔧 Attempting to fix CLServo.dll issue...")
+        
+        # Strategy 1: Look for CLServo.dll in common locations
+        possible_locations = [
+            r"C:\Program Files\Common Files\ASCOM\CLServo",
+            r"C:\Program Files (x86)\Common Files\ASCOM\CLServo", 
+            r"C:\Windows\System32",
+            r"C:\Windows\SysWOW64",
+            os.path.join(self.autoslew_dir, "Backup"),
+            os.path.join(self.autoslew_dir, "Archive")
+        ]
+        
+        found_dll = None
+        for location in possible_locations:
+            dll_path = os.path.join(location, "CLServo.dll")
+            if os.path.exists(dll_path):
+                found_dll = dll_path
+                self.logger.info(f"✅ Found CLServo.dll at: {location}")
+                break
+                
+        if found_dll:
+            try:
+                target_path = os.path.join(self.autoslew_dir, "CLServo.dll")
+                shutil.copy2(found_dll, target_path)
+                self.logger.info(f"✅ Copied CLServo.dll to Autoslew directory")
+                self.fix_dll_btn.pack_forget()  # Hide the button
+                return True
+            except Exception as e:
+                self.logger.error(f"❌ Failed to copy CLServo.dll: {e}")
+                
+        # Strategy 2: Suggest manual solutions
+        self.logger.warning("❌ Could not automatically fix CLServo.dll issue")
+        self.logger.info("💡 MANUAL SOLUTIONS:")
+        self.logger.info("   1. Try running Autoslew as Administrator")
+        self.logger.info("   2. Reinstall Autoslew")  
+        self.logger.info("   3. Contact Autoslew support about missing CLServo.dll")
+        self.logger.info("   4. Use 'Manual Check' button if Autoslew is already running")
+        
+        # Show manual check button
+        self.manual_btn.pack(fill='x', pady=2)
+        
+        return False
         
     def center_window(self):
         """Center window on screen"""
@@ -245,13 +336,72 @@ class EmergencyShutdownGUI:
         thread.daemon = True
         thread.start()
         
+    def manual_check_connections(self):
+        """Manual connection check when Autoslew startup fails"""
+        if self.shutdown_in_progress:
+            return
+            
+        self.logger.info("🔍 Starting manual connection check...")
+        self.logger.info("   This assumes Autoslew is already running or will be started manually")
+        
+        self.manual_btn.config(state='disabled')
+        self.progress.start()
+        
+        # Run in separate thread
+        thread = threading.Thread(target=self._manual_check_worker)
+        thread.daemon = True
+        thread.start()
+        
+    def _manual_check_worker(self):
+        """Worker thread for manual connection checking"""
+        try:
+            self.manual_mode = True
+            
+            if self.is_autoslew_running():
+                self.logger.info("✅ Autoslew process detected")
+                self.update_status("Autoslew", "Running (Manual)", "green")
+                self.autoslew_started = True
+            else:
+                self.logger.warning("⚠️ Autoslew not running - please start it manually")
+                self.update_status("Autoslew", "Please Start Manually", "orange")
+                
+            # Wait a bit for manual startup
+            self.logger.info("⏳ Waiting 30 seconds for manual Autoslew startup...")
+            for i in range(30):
+                if self.is_autoslew_running() and not self.autoslew_started:
+                    self.logger.info("✅ Autoslew detected!")
+                    self.update_status("Autoslew", "Running (Manual)", "green")
+                    self.autoslew_started = True
+                    break
+                time.sleep(1)
+                
+            # Check connections regardless
+            self.logger.info("🔍 Checking device connections...")
+            self._check_all_connections_http_only()
+            
+        except Exception as e:
+            self.logger.error(f"❌ Manual check failed: {e}")
+        finally:
+            self.root.after(0, self._finish_manual_check)
+            
+    def _finish_manual_check(self):
+        """Finish manual check on main thread"""
+        self.progress.stop()
+        self.manual_btn.config(state='normal')
+        
+        # Enable shutdown if we detected devices
+        connected_devices = sum(1 for dev in self.device_status.values() if dev['connected'])
+        if connected_devices > 0:
+            self.shutdown_btn.config(state='normal')
+            self.logger.info(f"✅ {connected_devices} devices detected - shutdown enabled")
+        else:
+            self.logger.warning("⚠️ No devices detected - check that Autoslew is running and connected")
+        
     def _http_get_device_info(self, address: str, device_type: str, device_number: int, property_name: str):
-        """
-        CRITICAL FIX: Use ONLY HTTP requests - no driver instantiation
-        """
+        """Use ONLY HTTP requests - no driver instantiation"""
         try:
             url = f"http://{address}/api/v1/{device_type}/{device_number}/{property_name}"
-            response = requests.get(url, timeout=3)
+            response = requests.get(url, timeout=5)
             if response.status_code == 200:
                 data = response.json()
                 return data.get('Value'), None
@@ -264,7 +414,7 @@ class EmergencyShutdownGUI:
         """Check if device is connected via HTTP only"""
         try:
             url = f"http://{address}/api/v1/{device_type}/{device_number}/connected"
-            response = requests.get(url, timeout=3)
+            response = requests.get(url, timeout=5)
             if response.status_code == 200:
                 data = response.json()
                 return data.get('Value', False)
@@ -274,89 +424,109 @@ class EmergencyShutdownGUI:
             
     def _check_alpaca_service_ready(self, address, device_type, device_number):
         """Check if ALPACA service responds"""
-        return self._http_check_device_connected(address, device_type, device_number) is not None
+        try:
+            connected = self._http_check_device_connected(address, device_type, device_number)
+            return connected is not None  # Service responded (even if device not connected)
+        except:
+            return False
         
     def _autoslew_and_check_worker(self):
-        """Worker thread for Autoslew startup and HTTP-only connection checking"""
+        """Worker thread for Autoslew startup with better error handling"""
         try:
             self.logger.info("🚀 Starting Autoslew launch sequence...")
             
-            # Check if Autoslew is already running
+            # Check if already running first
             if self.is_autoslew_running():
                 self.logger.info("✅ Autoslew is already running")
                 self.update_status("Autoslew", "Running", "green")
                 self.autoslew_started = True
+                
+                # Wait for services to be ready
+                self.logger.info("⏳ Waiting for ALPACA services...")
+                time.sleep(10)
             else:
                 self.logger.info("🔧 Starting Autoslew...")
                 self.update_status("Autoslew", "Starting...", "orange")
                 
                 if not os.path.exists(self.autoslew_path):
                     raise FileNotFoundError(f"Autoslew not found at: {self.autoslew_path}")
+                
+                try:
+                    # Try starting Autoslew with different methods
+                    self.logger.info("   Attempt 1: Normal startup...")
+                    proc = subprocess.Popen([self.autoslew_path], 
+                                          cwd=self.autoslew_dir,
+                                          shell=False)
                     
-                # Start Autoslew with detached process
-                subprocess.Popen([
-                    self.autoslew_path
-                ], shell=True, 
-                   creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
-                   stdin=subprocess.PIPE, 
-                   stdout=subprocess.PIPE, 
-                   stderr=subprocess.PIPE)
+                    # Wait briefly to see if it starts without error
+                    time.sleep(5)
+                    
+                    if proc.poll() is not None:
+                        # Process exited - likely the CLServo.dll error
+                        self.logger.warning("⚠️ Autoslew exited immediately - likely CLServo.dll error")
+                        raise subprocess.SubprocessError("Autoslew failed to start")
+                        
+                    self.logger.info("🔥 Allow Autoslew through any security prompts!")
+                    
+                except Exception as startup_error:
+                    self.logger.error(f"❌ Autoslew startup failed: {startup_error}")
+                    self.logger.info("💡 Suggestions:")
+                    self.logger.info("   1. Check for CLServo.dll error dialog")
+                    self.logger.info("   2. Try running as Administrator")
+                    self.logger.info("   3. Start Autoslew manually, then use 'Manual Check'")
+                    self.root.after(0, lambda: self.manual_btn.pack(fill='x', pady=2))
+                    return
                 
-                self.logger.warning("🔥 IMPORTANT: Allow Autoslew through any Windows firewall/security prompts!")
-                
-                # Wait for Autoslew process to start
-                max_wait = 45
+                # Wait for process to start
+                max_wait = 60
                 for i in range(max_wait):
-                    if i % 5 == 0 and i > 0:
-                        self.logger.info(f"⏳ Waiting for Autoslew process... {i}/{max_wait} seconds")
+                    if i % 10 == 0 and i > 0:
+                        self.logger.info(f"⏳ Waiting for Autoslew... {i}/{max_wait} seconds")
                     if self.is_autoslew_running():
-                        self.logger.info("✅ Autoslew process detected")
+                        self.logger.info("✅ Autoslew process started")
                         self.autoslew_started = True
                         break
                     time.sleep(1)
                 else:
-                    raise TimeoutError("❌ Autoslew failed to start within 45 seconds")
+                    raise TimeoutError("Autoslew process not detected within 60 seconds")
                     
                 self.update_status("Autoslew", "Running", "green")
             
-            # CRITICAL: Wait for Autoslew to fully initialize ALL drivers
-            self.logger.info("⏳ Waiting for Autoslew to fully initialize drivers...")
-            self.logger.info("   This prevents DLL conflicts by ensuring Autoslew gets exclusive access first")
-            
-            max_service_wait = 120  # 2 minutes max
+            # Wait for full initialization
+            self.logger.info("⏳ Waiting for Autoslew full initialization...")
+            max_service_wait = 180  # 3 minutes for problem cases
             service_ready = False
             
-            for attempt in range(0, max_service_wait, 10):
-                self.logger.info(f"🔍 Testing ALPACA services... ({attempt}/{max_service_wait}s)")
+            for attempt in range(0, max_service_wait, 15):
+                if attempt > 0:
+                    self.logger.info(f"🔍 Testing ALPACA services... ({attempt}/{max_service_wait}s)")
                 
-                # Test each service
                 telescope_ready = self._check_alpaca_service_ready("127.0.0.1:11111", "telescope", 0)
                 rotator_ready = self._check_alpaca_service_ready("127.0.0.1:11112", "rotator", 0)  
                 cover_ready = self._check_alpaca_service_ready("127.0.0.1:11112", "covercalibrator", 0)
                 
-                if telescope_ready and (rotator_ready or cover_ready):  # At least telescope + one other
-                    self.logger.info("✅ ALPACA services are responding!")
+                if telescope_ready or rotator_ready or cover_ready:
+                    self.logger.info("✅ At least one ALPACA service responding")
                     service_ready = True
                     break
                     
-                if attempt < max_service_wait - 10:
-                    time.sleep(10)
+                if attempt < max_service_wait - 15:
+                    time.sleep(15)
             
             if not service_ready:
-                self.logger.warning("⚠️ ALPACA services may not be fully ready - proceeding with caution")
+                self.logger.warning("⚠️ ALPACA services not responding")
+                self.logger.info("💡 Try 'Manual Check' if Autoslew appears to be running")
+                self.root.after(0, lambda: self.manual_btn.pack(fill='x', pady=2))
             
-            # Additional safety buffer - critical for avoiding DLL conflicts
-            self.logger.info("🛡️ Safety buffer: Waiting additional 20 seconds for complete driver initialization...")
-            time.sleep(20)
-            
-            # Now check device status using HTTP ONLY - no driver creation
-            self.logger.info("🔍 Checking device status via HTTP (no DLL conflicts)...")
+            # Check device connections
+            self.logger.info("🔍 Checking device status...")
             self._check_all_connections_http_only()
             
         except Exception as e:
-            self.logger.error(f"❌ Failed during Autoslew startup: {e}")
+            self.logger.error(f"❌ Autoslew startup failed: {e}")
+            self.logger.info("💡 Try using 'Manual Check' button if Autoslew is running")
+            self.root.after(0, lambda: self.manual_btn.pack(fill='x', pady=2))
         finally:
-            # Re-enable UI on main thread
             self.root.after(0, self._finish_autoslew_check)
             
     def _finish_autoslew_check(self):
@@ -364,23 +534,19 @@ class EmergencyShutdownGUI:
         self.progress.stop()
         self.autoslew_btn.config(state='normal')
         
-        # Enable shutdown button if Autoslew is running
-        if self.autoslew_started:
+        # Enable shutdown button based on what we found
+        if self.autoslew_started or any(dev['connected'] for dev in self.device_status.values()):
             self.shutdown_btn.config(state='normal')
             
     def _check_all_connections_http_only(self):
-        """
-        CRITICAL FIX: Check connections using ONLY HTTP requests
-        No driver instantiation = No DLL conflicts
-        """
+        """Check connections using ONLY HTTP requests"""
         
-        # Check telescope via HTTP
-        self.logger.info("🔭 Checking telescope via HTTP...")
+        # Check telescope
+        self.logger.info("🔭 Checking telescope...")
         try:
             connected = self._http_check_device_connected("127.0.0.1:11111", "telescope", 0)
             if connected:
-                # Get telescope info
-                name, err = self._http_get_device_info("127.0.0.1:11111", "telescope", 0, "name")
+                name, _ = self._http_get_device_info("127.0.0.1:11111", "telescope", 0, "name")
                 description, _ = self._http_get_device_info("127.0.0.1:11111", "telescope", 0, "description")
                 
                 tel_name = name or description or "Unknown Telescope"
@@ -393,16 +559,15 @@ class EmergencyShutdownGUI:
                 self.update_status("Telescope", "Not Connected", "red")
                 
         except Exception as e:
-            self.logger.warning(f"❌ Telescope HTTP check failed: {e}")
+            self.logger.warning(f"❌ Telescope check failed: {e}")
             self.update_status("Telescope", "Check Failed", "red")
             
-        # Check rotator via HTTP
-        self.logger.info("🔄 Checking rotator via HTTP...")
+        # Check rotator
+        self.logger.info("🔄 Checking rotator...")
         try:
             connected = self._http_check_device_connected("127.0.0.1:11112", "rotator", 0)
             if connected:
-                # Get rotator position
-                position, err = self._http_get_device_info("127.0.0.1:11112", "rotator", 0, "position")
+                position, _ = self._http_get_device_info("127.0.0.1:11112", "rotator", 0, "position")
                 name, _ = self._http_get_device_info("127.0.0.1:11112", "rotator", 0, "name")
                 
                 pos_deg = position if position is not None else 0.0
@@ -416,19 +581,17 @@ class EmergencyShutdownGUI:
                 self.update_status("Rotator", "Not Connected", "red")
                 
         except Exception as e:
-            self.logger.warning(f"❌ Rotator HTTP check failed: {e}")
+            self.logger.warning(f"❌ Rotator check failed: {e}")
             self.update_status("Rotator", "Check Failed", "red")
             
-        # Check cover via HTTP
-        self.logger.info("🛡️ Checking cover via HTTP...")
+        # Check cover
+        self.logger.info("🛡️ Checking cover...")
         try:
             connected = self._http_check_device_connected("127.0.0.1:11112", "covercalibrator", 0)
             if connected:
-                # Get cover state
-                cover_state, err = self._http_get_device_info("127.0.0.1:11112", "covercalibrator", 0, "coverstate")
+                cover_state, _ = self._http_get_device_info("127.0.0.1:11112", "covercalibrator", 0, "coverstate")
                 name, _ = self._http_get_device_info("127.0.0.1:11112", "covercalibrator", 0, "name")
                 
-                # Cover state mapping (ASCOM standard)
                 state_map = {0: "Unknown", 1: "Closed", 2: "Moving", 3: "Open", 4: "Error"}
                 state_name = state_map.get(cover_state, f"State{cover_state}")
                 
@@ -444,22 +607,38 @@ class EmergencyShutdownGUI:
                 self.update_status("Cover", "Not Connected", "red")
                 
         except Exception as e:
-            self.logger.warning(f"❌ Cover HTTP check failed: {e}")
+            self.logger.warning(f"❌ Cover check failed: {e}")
             self.update_status("Cover", "Check Failed", "red")
         
         # Summary
         connected_count = sum(1 for dev in self.device_status.values() if dev['connected'])
-        self.logger.info(f"📊 Connection Summary: {connected_count}/3 devices connected via HTTP")
+        self.logger.info(f"📊 Connection Summary: {connected_count}/3 devices connected")
+        
+        if connected_count == 0:
+            self.logger.warning("⚠️ No devices connected - check Autoslew status and connections")
             
     def confirm_emergency_shutdown(self):
         """Show confirmation dialogs before emergency shutdown"""
         if self.shutdown_in_progress:
             return
             
+        # Check if we have any connected devices
+        connected_count = sum(1 for dev in self.device_status.values() if dev['connected'])
+        if connected_count == 0:
+            messagebox.showwarning(
+                "No Devices Connected",
+                "No devices are currently connected.\n\n"
+                "Emergency shutdown requires at least one connected device.\n"
+                "Please check connections first.",
+                icon='warning'
+            )
+            return
+            
         # First confirmation
         result1 = messagebox.askyesno(
             "⚠️ EMERGENCY SHUTDOWN CONFIRMATION",
-            "Are you SURE you want to perform emergency shutdown?\n\n"
+            f"Are you SURE you want to perform emergency shutdown?\n\n"
+            f"Connected devices: {connected_count}/3\n\n"
             "This will:\n"
             "• HALT rotator movement\n"  
             "• CLOSE telescope covers\n"
@@ -472,7 +651,7 @@ class EmergencyShutdownGUI:
         if not result1:
             return
             
-        # Second confirmation (more serious)
+        # Second confirmation
         result2 = messagebox.askyesno(
             "🚨 FINAL CONFIRMATION",
             "LAST CHANCE!\n\n"
@@ -496,6 +675,7 @@ class EmergencyShutdownGUI:
         self.shutdown_in_progress = True
         self.shutdown_btn.config(state='disabled', text="SHUTDOWN IN PROGRESS...")
         self.autoslew_btn.config(state='disabled')
+        self.manual_btn.config(state='disabled')
         self.progress.start()
         
         # Run shutdown in separate thread
@@ -504,11 +684,9 @@ class EmergencyShutdownGUI:
         thread.start()
         
     def _create_driver_for_shutdown(self, driver_class, config, device_name):
-        """
-        ONLY create drivers during shutdown when absolutely necessary
-        """
+        """Create drivers ONLY during shutdown when absolutely necessary"""
         try:
-            self.logger.info(f"🔧 Creating {device_name} driver for shutdown operations...")
+            self.logger.info(f"🔧 Creating {device_name} driver for shutdown...")
             driver = driver_class()
             if driver.connect(config):
                 return driver
@@ -520,7 +698,7 @@ class EmergencyShutdownGUI:
             return None
         
     def _shutdown_worker(self):
-        """Worker thread for emergency shutdown - drivers created ONLY here"""
+        """Worker thread for emergency shutdown"""
         try:
             self.logger.info("="*50)
             self.logger.info("🚨 EMERGENCY SHUTDOWN INITIATED 🚨")
@@ -533,9 +711,9 @@ class EmergencyShutdownGUI:
             success_count = 0
             total_operations = 0
             
-            # 1. Handle rotator if it was detected as connected
+            # 1. Handle rotator if detected as connected
             if self.device_status['rotator']['connected']:
-                self.logger.info("Step 1: Creating rotator driver for shutdown...")
+                self.logger.info("Step 1: Handling rotator shutdown...")
                 self.rotator = self._create_driver_for_shutdown(
                     AlpacaRotatorDriver, 
                     self.device_configs['rotator'], 
@@ -564,11 +742,11 @@ class EmergencyShutdownGUI:
                 else:
                     self.logger.warning("❌ Could not connect to rotator for shutdown")
             else:
-                self.logger.info("Step 1: Rotator not detected - skipping")
+                self.logger.info("Step 1: Rotator not connected - skipping")
                 
-            # 2. Handle cover if it was detected as connected  
+            # 2. Handle cover if detected as connected  
             if self.device_status['cover']['connected']:
-                self.logger.info("Step 2: Creating cover driver for shutdown...")
+                self.logger.info("Step 2: Handling cover shutdown...")
                 self.cover = self._create_driver_for_shutdown(
                     AlpacaCoverDriver,
                     self.device_configs['cover'],
@@ -607,11 +785,11 @@ class EmergencyShutdownGUI:
                 else:
                     self.logger.warning("❌ Could not connect to cover for shutdown")
             else:
-                self.logger.info("Step 2: Cover not detected - skipping")
+                self.logger.info("Step 2: Cover not connected - skipping")
                 
-            # 3. Handle telescope if it was detected as connected
+            # 3. Handle telescope if detected as connected
             if self.device_status['telescope']['connected']:
-                self.logger.info("Step 3: Creating telescope driver for shutdown...")
+                self.logger.info("Step 3: Handling telescope shutdown...")
                 self.telescope = self._create_driver_for_shutdown(
                     AlpacaTelescopeDriver,
                     self.device_configs['telescope'],
@@ -664,7 +842,7 @@ class EmergencyShutdownGUI:
                 else:
                     self.logger.warning("❌ Could not connect to telescope for shutdown")
             else:
-                self.logger.info("Steps 3-4: Telescope not detected - skipping")
+                self.logger.info("Steps 3-4: Telescope not connected - skipping")
                 
             # Summary
             self.logger.info("="*50)
@@ -703,7 +881,7 @@ class EmergencyShutdownGUI:
                                      "Shutdown is in progress. Are you sure you want to exit?"):
                 return
         
-        # Clean exit - no drivers to cleanup since they're only created during shutdown
+        # Clean exit - no persistent drivers to cleanup
         self.logger.info("Exiting application...")
         self.root.quit()
         self.root.destroy()
@@ -715,7 +893,7 @@ class EmergencyShutdownGUI:
         except KeyboardInterrupt:
             self.logger.info("Application interrupted")
         finally:
-            # Minimal cleanup needed since no persistent driver connections
+            # Minimal cleanup needed
             pass
 
 
