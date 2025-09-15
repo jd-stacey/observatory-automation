@@ -405,53 +405,93 @@ class EmergencyShutdownGUI:
             success_count = 0
             total_operations = 0
             
-            # 1. Halt rotator if connected
+            # 1. Halt rotator if connected and moving
             if self.rotator and self.rotator.is_connected():
-                total_operations += 1
-                self.logger.info("Step 1: Halting rotator...")
+                self.logger.info("Step 1: Checking rotator status...")
                 try:
-                    if self.rotator.halt():
-                        self.logger.info("✓ Rotator halted successfully")
-                        self.update_status("Rotator", "Halted", "orange")
-                        success_count += 1
+                    if self.rotator.is_moving():
+                        total_operations += 1
+                        self.logger.info("Rotator is moving - halting...")
+                        if self.rotator.halt():
+                            self.logger.info("✓ Rotator halted successfully")
+                            self.update_status("Rotator", "Halted", "orange")
+                            success_count += 1
+                        else:
+                            self.logger.error("✗ Rotator halt failed")
                     else:
-                        self.logger.error("✗ Rotator halt failed")
+                        self.logger.info("✓ Rotator already stationary - no action needed")
+                        self.update_status("Rotator", "Stationary", "green")
                 except Exception as e:
-                    self.logger.error(f"✗ Rotator halt error: {e}")
+                    self.logger.error(f"✗ Rotator status/halt error: {e}")
             else:
                 self.logger.info("Step 1: Rotator not connected - skipping halt")
                 
-            # 2. Close covers if connected  
-            if self.cover and self.cover.get_cover_state() != "Error":
-                total_operations += 1
-                self.logger.info("Step 2: Closing telescope covers...")
+            # 2. Close covers if connected and not already closed
+            if self.cover:
+                self.logger.info("Step 2: Checking cover status...")
                 try:
-                    if self.cover.close_cover():
-                        self.logger.info("✓ Covers closed successfully")
+                    cover_state = self.cover.get_cover_state()
+                    if cover_state == "Error":
+                        self.logger.warning("Cover in error state - skipping close")
+                    elif cover_state == "Closed":
+                        self.logger.info("✓ Covers already closed - no action needed")
                         self.update_status("Cover", "Closed", "green")
-                        success_count += 1
+                    elif cover_state == "Open":
+                        total_operations += 1
+                        self.logger.info("Covers are open - closing...")
+                        if self.cover.close_cover():
+                            self.logger.info("✓ Covers closed successfully")
+                            self.update_status("Cover", "Closed", "green")
+                            success_count += 1
+                        else:
+                            self.logger.error("✗ Cover close failed")
                     else:
-                        self.logger.error("✗ Cover close failed")
+                        self.logger.warning(f"Unknown cover state '{cover_state}' - attempting close...")
+                        total_operations += 1
+                        if self.cover.close_cover():
+                            self.logger.info("✓ Covers closed successfully")
+                            self.update_status("Cover", "Closed", "green")
+                            success_count += 1
+                        else:
+                            self.logger.error("✗ Cover close failed")
                 except Exception as e:
-                    self.logger.error(f"✗ Cover close error: {e}")
+                    self.logger.error(f"✗ Cover status/close error: {e}")
             else:
                 self.logger.info("Step 2: Cover not connected - skipping close")
                 
-            # 3. Park telescope if connected
+            # 3. Park telescope if connected and not already parked
             if self.telescope and self.telescope.is_connected():
-                total_operations += 2  # Park + motor off
+                self.logger.info("Step 3: Checking telescope status...")
                 
-                self.logger.info("Step 3: Parking telescope...")
+                # Check if already parked
+                park_needed = True
                 try:
-                    if self.telescope.park(max_wait=60):
-                        self.logger.info("✓ Telescope parked successfully") 
-                        success_count += 1
-                    else:
-                        self.logger.error("✗ Telescope park failed or timed out")
+                    if self.telescope.is_parked():
+                        self.logger.info("✓ Telescope already parked - no action needed")
+                        park_needed = False
+                    elif self.telescope.is_slewing():
+                        self.logger.info("Telescope is slewing - aborting slew first...")
+                        self.telescope.abort_slew()
+                        time.sleep(1)
+                        self.logger.info("Slew aborted - proceeding to park...")
                 except Exception as e:
-                    self.logger.error(f"✗ Telescope park error: {e}")
+                    self.logger.warning(f"Could not check telescope park status: {e} - attempting park anyway")
+                
+                # Park if needed
+                if park_needed:
+                    total_operations += 1
+                    self.logger.info("Parking telescope...")
+                    try:
+                        if self.telescope.park(max_wait=60):
+                            self.logger.info("✓ Telescope parked successfully") 
+                            success_count += 1
+                        else:
+                            self.logger.error("✗ Telescope park failed or timed out")
+                    except Exception as e:
+                        self.logger.error(f"✗ Telescope park error: {e}")
                     
-                # 4. Turn off motors
+                # 4. Turn off motors (always attempt - no way to check motor state)
+                total_operations += 1
                 self.logger.info("Step 4: Turning off telescope motors...")
                 try:
                     if self.telescope.motor_off():
@@ -468,7 +508,7 @@ class EmergencyShutdownGUI:
             # Summary
             self.logger.info("="*50)
             if total_operations == 0:
-                self.logger.warning("🔶 SHUTDOWN COMPLETE - No devices were connected")
+                self.logger.warning("🔶 SHUTDOWN COMPLETE - All systems already in safe state")
             elif success_count == total_operations:
                 self.logger.info("✅ EMERGENCY SHUTDOWN COMPLETED SUCCESSFULLY")
             else:
