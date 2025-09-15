@@ -1,88 +1,67 @@
-    def _check_all_connections(self):
-        """Robust connection check using drivers if available, else fallback to HTTP"""
-        if not DRIVERS_AVAILABLE:
-            self.logger.warning("Drivers not available, falling back to HTTP-only checks")
-            return self._check_all_connections_http_fallback()
-
+    def _check_all_connections_http_fallback(self):
+        """Legacy HTTP-only connection check (fallback if drivers not available)"""
+        connected_count = 0
         # Reset status
         for dev in self.device_status.values():
             dev['connected'] = False
             dev['info'] = {}
 
-        connected_count = 0
-
         # Telescope
         try:
-            self.logger.info("🔭 Probing telescope...")
-            from alpaca_telescope import AlpacaTelescopeDriver
-            tel = AlpacaTelescopeDriver()
-            if tel.connect(self.device_configs['telescope']) and tel.is_connected():
-                name = tel.get_name() or "Unknown Telescope"
-                self.logger.info(f"✅ Telescope connected: {name}")
+            self.logger.info("Checking telescope via HTTP...")
+            tel_info = self._check_alpaca_service_ready('telescope')
+            if tel_info and tel_info.get('connected'):
+                name = tel_info.get('name', 'Unknown Telescope')
+                self.logger.info(f"Telescope connected: {name}")
                 self.update_status("Telescope", f"Connected - {name}", "green")
                 self.device_status['telescope']['connected'] = True
-                self.device_status['telescope']['info'] = {'name': name}
+                self.device_status['telescope']['info'] = tel_info
                 connected_count += 1
             else:
-                self.logger.warning("❌ Telescope not responding")
+                self.logger.warning("Telescope not connected")
                 self.update_status("Telescope", "Not Connected", "red")
-            tel.disconnect()
         except Exception as e:
-            self.logger.error(f"Telescope probe failed: {e}")
-            self.update_status("Telescope", "Probe Failed", "red")
+            self.logger.error(f"Telescope check failed: {e}")
+            self.update_status("Telescope", "Check Failed", "red")
 
         # Rotator
         try:
-            self.logger.info("🔄 Probing rotator...")
-            from alpaca_rotator import AlpacaRotatorDriver
-            rot = AlpacaRotatorDriver()
-            if rot.connect(self.device_configs['rotator']) and rot.is_connected():
-                pos = rot.get_position()
-                name = rot.get_name() or "Unknown Rotator"
-                self.logger.info(f"✅ Rotator connected: {name} at {pos:.1f}°")
+            self.logger.info("Checking rotator via HTTP...")
+            rot_info = self._check_alpaca_service_ready('rotator')
+            if rot_info and rot_info.get('connected'):
+                pos = rot_info.get('position_deg', 0)
+                self.logger.info(f"Rotator connected at {pos:.1f}°")
                 self.update_status("Rotator", f"Connected - {pos:.1f}°", "green")
                 self.device_status['rotator']['connected'] = True
-                self.device_status['rotator']['info'] = {'name': name, 'position_deg': pos}
+                self.device_status['rotator']['info'] = rot_info
                 connected_count += 1
             else:
-                self.logger.warning("❌ Rotator not responding")
+                self.logger.warning("Rotator not connected")
                 self.update_status("Rotator", "Not Connected", "red")
-            rot.disconnect()
         except Exception as e:
-            self.logger.error(f"Rotator probe failed: {e}")
-            self.update_status("Rotator", "Probe Failed", "red")
+            self.logger.error(f"Rotator check failed: {e}")
+            self.update_status("Rotator", "Check Failed", "red")
 
         # Cover
         try:
-            self.logger.info("🛡️ Probing cover...")
-            from alpaca_cover import AlpacaCoverDriver
-            cov = AlpacaCoverDriver()
-            if cov.connect(self.device_configs['cover']) and cov.is_connected():
-                state = cov.get_cover_state()
-                name = cov.get_name() or "Unknown Cover"
-                state_map = {"Closed": "Closed", "Open": "Open", "Moving": "Moving", "Error": "Error"}
-                state_name = state_map.get(state, str(state))
-                self.logger.info(f"✅ Cover connected: {name} - {state_name}")
-                color = "green" if state_name == "Closed" else "orange" if state_name == "Open" else "red"
-                self.update_status("Cover", f"Connected - {state_name}", color)
+            self.logger.info("Checking cover via HTTP...")
+            cover_info = self._check_alpaca_service_ready('cover')
+            if cover_info and cover_info.get('connected'):
+                state = cover_info.get('cover_state', 'Unknown')
+                self.logger.info(f"Cover connected - state: {state}")
+                color = "orange" if state == "Open" else "green"
+                self.update_status("Cover", f"Connected - {state}", color)
                 self.device_status['cover']['connected'] = True
-                self.device_status['cover']['info'] = {'name': name, 'cover_state': state_name}
+                self.device_status['cover']['info'] = cover_info
                 connected_count += 1
             else:
-                self.logger.warning("❌ Cover not responding")
+                self.logger.warning("Cover not connected")
                 self.update_status("Cover", "Not Connected", "red")
-            cov.disconnect()
         except Exception as e:
-            self.logger.error(f"Cover probe failed: {e}")
-            self.update_status("Cover", "Probe Failed", "red")
+            self.logger.error(f"Cover check failed: {e}")
+            self.update_status("Cover", "Check Failed", "red")
 
-        self.logger.info(f"📊 Connection Summary: {connected_count}/3 devices connected")
+        self.logger.info(f"Connection Summary: {connected_count}/3 devices connected")
         if connected_count == 0:
-            self.logger.warning("⚠️ No devices responded - check Autoslew and Alpaca services")
+            self.logger.warning("?? No devices connected - check Autoslew status and connections")
         return connected_count
-
-    def _check_all_connections_http_fallback(self):
-        """Legacy HTTP-only connection check (fallback if drivers not available)"""
-        # This is just your old _check_all_connections_http_only code copy/pasted here.
-        # Keep it unchanged as a backup method.
-        ...
