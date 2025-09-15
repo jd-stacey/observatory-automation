@@ -1,21 +1,23 @@
-max_service_wait = 60  # Total time to wait for services
-service_check_interval = 3  # Check every N seconds
-
-for attempt in range(0, max_service_wait, service_check_interval):
-    self.logger.info(f"Testing ASCOM readiness... (attempt {attempt//service_check_interval + 1})")
-    
-    # Try a quick telescope connection test
+def _check_alpaca_service_ready(self, address, device_type, device_number):
+    """Check if ALPACA service responds without connecting"""
     try:
-        test_tel = AlpacaTelescopeDriver()
-        if test_tel.connect(self.device_configs['telescope']):
-            test_tel.disconnect()
-            self.logger.info("ASCOM services appear ready!")
-            break
+        import requests
+        url = f"http://{address}/api/v1/{device_type}/{device_number}/connected"
+        response = requests.get(url, timeout=2)
+        return response.status_code == 200
     except:
-        pass
-        
-    if attempt + service_check_interval >= max_service_wait:
-        self.logger.warning("ASCOM services may not be fully ready, continuing anyway...")
+        return False
+
+# In your progressive testing loop:
+for attempt in range(0, max_service_wait, service_check_interval):
+    self.logger.info(f"Testing ALPACA service readiness... (attempt {attempt//service_check_interval + 1})")
+    
+    # Test if ALPACA HTTP services are responding (no device connection)
+    telescope_ready = self._check_alpaca_service_ready("127.0.0.1:11111", "telescope", 0)
+    rotator_ready = self._check_alpaca_service_ready("127.0.0.1:11112", "rotator", 0)
+    
+    if telescope_ready or rotator_ready:
+        self.logger.info("ALPACA services responding!")
         break
         
     time.sleep(service_check_interval)
