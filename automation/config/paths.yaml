@@ -1,6 +1,6 @@
 raw_images: "P:\\Photometry"                  # Spectro guide cam images go here, too??? P:\\Spectro ??
 spectro_images: "P:\\Spectroscopy"
-logs: "P:\\temp\\logs"
+logs: "P:\\temp\\logs\\T2"
 
 target_json: "P:\\temp\\target_2.json"              # For minerva photometry to read target info
 solver_status_json : "session\\solver_status_json"

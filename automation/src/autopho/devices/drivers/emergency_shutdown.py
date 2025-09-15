@@ -1,0 +1,573 @@
+#!/usr/bin/env python3
+"""
+Emergency Telescope Shutdown Tool
+Safely shuts down telescope system after TCU restart or other emergencies.
+"""
+
+import tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext
+import subprocess
+import time
+import threading
+import logging
+import sys
+from pathlib import Path
+import psutil
+import os
+from typing import Optional, Dict, Any
+
+# Import your existing drivers (assuming they're in the same directory or Python path)
+try:
+    from alpaca_telescope import AlpacaTelescopeDriver, AlpacaTelescopeError
+    from alpaca_rotator import AlpacaRotatorDriver, AlpacaRotatorError  
+    from alpaca_cover import AlpacaCoverDriver, AlpacaCoverError
+    DRIVERS_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: Could not import drivers: {e}")
+    DRIVERS_AVAILABLE = False
+
+class EmergencyShutdownGUI:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("Emergency Telescope Shutdown")
+        self.root.geometry("600x700")
+        self.root.configure(bg='#f0f0f0')
+        
+        # Make window stay on top initially
+        self.root.attributes('-topmost', True)
+        
+        # Device configurations (from your devices.yaml)
+        self.device_configs = {
+            'telescope': {
+                'address': '127.0.0.1:11111',
+                'device_number': 0,
+                'settle_time': 2.0
+            },
+            'rotator': {
+                'address': '127.0.0.1:11112', 
+                'device_number': 0,
+                'settle_time': 0.1,
+                'mechanical_limits': {'min_deg': 94.0, 'max_deg': 320.0}
+            },
+            'cover': {
+                'address': '127.0.0.1:11112',
+                'device_number': 0,
+                'operation_timeout': 30.0,
+                'settle_time': 15.0
+            }
+        }
+        
+        self.autoslew_path = r"C:\Program Files (x86)\Autoslew\Autoslew.exe"
+        
+        # Device drivers
+        self.telescope = None
+        self.rotator = None  
+        self.cover = None
+        
+        # GUI state
+        self.shutdown_in_progress = False
+        self.autoslew_started = False
+        
+        self.setup_logging()
+        self.create_widgets()
+        self.center_window()
+        
+    def setup_logging(self):
+        """Setup logging to display in GUI"""
+        self.log_handler = LogHandler(self)
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[self.log_handler]
+        )
+        self.logger = logging.getLogger(__name__)
+        
+    def create_widgets(self):
+        """Create the GUI widgets"""
+        
+        # Title
+        title_frame = tk.Frame(self.root, bg='#d32f2f', height=60)
+        title_frame.pack(fill='x', padx=5, pady=5)
+        title_frame.pack_propagate(False)
+        
+        title_label = tk.Label(
+            title_frame, 
+            text="🚨 EMERGENCY TELESCOPE SHUTDOWN 🚨", 
+            font=('Arial', 14, 'bold'),
+            fg='white', 
+            bg='#d32f2f'
+        )
+        title_label.pack(expand=True)
+        
+        # Warning text
+        warning_frame = tk.Frame(self.root, bg='#fff3cd', relief='solid', bd=1)
+        warning_frame.pack(fill='x', padx=10, pady=5)
+        
+        warning_text = tk.Text(
+            warning_frame, 
+            height=4, 
+            bg='#fff3cd', 
+            fg='#856404',
+            font=('Arial', 10),
+            relief='flat',
+            wrap='word'
+        )
+        warning_text.pack(fill='x', padx=10, pady=10)
+        warning_text.insert('1.0', 
+            "⚠️  This tool performs emergency shutdown of telescope systems.\n"
+            "⚠️  Use only after TCU restart or system failure.\n"
+            "⚠️  This will STOP rotator, CLOSE covers, PARK telescope, and turn OFF motors.\n"
+            "⚠️  Multiple confirmations required - do not use during normal operations!")
+        warning_text.config(state='disabled')
+        
+        # Buttons frame
+        button_frame = tk.Frame(self.root, bg='#f0f0f0')
+        button_frame.pack(fill='x', padx=10, pady=10)
+        
+        # Start Autoslew button
+        self.autoslew_btn = tk.Button(
+            button_frame,
+            text="1. Start Autoslew & Check Connections",
+            command=self.start_autoslew_and_check,
+            bg='#4CAF50',
+            fg='white',
+            font=('Arial', 11, 'bold'),
+            height=2
+        )
+        self.autoslew_btn.pack(fill='x', pady=5)
+        
+        # Emergency shutdown button (initially disabled)
+        self.shutdown_btn = tk.Button(
+            button_frame,
+            text="2. EMERGENCY SHUTDOWN",
+            command=self.confirm_emergency_shutdown,
+            bg='#d32f2f',
+            fg='white', 
+            font=('Arial', 11, 'bold'),
+            height=2,
+            state='disabled'
+        )
+        self.shutdown_btn.pack(fill='x', pady=5)
+        
+        # Exit button
+        self.exit_btn = tk.Button(
+            button_frame,
+            text="Exit",
+            command=self.safe_exit,
+            bg='#6c757d',
+            fg='white',
+            font=('Arial', 10)
+        )
+        self.exit_btn.pack(fill='x', pady=5)
+        
+        # Status frame
+        status_frame = tk.LabelFrame(self.root, text="System Status", bg='#f0f0f0', font=('Arial', 10, 'bold'))
+        status_frame.pack(fill='x', padx=10, pady=5)
+        
+        # Status labels
+        self.status_labels = {}
+        for device in ['Autoslew', 'Telescope', 'Rotator', 'Cover']:
+            frame = tk.Frame(status_frame, bg='#f0f0f0')
+            frame.pack(fill='x', padx=5, pady=2)
+            
+            label = tk.Label(frame, text=f"{device}:", bg='#f0f0f0', font=('Arial', 9))
+            label.pack(side='left')
+            
+            status = tk.Label(frame, text="Not Connected", bg='#f0f0f0', fg='red', font=('Arial', 9, 'bold'))
+            status.pack(side='right')
+            
+            self.status_labels[device] = status
+            
+        # Log display
+        log_frame = tk.LabelFrame(self.root, text="Activity Log", bg='#f0f0f0', font=('Arial', 10, 'bold'))
+        log_frame.pack(fill='both', expand=True, padx=10, pady=5)
+        
+        self.log_display = scrolledtext.ScrolledText(
+            log_frame, 
+            height=10, 
+            bg='black', 
+            fg='lime',
+            font=('Consolas', 9),
+            state='disabled'
+        )
+        self.log_display.pack(fill='both', expand=True, padx=5, pady=5)
+        
+        # Progress bar
+        self.progress = ttk.Progressbar(self.root, mode='indeterminate')
+        self.progress.pack(fill='x', padx=10, pady=5)
+        
+        self.logger.info("Emergency Shutdown Tool initialized")
+        self.logger.info("Click 'Start Autoslew & Check Connections' to begin")
+        
+    def center_window(self):
+        """Center window on screen"""
+        self.root.update_idletasks()
+        x = (self.root.winfo_screenwidth() // 2) - (self.root.winfo_width() // 2)
+        y = (self.root.winfo_screenheight() // 2) - (self.root.winfo_height() // 2)
+        self.root.geometry(f"+{x}+{y}")
+        
+    def update_status(self, device: str, status: str, color: str = 'red'):
+        """Update device status display"""
+        if device in self.status_labels:
+            self.status_labels[device].config(text=status, fg=color)
+            
+    def is_autoslew_running(self) -> bool:
+        """Check if Autoslew is already running"""
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                if 'autoslew' in proc.info['name'].lower():
+                    return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        return False
+        
+    def start_autoslew_and_check(self):
+        """Start Autoslew and check device connections"""
+        if self.shutdown_in_progress:
+            return
+            
+        # Disable button and start progress
+        self.autoslew_btn.config(state='disabled')
+        self.progress.start()
+        
+        # Run in separate thread
+        thread = threading.Thread(target=self._autoslew_and_check_worker)
+        thread.daemon = True
+        thread.start()
+        
+    def _autoslew_and_check_worker(self):
+        """Worker thread for Autoslew startup and connection checking"""
+        try:
+            # Check if Autoslew is already running
+            if self.is_autoslew_running():
+                self.logger.info("Autoslew is already running")
+                self.update_status("Autoslew", "Running", "green")
+                self.autoslew_started = True
+            else:
+                self.logger.info("Starting Autoslew...")
+                self.update_status("Autoslew", "Starting...", "orange")
+                
+                if not os.path.exists(self.autoslew_path):
+                    raise FileNotFoundError(f"Autoslew not found at: {self.autoslew_path}")
+                    
+                # Start Autoslew
+                subprocess.Popen([self.autoslew_path], shell=True)
+                
+                # Wait for Autoslew to start
+                max_wait = 30  # seconds
+                for i in range(max_wait):
+                    if self.is_autoslew_running():
+                        self.logger.info("Autoslew started successfully")
+                        self.update_status("Autoslew", "Running", "green")
+                        self.autoslew_started = True
+                        break
+                    time.sleep(1)
+                else:
+                    raise TimeoutError("Autoslew failed to start within 30 seconds")
+                    
+            # Additional wait for ASCOM/ALPACA services to be ready
+            self.logger.info("Waiting for ASCOM services to initialize...")
+            time.sleep(5)
+            
+            # Check device connections
+            self.logger.info("Checking device connections...")
+            self._check_all_connections()
+            
+        except Exception as e:
+            self.logger.error(f"Failed to start Autoslew: {e}")
+        finally:
+            # Re-enable UI on main thread
+            self.root.after(0, self._finish_autoslew_check)
+            
+    def _finish_autoslew_check(self):
+        """Finish Autoslew check on main thread"""
+        self.progress.stop()
+        self.autoslew_btn.config(state='normal')
+        
+        # Enable shutdown button if Autoslew is running
+        if self.autoslew_started:
+            self.shutdown_btn.config(state='normal')
+            
+    def _check_all_connections(self):
+        """Check connections to all devices"""
+        
+        if not DRIVERS_AVAILABLE:
+            self.logger.error("Device drivers not available - cannot check connections")
+            return
+            
+        # Check telescope
+        self.logger.info("Testing telescope connection...")
+        try:
+            self.telescope = AlpacaTelescopeDriver()
+            if self.telescope.connect(self.device_configs['telescope']):
+                tel_info = self.telescope.get_telescope_info()
+                self.logger.info(f"Telescope connected: {tel_info.get('name', 'Unknown')}")
+                self.update_status("Telescope", f"Connected - {tel_info.get('name', 'Unknown')}", "green")
+            else:
+                raise AlpacaTelescopeError("Connection failed")
+        except Exception as e:
+            self.logger.warning(f"Telescope connection failed: {e}")
+            self.update_status("Telescope", "Connection Failed", "red")
+            self.telescope = None
+            
+        # Check rotator  
+        self.logger.info("Testing rotator connection...")
+        try:
+            self.rotator = AlpacaRotatorDriver()
+            if self.rotator.connect(self.device_configs['rotator']):
+                rot_info = self.rotator.get_rotator_info()
+                pos = rot_info.get('position_deg', 0)
+                self.logger.info(f"Rotator connected: {rot_info.get('name', 'Unknown')} at {pos:.1f}°")
+                self.update_status("Rotator", f"Connected - {pos:.1f}°", "green")
+            else:
+                raise AlpacaRotatorError("Connection failed")
+        except Exception as e:
+            self.logger.warning(f"Rotator connection failed: {e}")
+            self.update_status("Rotator", "Connection Failed", "red")
+            self.rotator = None
+            
+        # Check cover
+        self.logger.info("Testing cover connection...")
+        try:
+            self.cover = AlpacaCoverDriver()
+            if self.cover.connect(self.device_configs['cover']):
+                cover_info = self.cover.get_cover_info()
+                state = cover_info.get('cover_state', 'Unknown')
+                self.logger.info(f"Cover connected: {cover_info.get('name', 'Unknown')} - {state}")
+                color = "orange" if state == "Open" else "green"
+                self.update_status("Cover", f"Connected - {state}", color)
+            else:
+                raise AlpacaCoverError("Connection failed")
+        except Exception as e:
+            self.logger.warning(f"Cover connection failed: {e}")
+            self.update_status("Cover", "Connection Failed", "red")
+            self.cover = None
+            
+    def confirm_emergency_shutdown(self):
+        """Show confirmation dialogs before emergency shutdown"""
+        if self.shutdown_in_progress:
+            return
+            
+        # First confirmation
+        result1 = messagebox.askyesno(
+            "⚠️ EMERGENCY SHUTDOWN CONFIRMATION",
+            "Are you SURE you want to perform emergency shutdown?\n\n"
+            "This will:\n"
+            "• HALT rotator movement\n"  
+            "• CLOSE telescope covers\n"
+            "• PARK telescope\n"
+            "• Turn OFF telescope motors\n\n"
+            "Continue?",
+            icon='warning'
+        )
+        
+        if not result1:
+            return
+            
+        # Second confirmation (more serious)
+        result2 = messagebox.askyesno(
+            "🚨 FINAL CONFIRMATION",
+            "LAST CHANCE!\n\n"
+            "Are you ABSOLUTELY CERTAIN you want to shutdown the telescope system?\n\n"
+            "This action cannot be undone and will stop all telescope operations.\n\n"
+            "Only proceed if this is a genuine emergency!",
+            icon='error'
+        )
+        
+        if not result2:
+            return
+            
+        # Proceed with shutdown
+        self.perform_emergency_shutdown()
+        
+    def perform_emergency_shutdown(self):
+        """Perform the actual emergency shutdown sequence"""
+        if self.shutdown_in_progress:
+            return
+            
+        self.shutdown_in_progress = True
+        self.shutdown_btn.config(state='disabled', text="SHUTDOWN IN PROGRESS...")
+        self.autoslew_btn.config(state='disabled')
+        self.progress.start()
+        
+        # Run shutdown in separate thread
+        thread = threading.Thread(target=self._shutdown_worker)
+        thread.daemon = True
+        thread.start()
+        
+    def _shutdown_worker(self):
+        """Worker thread for emergency shutdown"""
+        try:
+            self.logger.info("="*50)
+            self.logger.info("🚨 EMERGENCY SHUTDOWN INITIATED 🚨")
+            self.logger.info("="*50)
+            
+            success_count = 0
+            total_operations = 0
+            
+            # 1. Halt rotator if connected
+            if self.rotator and self.rotator.is_connected():
+                total_operations += 1
+                self.logger.info("Step 1: Halting rotator...")
+                try:
+                    if self.rotator.halt():
+                        self.logger.info("✓ Rotator halted successfully")
+                        self.update_status("Rotator", "Halted", "orange")
+                        success_count += 1
+                    else:
+                        self.logger.error("✗ Rotator halt failed")
+                except Exception as e:
+                    self.logger.error(f"✗ Rotator halt error: {e}")
+            else:
+                self.logger.info("Step 1: Rotator not connected - skipping halt")
+                
+            # 2. Close covers if connected  
+            if self.cover and self.cover.get_cover_state() != "Error":
+                total_operations += 1
+                self.logger.info("Step 2: Closing telescope covers...")
+                try:
+                    if self.cover.close_cover():
+                        self.logger.info("✓ Covers closed successfully")
+                        self.update_status("Cover", "Closed", "green")
+                        success_count += 1
+                    else:
+                        self.logger.error("✗ Cover close failed")
+                except Exception as e:
+                    self.logger.error(f"✗ Cover close error: {e}")
+            else:
+                self.logger.info("Step 2: Cover not connected - skipping close")
+                
+            # 3. Park telescope if connected
+            if self.telescope and self.telescope.is_connected():
+                total_operations += 2  # Park + motor off
+                
+                self.logger.info("Step 3: Parking telescope...")
+                try:
+                    if self.telescope.park(max_wait=60):
+                        self.logger.info("✓ Telescope parked successfully") 
+                        success_count += 1
+                    else:
+                        self.logger.error("✗ Telescope park failed or timed out")
+                except Exception as e:
+                    self.logger.error(f"✗ Telescope park error: {e}")
+                    
+                # 4. Turn off motors
+                self.logger.info("Step 4: Turning off telescope motors...")
+                try:
+                    if self.telescope.motor_off():
+                        self.logger.info("✓ Telescope motors turned off")
+                        self.update_status("Telescope", "Parked & Motors Off", "green")
+                        success_count += 1
+                    else:
+                        self.logger.error("✗ Motor shutdown failed")
+                except Exception as e:
+                    self.logger.error(f"✗ Motor shutdown error: {e}")
+            else:
+                self.logger.info("Steps 3-4: Telescope not connected - skipping park and motor off")
+                
+            # Summary
+            self.logger.info("="*50)
+            if total_operations == 0:
+                self.logger.warning("🔶 SHUTDOWN COMPLETE - No devices were connected")
+            elif success_count == total_operations:
+                self.logger.info("✅ EMERGENCY SHUTDOWN COMPLETED SUCCESSFULLY")
+            else:
+                self.logger.warning(f"⚠️ SHUTDOWN PARTIAL - {success_count}/{total_operations} operations successful")
+            self.logger.info("="*50)
+            
+        except Exception as e:
+            self.logger.error(f"💥 CRITICAL ERROR during shutdown: {e}")
+        finally:
+            # Update UI on main thread
+            self.root.after(0, self._finish_shutdown)
+            
+    def _finish_shutdown(self):
+        """Finish shutdown on main thread"""
+        self.progress.stop()
+        self.shutdown_btn.config(text="SHUTDOWN COMPLETE", bg='#6c757d')
+        
+        # Show completion dialog
+        messagebox.showinfo(
+            "Shutdown Complete",
+            "Emergency shutdown sequence finished.\n\n"
+            "Check the activity log above for detailed results.\n\n"
+            "You may now close this application.",
+            icon='info'
+        )
+        
+    def safe_exit(self):
+        """Safely exit the application"""
+        if self.shutdown_in_progress:
+            if not messagebox.askyesno("Exit During Shutdown?", 
+                                     "Shutdown is in progress. Are you sure you want to exit?"):
+                return
+                
+        self.root.quit()
+        self.root.destroy()
+        
+    def run(self):
+        """Start the GUI application"""
+        try:
+            self.root.mainloop()
+        except KeyboardInterrupt:
+            self.logger.info("Application interrupted")
+        finally:
+            # Cleanup
+            try:
+                if self.telescope:
+                    self.telescope.disconnect()
+                if self.rotator:
+                    self.rotator.disconnect()  
+                if self.cover:
+                    self.cover.disconnect()
+            except:
+                pass
+
+
+class LogHandler(logging.Handler):
+    """Custom log handler to display logs in the GUI"""
+    
+    def __init__(self, gui):
+        super().__init__()
+        self.gui = gui
+        
+    def emit(self, record):
+        """Emit a log record to the GUI"""
+        try:
+            msg = self.format(record)
+            # Schedule GUI update on main thread
+            self.gui.root.after(0, lambda: self._update_log_display(msg))
+        except Exception:
+            pass
+            
+    def _update_log_display(self, message):
+        """Update log display widget"""
+        try:
+            self.gui.log_display.config(state='normal')
+            self.gui.log_display.insert(tk.END, message + '\n')
+            self.gui.log_display.see(tk.END)
+            self.gui.log_display.config(state='disabled')
+        except Exception:
+            pass
+
+
+def main():
+    """Main entry point"""
+    if not DRIVERS_AVAILABLE:
+        print("ERROR: Required device drivers not found!")
+        print("Make sure alpaca_telescope.py, alpaca_rotator.py, and alpaca_cover.py are in the same directory.")
+        input("Press Enter to exit...")
+        return 1
+        
+    try:
+        app = EmergencyShutdownGUI()
+        app.run()
+        return 0
+    except Exception as e:
+        print(f"Application error: {e}")
+        input("Press Enter to exit...")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

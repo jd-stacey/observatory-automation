@@ -3,6 +3,7 @@ import logging
 from rich.logging import RichHandler
 import argparse
 from pathlib import Path
+from datetime import datetime, timezone
 
 
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
@@ -18,30 +19,42 @@ from autopho.platesolving.corrector import PlatesolveCorrector, PlatesolveCorrec
 from autopho.devices.drivers.alpaca_rotator import AlpacaRotatorDriver, AlpacaRotatorError
 from autopho.imaging.session import ImagingSession, ImagingSessionError
 
-def setup_logging(log_level: str = "INFO"):
+def setup_logging(log_level: str, log_dir: Path, log_name: str = None):
     numeric_level = getattr(logging, log_level.upper(), None)
     if not isinstance(numeric_level, int):
         raise ValueError(f"Invalid log level: {log_level}")
     
+    log_dir.mkdir(parents=True, exist_ok=True)
     
+    if log_name is None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        log_name = f"{timestamp}_session.log"
+        
+    logfile = log_dir / log_name
+    
+    console_handler = RichHandler(
+        rich_tracebacks=True,
+        markup=True, 
+        show_path=True
+        )
+    
+    console_handler.setFormatter(logging.Formatter("%(message)s"))
+    console_handler.setLevel(numeric_level)
+    
+    
+    file_handler = logging.FileHandler(logfile, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="[%Y-%m-%d %H:%M:%S]"
+    ))
+    file_handler.setLevel(logging.DEBUG)
+        
     logging.basicConfig(
-        level=numeric_level,
-        format="%(message)s",
-        datefmt="[%X]",
-        handlers=[
-            RichHandler(rich_tracebacks=True,
-                        markup=True, 
-                        show_path=True
-                        )
-        ]
+        level=logging.DEBUG,
+        handlers=[console_handler, file_handler]
     )
-    # logging.basicConfig(
-    #     level=numeric_level,
-    #     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    #     handlers=[
-    #         logging.StreamHandler(sys.stdout),
-    #     ]
-    # )
+    
+    return logfile
 
 def main():
     parser = argparse.ArgumentParser(
@@ -132,8 +145,24 @@ def main():
     if args.tic_id and args.coords:
         parser.error("Cannot use both tic_id and --coords - choose one")
     
-    setup_logging(args.log_level)
-    logger = logging.getLogger(__name__)
+    try:
+        config_loader = ConfigLoader(args.config_dir)
+        config_loader.load_all_configs()
+        log_dir = Path(config_loader.get_config("paths")["logs"])
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        if args.tic_id:    
+            log_name = f"{timestamp}_{args.tic_id}.log"
+        elif args.coords:
+            log_name = f"{timestamp}_MANUAL.log"
+        else:
+            log_name = f"{timestamp}_session.log"
+    
+        logfile = setup_logging(args.log_level, log_dir, log_name)
+        logger = logging.getLogger(__name__)
+        logger.info(f"Logging to {logfile}")
+    except Exception as e:
+        logger.error(f"Logging setup error: {e}")
+           
     logging.getLogger('astroquery').setLevel(logging.WARNING)
     logging.getLogger('urllib3.connectionpool').setLevel(logging.INFO)
     logger.info("="*75)

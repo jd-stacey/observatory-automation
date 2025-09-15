@@ -178,7 +178,7 @@ class SpectroscopyImagingSession(ImagingSession):
                 self.logger.debug(f"Calculated exposure from magnitude {target_info.gaia_g_mag}: {final_exposure:.1f}s")
             else:
                 # Final fallback
-                final_exposure = 10.0
+                final_exposure = 120.0
                 self.logger.debug(f"Using fallback exposure time: {final_exposure:.1f}s")
         
         # Store the final exposure time

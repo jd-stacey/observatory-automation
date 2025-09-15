@@ -28,7 +28,7 @@ acquisition:
 
 spectro_acquisition:
   enabled: true
-  exposure_time: 10.0 #15.0              # exposure time during acquisition phase
+  exposure_time: 120.0 #15.0              # exposure time during acquisition phase
   correction_interval: 1          # checks for correction required between N frames during acquisition
   max_total_offset_arcsec: 2.0    # once total offset >= this number, switch to science frames/folder
   max_attempts: 45

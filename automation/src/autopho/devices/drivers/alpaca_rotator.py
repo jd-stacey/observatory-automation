@@ -607,6 +607,7 @@ class FieldRotationTracker:
                         # Safety check
                         is_safe, _ = self.rotator.check_position_safety(target_position)
                         if is_safe:
+                            logger.debug(f"Moving rotator to {target_position}°")
                             self.rotator.rotator.MoveAbsolute(target_position)
                             if settle_time > 0:
                                 time.sleep(settle_time)
