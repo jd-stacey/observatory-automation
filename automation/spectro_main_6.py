@@ -6,7 +6,7 @@ from pathlib import Path
 import json
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
@@ -15,6 +15,7 @@ from autopho.config.loader import ConfigLoader, ConfigurationError
 from autopho.targets.resolver import TICTargetResolver, TargetInfo
 from autopho.devices.drivers.alpaca_telescope import AlpacaTelescopeDriver
 from autopho.devices.drivers.alpaca_cover import AlpacaCoverDriver
+from autopho.devices.drivers.alpaca_focuser import AlpacaFocuserDriver
 from autopho.devices.camera import CameraManager, CameraError
 from autopho.targets.observability import ObservabilityChecker
 from autopho.platesolving.corrector import PlatesolveCorrector, PlatesolveCorrectorError
@@ -23,18 +24,42 @@ from autopho.imaging.session import ImagingSession, ImagingSessionError
 logger = logging.getLogger(__name__)
 
 
-def setup_logging(log_level: str = "INFO"):
+def setup_logging(log_level: str, log_dir: Path, log_name: str = None):
     numeric_level = getattr(logging, log_level.upper(), None)
     if not isinstance(numeric_level, int):
         raise ValueError(f"Invalid log level: {log_level}")
     
+    log_dir.mkdir(parents=True, exist_ok=True)
+    
+    if log_name is None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        log_name = f"{timestamp}_spec.log"
+        
+    logfile = log_dir / log_name
+    
+    console_handler = RichHandler(
+        rich_tracebacks=True,
+        markup=True, 
+        show_path=True
+        )
+    
+    console_handler.setFormatter(logging.Formatter("%(message)s"))
+    console_handler.setLevel(numeric_level)
+    
+    
+    file_handler = logging.FileHandler(logfile, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="[%Y-%m-%d %H:%M:%S]"
+    ))
+    file_handler.setLevel(logging.DEBUG)
+        
     logging.basicConfig(
-        level=numeric_level,
-        format="%(message)s",
-        datefmt="[%X]",
-        handlers=[RichHandler(rich_tracebacks=True, markup=True, show_path=True)]
+        level=logging.DEBUG,
+        handlers=[console_handler, file_handler]
     )
-
+    
+    return logfile
 
 class TelescopeMirror:
     """Handles mirroring coordinates from another telescope via JSON file"""
@@ -209,7 +234,8 @@ class SpectroscopyImagingSession(ImagingSession):
             # Initialize parent with 'C' filter (clear) for spectroscopy
             super().__init__(camera_manager, corrector, config_loader, target_info,
                              filter_code='C', ignore_twilight=ignore_twilight,
-                             exposure_override=exposure_override, images_base_path=spectro_root)
+                             exposure_override=exposure_override, images_base_path=spectro_root,
+                             is_spectroscopy=True)
             
             self.acquisition_config.update(spectro_acq_cfg)
             
@@ -576,8 +602,22 @@ def main():
     if args.target_mode in ['tic', 'coords'] and not args.target_value:
         parser.error(f"Target mode '{args.target_mode}' requires a target value")
 
-    setup_logging(args.log_level)
+    config_loader = ConfigLoader(args.config_dir)
+    config_loader.load_all_configs()
+    
+    log_dir = Path(config_loader.get_config("paths")["logs"])
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+    if args.target_mode == "tic":
+        log_name = f"{timestamp}_{args.target_value}_spec.log"
+    elif args.target_mode == "coords":
+        log_name = f"{timestamp}_MANUAL_spec.log"
+    else:  # mirror mode
+        log_name = f"{timestamp}_MIRROR_spec.log"
+        
+    logfile = setup_logging(args.log_level, log_dir, log_name)
     logger = logging.getLogger(__name__)
+    logger.info(f"Logging to {logfile}")
     logging.getLogger('astroquery').setLevel(logging.WARNING)
     logging.getLogger('urllib3.connectionpool').setLevel(logging.INFO)
 
@@ -588,8 +628,6 @@ def main():
     corrector = None
 
     try:
-        config_loader = ConfigLoader(args.config_dir)
-        config_loader.load_all_configs()
 
         if not args.dry_run:
             logger.info("Discovering cameras...")
