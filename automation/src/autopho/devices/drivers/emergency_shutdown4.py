@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Emergency Telescope Shutdown Tool
+Telescope Shutdown Tool
 Safely shuts down telescope system after TCU restart or other emergencies.
 FIXED: Handles CLServo.dll missing error and provides alternative startup methods
 """
@@ -33,7 +33,7 @@ except ImportError as e:
 class EmergencyShutdownGUI:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Emergency Telescope Shutdown")
+        self.root.title("Raptor (T2) Telescope Shutdown")
         self.root.geometry("700x850")  # Slightly taller for error handling
         self.root.configure(bg='#f0f0f0')
         
@@ -93,7 +93,8 @@ class EmergencyShutdownGUI:
         self.log_handler = LogHandler(self)
         logging.basicConfig(
             level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
+            format='%(asctime)s [%(levelname)s] %(message)s',
+            datefmt="%Y%m%d %H%M%S",
             handlers=[self.log_handler]
         )
         self.logger = logging.getLogger(__name__)
@@ -108,7 +109,7 @@ class EmergencyShutdownGUI:
         
         title_label = tk.Label(
             title_frame, 
-            text="⚠️ EMERGENCY TELESCOPE SHUTDOWN ⚠️", 
+            text="⚠️ RAPTOR (T2) TELESCOPE SHUTDOWN ⚠️", 
             font=('Arial', 14, 'bold'),
             fg='white', 
             bg='#d32f2f'
@@ -130,8 +131,8 @@ class EmergencyShutdownGUI:
         )
         warning_text.pack(fill='x', padx=10, pady=10)
         warning_text.insert('1.0', 
-            "⚠️  This tool performs emergency shutdown of telescope systems.\n"
-            "⚠️  Use only after TCU restart or system failure.\n"
+            "⚠️  This tool performs full shutdown of telescope systems.\n"
+            "⚠️  Use after TCU restart, system failure or at end of observing session.\n"
             "⚠️  This will STOP rotator, CLOSE covers, PARK telescope, and turn OFF motors.\n"
             "⚠️  Multiple confirmations required - do not use during normal operations!")
         warning_text.config(state='disabled')
@@ -155,7 +156,7 @@ class EmergencyShutdownGUI:
         # Manual check button (initially hidden)
         self.manual_btn = tk.Button(
             button_frame,
-            text="1b. Manual Check (if Autoslew won't start)",
+            text="1b. Manual Check Connections",
             command=self.manual_check_connections,
             bg='#FF9800',
             fg='white',
@@ -167,7 +168,7 @@ class EmergencyShutdownGUI:
         # Emergency shutdown button (initially disabled)
         self.shutdown_btn = tk.Button(
             button_frame,
-            text="2. EMERGENCY SHUTDOWN",
+            text="2. TELESCOPE SHUTDOWN",
             command=self.confirm_emergency_shutdown,
             bg='#d32f2f',
             fg='white', 
@@ -235,7 +236,7 @@ class EmergencyShutdownGUI:
         self.progress = ttk.Progressbar(self.root, mode='indeterminate')
         self.progress.pack(fill='x', padx=10, pady=5)
         
-        self.logger.info("Emergency Shutdown Tool initialized")
+        self.logger.info("Telescope Shutdown Tool initialized")
         
     def check_autoslew_installation(self):
         """Check for common Autoslew installation issues"""
@@ -251,7 +252,7 @@ class EmergencyShutdownGUI:
             self.fix_dll_btn.pack(fill='x', pady=2)
             self.logger.info("   Click '🔧 Try to Fix CLServo.dll Issue' button below if Autoslew fails to start")
         else:
-            self.logger.info("✅ CLServo.dll found")
+            self.logger.debug("✅ CLServo.dll found")
             
         self.logger.info("Click 'Start Autoslew & Check Connections' to begin")
         
@@ -424,6 +425,10 @@ class EmergencyShutdownGUI:
             
     def _check_alpaca_service_ready(self, address, device_type, device_number):
         """Check if ALPACA service responds"""
+        # if device_type == 'telescope':
+        #     self.logger.info("Waiting 30 seconds for Autoslew to connect to telescope...")
+        #     time.sleep(30)
+        
         try:
             connected = self._http_check_device_connected(address, device_type, device_number)
             return connected is not None  # Service responded (even if device not connected)
@@ -561,6 +566,7 @@ class EmergencyShutdownGUI:
             
             # Wait for full initialization
             self.logger.info("⏳ Waiting for Autoslew full initialization...")
+            time.sleep(30)
             max_service_wait = 180  # 3 minutes for problem cases
             service_ready = False
             
@@ -630,59 +636,106 @@ class EmergencyShutdownGUI:
             self.update_status("Telescope", "Check Failed", "red")
             
         # Check rotator
-        self.logger.info("🔄 Checking rotator...")
+        
+        self.logger.info("Testing rotator connection...")
         try:
-            connected = self._http_check_device_connected("127.0.0.1:11112", "rotator", 0)
-            if connected:
-                position, _ = self._http_get_device_info("127.0.0.1:11112", "rotator", 0, "position")
-                name, _ = self._http_get_device_info("127.0.0.1:11112", "rotator", 0, "name")
-                
-                pos_deg = position if position is not None else 0.0
-                rot_name = name or "Unknown Rotator"
-                self.logger.info(f"✅ Rotator connected: {rot_name} at {pos_deg:.1f}°")
-                self.update_status("Rotator", f"Connected - {pos_deg:.1f}°", "green")
+            self.rotator = AlpacaRotatorDriver()
+            if self.rotator.connect(self.device_configs['rotator']):
+                rot_info = self.rotator.get_rotator_info()
+                pos = rot_info.get('position_deg', 0)
+                rot_name = rot_info.get('name', 'Rotator')
+                self.logger.info(f"✅ Rotator connected: {rot_name} at {pos:.2f}°")
+                self.update_status("Rotator", f"Connected - {pos:.2f}°", "green")
                 self.device_status['rotator']['connected'] = True
-                self.device_status['rotator']['info'] = {'name': rot_name, 'position_deg': pos_deg}
+                self.device_status['rotator']['info'] = {'name': rot_name, 'position_deg': pos}
             else:
-                self.logger.warning("❌ Rotator not connected")
                 self.update_status("Rotator", "Not Connected", "red")
+                raise AlpacaRotatorError("Connection failed")
                 
         except Exception as e:
-            self.logger.warning(f"❌ Rotator check failed: {e}")
-            self.update_status("Rotator", "Check Failed", "red")
+            self.logger.warning(f"❌ Rotator connection failed: {e}")
+            self.update_status("Rotator", "Connection Failed", "red")
+            self.rotator = None
+        
+        
+        
+        # self.logger.info("🔄 Checking rotator...")
+        # try:
+        #     connected = self._http_check_device_connected("127.0.0.1:11112", "rotator", 0)
+        #     if connected:
+        #         position, _ = self._http_get_device_info("127.0.0.1:11112", "rotator", 0, "position")
+        #         name, _ = self._http_get_device_info("127.0.0.1:11112", "rotator", 0, "name")
+                
+        #         pos_deg = position if position is not None else 0.0
+        #         rot_name = name or "Unknown Rotator"
+        #         self.logger.info(f"✅ Rotator connected: {rot_name} at {pos_deg:.1f}°")
+        #         self.update_status("Rotator", f"Connected - {pos_deg:.1f}°", "green")
+        #         self.device_status['rotator']['connected'] = True
+        #         self.device_status['rotator']['info'] = {'name': rot_name, 'position_deg': pos_deg}
+        #     else:
+        #         self.logger.warning("❌ Rotator not connected")
+        #         self.update_status("Rotator", "Not Connected", "red")
+                
+        # except Exception as e:
+        #     self.logger.warning(f"❌ Rotator check failed: {e}")
+        #     self.update_status("Rotator", "Check Failed", "red")
             
         # Check cover
-        self.logger.info("🛡️ Checking cover...")
+        
+        self.logger.info("Testing cover connection...")
         try:
-            connected = self._http_check_device_connected("127.0.0.1:11112", "covercalibrator", 0)
-            if connected:
-                cover_state, _ = self._http_get_device_info("127.0.0.1:11112", "covercalibrator", 0, "coverstate")
-                name, _ = self._http_get_device_info("127.0.0.1:11112", "covercalibrator", 0, "name")
-                
-                state_map = {0: "Unknown", 1: "Closed", 2: "Moving", 3: "Open", 4: "Error"}
-                state_name = state_map.get(cover_state, f"State{cover_state}")
-                
-                cover_name = name or "Unknown Cover"
-                self.logger.info(f"✅ Cover connected: {cover_name} - {state_name}")
-                
-                color = "green" if state_name == "Closed" else "orange" if state_name == "Open" else "red"
-                self.update_status("Cover", f"Connected - {state_name}", color)
+            self.cover = AlpacaCoverDriver()
+            if self.cover.connect(self.device_configs['cover']):
+                cover_info = self.cover.get_cover_info()
+                state = cover_info.get('cover_state', 'Unknown')
+                cov_name = cover_info.get('name', 'Cover')
+                self.logger.info(f"✅ Cover connected: {cov_name} - {state}")
+                color = "orange" if state == "Open" else "green"
+                self.update_status("Cover", f"Connected - {state}", color)
                 self.device_status['cover']['connected'] = True
-                self.device_status['cover']['info'] = {'name': cover_name, 'cover_state': state_name}
+                self.device_status['cover']['info'] = {'name': cov_name, 'cover_state': state}
             else:
-                self.logger.warning("❌ Cover not connected")
                 self.update_status("Cover", "Not Connected", "red")
-                
+                raise AlpacaCoverError("Connection failed")
         except Exception as e:
-            self.logger.warning(f"❌ Cover check failed: {e}")
-            self.update_status("Cover", "Check Failed", "red")
+            self.logger.warning(f"❌ Cover connection failed: {e}")
+            self.update_status("Cover", "Connection Failed", "red")
+            self.cover = None
+        
+        
+        
+        # self.logger.info("🛡️ Checking cover...")
+        # try:
+        #     connected = self._http_check_device_connected("127.0.0.1:11112", "covercalibrator", 0)
+        #     if connected:
+        #         cover_state, _ = self._http_get_device_info("127.0.0.1:11112", "covercalibrator", 0, "coverstate")
+        #         name, _ = self._http_get_device_info("127.0.0.1:11112", "covercalibrator", 0, "name")
+                
+        #         state_map = {0: "Unknown", 1: "Closed", 2: "Moving", 3: "Open", 4: "Error"}
+        #         state_name = state_map.get(cover_state, f"State{cover_state}")
+                
+        #         cover_name = name or "Unknown Cover"
+        #         self.logger.info(f"✅ Cover connected: {cover_name} - {state_name}")
+                
+        #         color = "green" if state_name == "Closed" else "orange" if state_name == "Open" else "red"
+        #         self.update_status("Cover", f"Connected - {state_name}", color)
+        #         self.device_status['cover']['connected'] = True
+        #         self.device_status['cover']['info'] = {'name': cover_name, 'cover_state': state_name}
+        #     else:
+        #         self.logger.warning("❌ Cover not connected")
+        #         self.update_status("Cover", "Not Connected", "red")
+                
+        # except Exception as e:
+        #     self.logger.warning(f"❌ Cover check failed: {e}")
+        #     self.update_status("Cover", "Check Failed", "red")
         
         # Summary
         connected_count = sum(1 for dev in self.device_status.values() if dev['connected'])
         self.logger.info(f"📊 Connection Summary: {connected_count}/3 devices connected")
-        
+                
         if connected_count == 0:
             self.logger.warning("⚠️ No devices connected - check Autoslew status and connections")
+        self.logger.info("Click 1. to re-check connections or proceed to 2. TELESCOPE SHUTDOWN")
             
     def confirm_emergency_shutdown(self):
         """Show confirmation dialogs before emergency shutdown"""
@@ -695,7 +748,7 @@ class EmergencyShutdownGUI:
             messagebox.showwarning(
                 "No Devices Connected",
                 "No devices are currently connected.\n\n"
-                "Emergency shutdown requires at least one connected device.\n"
+                "Telescope shutdown requires at least one connected device.\n"
                 "Please check connections first.",
                 icon='warning'
             )
@@ -703,8 +756,8 @@ class EmergencyShutdownGUI:
             
         # First confirmation
         result1 = messagebox.askyesno(
-            "⚠️ EMERGENCY SHUTDOWN CONFIRMATION",
-            f"Are you SURE you want to perform emergency shutdown?\n\n"
+            "⚠️ TELESCOPE SHUTDOWN CONFIRMATION",
+            f"Are you SURE you want to perform telescope shutdown?\n\n"
             f"Connected devices: {connected_count}/3\n\n"
             "This will:\n"
             "• HALT rotator movement\n"  
@@ -724,7 +777,7 @@ class EmergencyShutdownGUI:
             "LAST CHANCE!\n\n"
             "Are you ABSOLUTELY CERTAIN you want to shutdown the telescope system?\n\n"
             "This action cannot be undone and will stop all telescope operations.\n\n"
-            "Only proceed if this is a genuine emergency!",
+            "Only proceed if this is a genuine request!",
             icon='error'
         )
         
@@ -768,7 +821,7 @@ class EmergencyShutdownGUI:
         """Worker thread for emergency shutdown"""
         try:
             self.logger.info("="*50)
-            self.logger.info("🚨 EMERGENCY SHUTDOWN INITIATED 🚨")
+            self.logger.info("🚨 TELESCOPE SHUTDOWN INITIATED 🚨")
             self.logger.info("="*50)
             
             if not DRIVERS_AVAILABLE:
@@ -917,7 +970,7 @@ class EmergencyShutdownGUI:
             if total_operations == 0:
                 self.logger.warning("⚠️ SHUTDOWN COMPLETE - All systems already in safe state")
             elif success_count == total_operations:
-                self.logger.info("✅ EMERGENCY SHUTDOWN COMPLETED SUCCESSFULLY")
+                self.logger.info("✅ TELESCOPE SHUTDOWN COMPLETED SUCCESSFULLY")
             else:
                 self.logger.warning(f"⚠️ SHUTDOWN PARTIAL - {success_count}/{total_operations} operations successful")
             self.logger.info("="*50)
@@ -932,12 +985,13 @@ class EmergencyShutdownGUI:
         """Finish shutdown on main thread"""
         self.progress.stop()
         self.shutdown_btn.config(text="SHUTDOWN COMPLETE", bg='#6c757d')
+        self.shutdown_in_progress = False
         
         # Show completion dialog
         messagebox.showinfo(
             "Shutdown Complete",
-            "Emergency shutdown sequence finished.\n\n"
-            "Check the activity log above for detailed results.\n\n"
+            "Telescope shutdown sequence finished.\n\n"
+            "Check the activity log for detailed results.\n\n"
             "You may now close this application.",
             icon='info'
         )
