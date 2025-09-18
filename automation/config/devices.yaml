@@ -30,8 +30,19 @@ cover:
 
 focuser:
   type: alpaca
-  address: "127.0.0.1:11111"
+  address: "127.0.0.1:11112"
   device_number: 0
+  # maybe Dict of nominal values for Filters: Focus Lengths in here e.g.
+  focus_positions:
+    L: 15200
+    B: null
+    V: null
+    R: null
+    C: 15155  #?
+    I: null
+    H: null
+    spectro: 18433 #?
+
 
 
 filter_wheel:
