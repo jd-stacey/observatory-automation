@@ -76,7 +76,7 @@ class AlpacaFocuserDriver:
     def move_to_position(self, target_position):
         if not self.is_connected():
             raise AlpacaFocuserError("Move failed - focuser not connected")
-        
+             
         try:
             is_safe, safety_msg = self.check_position_safety(target_position)
             if not is_safe:
@@ -164,6 +164,12 @@ class AlpacaFocuserDriver:
         limits = self.get_limits()
         if "error" in limits:
             return False, limits["error"]
+        
+        try:
+            target_position = int(target_position)
+        except Exception as e:
+            return False, f"Position must be an integer value"
+        
         try:
             min_pos, max_pos = limits["min"], limits["max"]
             if min_pos <= target_position <= max_pos:
@@ -201,7 +207,7 @@ class AlpacaFocuserDriver:
         target_pos = lookup.get(filter_code.lower())
         
         if target_pos is None:
-            logger.error(f"No target position defined for filter '{filter_code}")       
+            logger.error(f"No target position defined for filter '{filter_code}'")       
             return False
         
         logger.info(f"Setting focuser for filter '{filter_code}' to position {target_pos}")
