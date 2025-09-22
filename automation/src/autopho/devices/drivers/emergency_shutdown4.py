@@ -525,7 +525,7 @@ class EmergencyShutdownGUI:
                 self.autoslew_started = True
                 
                 # Wait for services to be ready
-                self.logger.info("⏳ Waiting for ALPACA services...")
+                self.logger.info("⏳ Waiting for ALPACA services (~10s)...")
                 time.sleep(10)
             else:
                 self.logger.info("🔧 Starting Autoslew...")
@@ -565,7 +565,7 @@ class EmergencyShutdownGUI:
                 self.update_status("Autoslew", "Running", "green")
             
             # Wait for full initialization
-            self.logger.info("⏳ Waiting for Autoslew full initialization...")
+            self.logger.info("⏳ Waiting for Autoslew full initialization (~30s)...")
             time.sleep(30)
             max_service_wait = 180  # 3 minutes for problem cases
             service_ready = False
