@@ -1,0 +1,51 @@
+# Focus Testing Configuration
+
+# Test parameters
+
+test_settings:
+  coarse_sweep:
+    range: 250          # +/- steps from initial position
+    step_size: 25       # step size for coarse sweep
+
+  fine_sweep:
+    range: 100          # +/- steps from coarse optimum
+    step_size: 5        # step size for fine sweep 
+
+  exposure:
+    time: 2.5           # seconds
+    settle_time: 1.0    # time to wait after focus move
+
+  image_analysis:
+    min_star_brightness: 1000   # minimum pixel value for star detection
+    star_detection_sigma: 3.0   # sigma threshold for star detection
+    max_stars_to_analyze: 5     # use brightest N stars for HFR calculation
+
+# Filter to camera mapping
+
+camera_mapping:
+  L: "main"
+  B: "main" 
+  V: "main"
+  R: "main"
+  C: "main"
+  I: "main"
+  H: "main"
+  spectro: "guide"
+
+# Initial focus positions (will be loaded from devices.yaml but can override here)
+
+initial_positions:
+  L: 15200
+  B: 15180    # estimated
+  V: 15190    # estimated  
+  R: 15210    # estimated
+  C: 15155
+  I: 15220    # estimated
+  H: 15230    # estimated
+  spectro: 18433
+
+# Results logging
+logging:
+  detailed_log: true      # save all measurement data
+  save_test_images: false # save FITS images (takes space!)
+  results_dir: "focus_test_results"
