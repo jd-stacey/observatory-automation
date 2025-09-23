@@ -22,7 +22,7 @@ class ImagingSessionError(Exception):
 class ImagingSession:
     def __init__(self, camera_manager, corrector, config_loader, target_info, filter_code: str, 
                  ignore_twilight: bool = False, exposure_override: Optional[float] = None, 
-                 images_base_path: Optional[Path] = None):
+                 images_base_path: Optional[Path] = None, is_spectroscopy: bool = False):
         self.camera_manager = camera_manager
         self.corrector = corrector
         self.rotator_driver = getattr(corrector, "rotator_driver", None)
@@ -31,6 +31,7 @@ class ImagingSession:
         self.filter_code = filter_code
         self.ignore_twilight = ignore_twilight
         self.exposure_override = exposure_override
+        self.is_spectroscopy = is_spectroscopy
         self.exposure_count = 0
         self.session_start_time = None
         self.last_correction_exposure = 0
@@ -123,13 +124,38 @@ class ImagingSession:
         camera_name = self.main_camera.name if self.main_camera else "test_camera"
         camera_device_id = self.main_camera.device_id if self.main_camera else "test_device"
         
+        if self.is_spectroscopy:
+            # fixed vals for spectro
+            x0 = 1101
+            y0 = 744
+        else:
+            if self.main_camera:
+                try:
+                    cam = self.main_camera.camera
+                    binning = self.main_camera.config.get('default_binning', 4)
+                    max_x = cam.CameraXSize
+                    max_y = cam.CameraYSize
+                    x0 = int(((max_x // binning) // 8 * 8) / 2)
+                    y0 = int(((max_y // binning) // 2 * 2) / 2)
+                except Exception as e:
+                    logger.warning(f"Could not query camera for ROI calcs: {e} - using dafaults")
+                    # defaults if cam query fails (assumes 4x4 binning)
+                    x0 = 1196
+                    y0 = 798
+            else:
+                # defaults for testing (when no camera), assumes 4x4 binning
+                x0 = 1196
+                y0 = 798
+                   
         target_json_data.update({
             "camera_name": camera_name,
             "camera_device_id": camera_device_id,
             "filter_code": self.filter_code,
             "raw_images_directory": str(target_dir),
             "tel": self.file_manager.telescope_id.replace('T', ''),
-            "imaging_phase": self.current_phase.value
+            "imaging_phase": self.current_phase.value,
+            "x0": x0,
+            "y0": y0
         })
         
         if self.config_loader.write_target_json(target_json_data):
@@ -273,18 +299,38 @@ class ImagingSession:
             logger.warning(f"Maximum acquisition attempts reached ({max_attempts})")
             return True
             
-        # Check if we have recent correction status with acceptable offset
+        # Check if we have recent or last known correction data
         try:
             correction_status = self.corrector.get_correction_status()
+            threshold = self.acquisition_config.get('max_total_offset_arcsec', 3.0)
+            
+            # Try to get the most recent offset measurement
+            total_offset = None
+            data_source = None
+            
+            # First priority: fresh platesolve data
             if correction_status.get('json_file_ready', False):
-                total_offset = correction_status.get('pending_total_offset_arcsec', float('inf'))
-                threshold = self.acquisition_config.get('max_total_offset_arcsec', 3.0)
+                total_offset = correction_status.get('pending_total_offset_arcsec')
+                data_source = "fresh platesolve"
+            
+            # Second priority: last known measurement (if recent enough)
+            elif correction_status.get('last_total_offset_arcsec') is not None:
+                measurement_age = correction_status.get('last_measurement_age_seconds')
+                if measurement_age is not None and measurement_age < 300:  # 5 minutes
+                    total_offset = correction_status.get('last_total_offset_arcsec')
+                    data_source = f"cached ({measurement_age:.0f}s ago)"
                 
+            if total_offset is not None:
                 if total_offset <= threshold:
-                    logger.info(f"Target acquired! Total offset: {total_offset:.2f}\" (threshold: {threshold}\")")
+                    logger.info(f"Target acquired! Total offset: {total_offset:.2f}\" <= {threshold}\" ({data_source})")
                     return True
                 else:
-                    logger.debug(f"Still acquiring - offset: {total_offset:.2f}\" (threshold: {threshold}\")")
+                    logger.debug(f"Still acquiring - offset: {total_offset:.2f}\" > {threshold}\" ({data_source})")
+            else:
+                if self.acquisition_count >= 2:
+                    logger.debug("No recent platesolve data available, continuing acquisition")
+                else:
+                    logger.debug("Waiting for initial platesolve data...")
                     
         except Exception as e:
             logger.warning(f"Could not check acquisition status: {e}")
@@ -292,7 +338,8 @@ class ImagingSession:
         return False
 
     def start_imaging_loop(self, max_exposures: Optional[int] = None,
-                           duration_hours: Optional[float] = None) -> bool:
+                           duration_hours: Optional[float] = None,
+                           telescope_driver = None) -> bool:
         
         logger.info("="*75)
         logger.info(" "*25+"STARTING IMAGING SESSION")
@@ -344,7 +391,7 @@ class ImagingSession:
         try:
             while True:
                 try:
-                    image_filepath = self.capture_single_exposure()
+                    image_filepath = self.capture_single_exposure(telescope_driver=telescope_driver)
                     if image_filepath:
                         self.exposure_count += 1
                         self.consecutive_failures = 0
@@ -415,12 +462,23 @@ class ImagingSession:
             except Exception:
                 pass
         
-    def capture_single_exposure(self) -> Optional[str]:
+    def capture_single_exposure(self, telescope_driver = None) -> Optional[str]:
         try:
             exposure_time = self._get_current_exposure_time()
             camera_config = self.main_camera.config
             binning = camera_config.get('default_binning', 4)
             gain = camera_config.get('default_gain', 100)
+            
+            ##### DEBUGGING #####
+            # Report telescope's .Tracking bool and its current RA/Dec Coords and internal Alt/Az coords
+            # before every imaging frame
+            # may be worth trying setting .Tracking = True before every frame too if this is the issue
+            
+            if telescope_driver:
+                logger.debug(f"    DEBUG: .Tracking = {telescope_driver.telescope.Tracking}")
+                logger.debug(f"    DEBUG: Current Scope Pos = {telescope_driver.get_coordinates()}")
+                logger.debug(f"    DEBUG: Current AltAz: Alt={telescope_driver.telescope.Altitude:.6f}, Az={telescope_driver.telescope.Azimuth:.6f}")
+                
             
             phase_prefix = "ACQ" if self.current_phase == SessionPhase.ACQUISITION else "SCI"
             logger.debug(f"{phase_prefix} exposure: {exposure_time} s, binning={binning}, gain={gain}")
