@@ -25,12 +25,28 @@ class PlatesolveCorrectorError(Exception):
 
 class PlatesolveCorrector:
     
-    def __init__(self, telescope_driver, config_loader, rotator_driver=None):
+    def __init__(self, telescope_driver, config_loader, rotator_driver=None, store_last_measurements=False):
         self.telescope_driver = telescope_driver
         self.config_loader = config_loader
         self.last_processed_file = ""
         self.cumulative_zero_time = 0
         self.rotator_driver = rotator_driver
+        
+        # NEW: Add these fields for acquisition memory
+        self.store_last_measurements = store_last_measurements
+        if store_last_measurements:
+            self.last_total_offset_arcsec = None
+            self.last_ra_offset_arcsec = None
+            self.last_dec_offset_arcsec = None
+            self.last_rotation_offset_deg = None
+            self.last_measurement_time = None
+        else:
+            # Ensure fields exist but are always None for backwards compatibility
+            self.last_total_offset_arcsec = None
+            self.last_ra_offset_arcsec = None
+            self.last_dec_offset_arcsec = None
+            self.last_rotation_offset_deg = None
+            self.last_measurement_time = None
                 
         self.paths_config = config_loader.get_config('paths')
         self.platesolve_config = config_loader.get_config('platesolving')
@@ -201,6 +217,15 @@ class PlatesolveCorrector:
             ra_offset_arcsec = ra_offset_deg * 3600.0
             dec_offset_arcsec = dec_offset_deg * 3600.0
             total_offset_arcsec = math.sqrt(ra_offset_arcsec**2 + dec_offset_arcsec**2)
+            
+            # Store last known values if enabled
+            if self.store_last_measurements:
+                self.last_total_offset_arcsec = total_offset_arcsec
+                self.last_ra_offset_arcsec = ra_offset_arcsec
+                self.last_dec_offset_arcsec = dec_offset_arcsec
+                self.last_rotation_offset_deg = rot_offset_deg
+                self.last_measurement_time = time.time()
+            
             
             min_correction = self.platesolve_config.get('correction_thresholds', {}).get('min_arcsec', 1.0)
             min_rotation = 0.1
@@ -378,7 +403,14 @@ class PlatesolveCorrector:
                 'json_file_exists': self.json_file_path.exists(),
                 'json_file_ready': file_ready,
                 'last_processed_file': self.last_processed_file,
-                'cumulative_zero_time': self.cumulative_zero_time
+                'cumulative_zero_time': self.cumulative_zero_time,
+                # Add last known values
+                'last_total_offset_arcsec': self.last_total_offset_arcsec,
+                'last_ra_offset_arcsec': self.last_ra_offset_arcsec,
+                'last_dec_offset_arcsec': self.last_dec_offset_arcsec,
+                'last_rotation_offset_deg': self.last_rotation_offset_deg,
+                'last_measurement_time': self.last_measurement_time,
+                'last_measurement_age_seconds': (time.time() - self.last_measurement_time) if self.last_measurement_time else None
             }
             
             if self.rotator_driver:
