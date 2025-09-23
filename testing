@@ -1,7 +1,7 @@
-# Store last known values if enabled
-if self.store_last_measurements:
-    self.last_total_offset_arcsec = total_offset_arcsec
-    self.last_ra_offset_arcsec = ra_offset_arcsec
-    self.last_dec_offset_arcsec = dec_offset_arcsec
-    self.last_rotation_offset_deg = rot_offset_deg
-    self.last_measurement_time = time.time()
+# Add last known values
+'last_total_offset_arcsec': self.last_total_offset_arcsec,
+'last_ra_offset_arcsec': self.last_ra_offset_arcsec,
+'last_dec_offset_arcsec': self.last_dec_offset_arcsec,
+'last_rotation_offset_deg': self.last_rotation_offset_deg,
+'last_measurement_time': self.last_measurement_time,
+'last_measurement_age_seconds': (time.time() - self.last_measurement_time) if self.last_measurement_time else None
