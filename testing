@@ -1,7 +1,71 @@
-# Add last known values
-'last_total_offset_arcsec': self.last_total_offset_arcsec,
-'last_ra_offset_arcsec': self.last_ra_offset_arcsec,
-'last_dec_offset_arcsec': self.last_dec_offset_arcsec,
-'last_rotation_offset_deg': self.last_rotation_offset_deg,
-'last_measurement_time': self.last_measurement_time,
-'last_measurement_age_seconds': (time.time() - self.last_measurement_time) if self.last_measurement_time else None
+def __init__(self, telescope_driver, config_loader):
+    # Initialize with memory enabled for spectroscopy
+    super().__init__(telescope_driver, config_loader, rotator_driver=None, store_last_measurements=True)
+    
+    # Use spectro-specific platesolve path if configured
+    paths_config = config_loader.get_config('paths')
+    self.json_file_path = Path(paths_config.get('spectro_platesolve_json', 
+                                               paths_config.get('platesolve_json')))
+    
+    logger.info("SpectroscopyCorrector initialized (no rotator support, with acquisition memory)")
+
+
+
+
+
+
+
+
+
+def _check_acquisition_complete(self) -> bool:
+    """Check if acquisition phase should end"""
+    if self.current_phase != SessionPhase.ACQUISITION:
+        return True
+        
+    if not self.corrector:
+        logger.warning("No corrector available, skipping acquisition")
+        return True
+        
+    # Check maximum attempts
+    max_attempts = self.acquisition_config.get('max_attempts', 20)
+    if self.acquisition_count >= max_attempts:
+        logger.warning(f"Maximum acquisition attempts reached ({max_attempts})")
+        return True
+        
+    # Check if we have recent or last known correction data
+    try:
+        correction_status = self.corrector.get_correction_status()
+        threshold = self.acquisition_config.get('max_total_offset_arcsec', 3.0)
+        
+        # Try to get the most recent offset measurement
+        total_offset = None
+        data_source = None
+        
+        # First priority: fresh platesolve data
+        if correction_status.get('json_file_ready', False):
+            total_offset = correction_status.get('pending_total_offset_arcsec')
+            data_source = "fresh platesolve"
+        
+        # Second priority: last known measurement (if recent enough)
+        elif correction_status.get('last_total_offset_arcsec') is not None:
+            measurement_age = correction_status.get('last_measurement_age_seconds')
+            if measurement_age is not None and measurement_age < 300:  # 5 minutes
+                total_offset = correction_status.get('last_total_offset_arcsec')
+                data_source = f"cached ({measurement_age:.0f}s ago)"
+            
+        if total_offset is not None:
+            if total_offset <= threshold:
+                logger.info(f"Target acquired! Total offset: {total_offset:.2f}\" <= {threshold}\" ({data_source})")
+                return True
+            else:
+                logger.debug(f"Still acquiring - offset: {total_offset:.2f}\" > {threshold}\" ({data_source})")
+        else:
+            if self.acquisition_count >= 2:
+                logger.debug("No recent platesolve data available, continuing acquisition")
+            else:
+                logger.debug("Waiting for initial platesolve data...")
+                
+    except Exception as e:
+        logger.warning(f"Could not check acquisition status: {e}")
+        
+    return False
