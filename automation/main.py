@@ -445,7 +445,8 @@ def main():
                 session.correction_interval = args.correction_interval
                 session_success = session.start_imaging_loop(
                     max_exposures=args.max_exposures,
-                    duration_hours=args.duration
+                    duration_hours=args.duration,
+                    telescope_driver=telescope_driver
                 )
                 if session_success:
                     logger.info(f"Imaging session completed successfully")
