@@ -15,21 +15,23 @@ correction_thresholds:
 
 spectro_thresholds:
   min_arcsec: 0.5
-  small_offset: 0.5
+  small_offset: 1.5
   large_offset: 3.0
 
 acquisition:
   enabled: true
   exposure_time: 10.0              # exposure time during acquisition phase
   correction_interval: 2          # checks for correction required between N frames during acquisition
-  max_total_offset_arcsec: 3.0    # once total offset >= this number, switch to science frames/folder
-  max_attempts:  25             # dont acquire forever and ever and ever and ever and ever
+  max_total_offset_arcsec: 3.0    # once total offset <= this number, switch to science frames/folder
+  max_attempts:  25              # dont acquire forever and ever and ever and ever and ever
   folder_suffix: "_acq"           
 
 spectro_acquisition:
   enabled: true
-  exposure_time: 5.0 #15.0              # exposure time during acquisition phase
-  correction_interval: 1          # checks for correction required between N frames during acquisition
-  max_total_offset_arcsec: 2.0    # once total offset >= this number, switch to science frames/folder
-  max_attempts: 45
+  exposure_time: 10.0                   # default exposure time (can be overridden using --exposure-time CLI)
+  correction_interval: 5                # checks for correction required between N frames during acquisition
+  max_total_offset_arcsec: 2.0          # once total offset <= this number, switch to science frames/folder
+  max_attempts: 45                      # max num of acq frames to take - change this to 1 to bypass acq phase
+  default_session_duration_hours: 1.0   # Default hours per imaging session (can be overridden using --duration CLI)
   folder_suffix: "_acq"
+

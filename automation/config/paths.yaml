@@ -1,9 +1,12 @@
-raw_images: "P:\\Photometry"                  # Spectro guide cam images go here, too??? P:\\Spectro ??
-spectro_images: "P:\\Spectroscopy"
-logs: "P:\\temp\\logs\\T2"
+raw_images: "P:\\Photometry"                  # Where images are saved
+spectro_images: "P:\\Spectroscopy"            # Where images are saved
+logs: "P:\\temp\\logs\\T2"                    # Where logs are saved
 
 target_json: "P:\\temp\\target_2.json"              # For minerva photometry to read target info
-solver_status_json : "session\\solver_status_json"
+solver_status_json : "session\\solver_status_json"  # NOT USED
 
 platesolve_json: "P:\\temp\\wcssolution_2.json"     # Where minerva photometry dumps mount correction info
-spectro_platesolve_json: "P:\\temp\\wcssolution_2.json"  # will this be same for spectro??
+spectro_platesolve_json: "P:\\temp\\wcssolution_2.json"  # as above
+
+spectro_mirror_file: "P:\\temp\\mirror_telescope.json"  # the file T2 continuously monitors for new targets in spectro mode
+
