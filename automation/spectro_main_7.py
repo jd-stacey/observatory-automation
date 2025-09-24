@@ -19,7 +19,7 @@ from autopho.devices.drivers.alpaca_focuser import AlpacaFocuserDriver
 from autopho.devices.camera import CameraManager, CameraError
 from autopho.targets.observability import ObservabilityChecker
 from autopho.platesolving.corrector import PlatesolveCorrector, PlatesolveCorrectorError
-from autopho.imaging.session import ImagingSession, ImagingSessionError
+from autopho.imaging.session import ImagingSession, ImagingSessionError, SessionPhase
 
 logger = logging.getLogger(__name__)
 
@@ -302,6 +302,135 @@ class SpectroscopyImagingSession(ImagingSession):
         finally:
             self._running = False
             
+    
+    def start_imaging_loop(self, max_exposures: Optional[int] = None,
+                       duration_hours: Optional[float] = None,
+                       telescope_driver = None) -> bool:
+        
+        # Call parent initialization
+        logger.info("="*75)
+        logger.info(" "*25+"STARTING IMAGING SESSION")
+        logger.info("="*75)
+        
+        if self.acquisition_enabled and self.current_phase == SessionPhase.ACQUISITION:
+            logger.info("Starting with target acquisition phase")
+            acq_exp_time = self.acquisition_config.get('exposure_time', 3.0)
+            max_acq_attempts = self.acquisition_config.get('max_attempts', 20)
+            logger.info(f"Acquisition: {acq_exp_time}s exposures, max {max_acq_attempts} attempts")
+        
+        if max_exposures:
+            logger.info(f"Maximum exposures: {max_exposures}")
+        if duration_hours:
+            logger.info(f"Maximum duration: {duration_hours:.3f} hours")
+            
+        self.session_start_time = time.time()
+        self.exposure_count = 0
+        self.consecutive_failures = 0
+        
+        # Field rotation setup (same as parent)
+        try:
+            if self.rotator_driver:
+                fr_cfg = self.config_loader.get_config('field_rotation')
+                if fr_cfg.get('enabled', True):
+                    obs_cfg = self.config_loader.get_config('observatory')
+                    if self.rotator_driver.initialize_field_rotation(obs_cfg, fr_cfg):
+                        self.rotator_driver.set_tracking_target(
+                            self.target_info.ra_j2000_hours,
+                            self.target_info.dec_j2000_deg,
+                            reference_pa_deg=None
+                        )
+                        self.rotator_driver.start_field_tracking()
+                        logger.info("Field-rotation tracking: started (continuous for session)")
+        except Exception as e:
+            logger.warning(f"Field-rotation start failed: {e}")
+        
+        try:
+            while True:
+                # **ADD THIS STOP CHECK**
+                if self._stop_event.is_set():
+                    logger.info("Stop event detected, ending imaging loop")
+                    break
+                
+                try:
+                    image_filepath = self.capture_single_exposure(telescope_driver=telescope_driver)
+                    if image_filepath:
+                        self.exposure_count += 1
+                        self.consecutive_failures = 0
+                        
+                        # Update phase-specific counters
+                        if self.current_phase == SessionPhase.ACQUISITION:
+                            self.acquisition_count += 1
+                        else:
+                            self.science_count += 1
+                        
+                        elapsed_time = (time.time() - self.session_start_time) / 3600
+                        phase_info = f"[{self.current_phase.value.upper()}]"
+                        logger.info(f"{phase_info} Exposure {self.exposure_count}: {Path(image_filepath).name} "
+                                f"(Session: {elapsed_time:.3f} h)")
+                    else:
+                        self.consecutive_failures += 1
+                        logger.warning(f"Capture failed ({self.consecutive_failures}/{self.max_consecutive_failures})")
+                        
+                except Exception as e:
+                    self.consecutive_failures += 1
+                    logger.error(f"Exposure error: {e} ({self.consecutive_failures}/{self.max_consecutive_failures})")
+                    
+                    if self.consecutive_failures > self.max_consecutive_failures:
+                        logger.error("Too many consecutive failures, terminating session")
+                        return False
+                
+                # **ADD STOP CHECK AFTER EACH EXPOSURE TOO**
+                if self._stop_event.is_set():
+                    logger.info("Stop event detected after exposure, ending imaging loop")
+                    break
+                
+                # Check if acquisition phase should end
+                if (self.current_phase == SessionPhase.ACQUISITION and 
+                    self.acquisition_count > 0 and
+                    self._check_acquisition_complete()):
+                    self._switch_to_science_phase()
+                
+                # Check general termination conditions
+                should_terminate, reason = self.check_termination_conditions(max_exposures, duration_hours)
+                if should_terminate:
+                    logger.info(f"Session terminating: {reason}")
+                    break
+                
+                # Apply corrections based on current phase
+                if self._should_apply_correction():
+                    self._apply_periodic_correction()
+            
+            # Rest of the method is the same as parent...
+            session_duration = (time.time() - self.session_start_time) / 3600
+            logger.info("="*75)
+            logger.info(" "*30+"IMAGING COMPLETED")
+            logger.info("="*75)
+            logger.info(f"Total exposures: {self.exposure_count}")
+            if self.acquisition_enabled:
+                logger.info(f"  Acquisition: {self.acquisition_count}")
+                logger.info(f"  Science: {self.science_count}")
+            logger.info(f"Final phase: {self.current_phase.value}")
+            logger.info(f"Files saved to: {self.current_target_dir}")
+            logger.info(f"Session duration: {session_duration:.3f} hours")
+            return True
+            
+        except KeyboardInterrupt:
+            logger.info("Session interrupted by user")
+            return True
+        except Exception as e:
+            logger.error(f"Session failed: {e}")
+            return False
+        finally:
+            # Stop continuous tracking when session ends
+            try:
+                if self.rotator_driver:
+                    self.rotator_driver.stop_field_tracking()
+                    logger.info("Field-rotation tracking: stopped")
+            except Exception:
+                pass
+    
+    
+    
     def start_imaging_loop_async(self, duration_hours: float = 1.0):
         """Start imaging loop in separate thread"""
         def imaging_worker():
@@ -342,18 +471,21 @@ class SpectroscopyImagingSession(ImagingSession):
         """Stop the current imaging session"""
         self.logger.info("Stopping spectroscopy session...")
         
-        # Try to abort any ongoing exposure first
-        self._abort_current_exposure()
-        
-        # Then set stop flags
+        # Set stop flags first
         self._stop_event.set()
         self._running = False
         
+        # The try to abort any ongoing exposure
+        self._abort_current_exposure()
+        
         # Wait for imaging thread to finish (with timeout)
         if hasattr(self, 'imaging_thread') and self.imaging_thread.is_alive():
-            self.imaging_thread.join(timeout=5.0)
+            self.logger.debug("Waiting for imaging thread to stop...")
+            self.imaging_thread.join(timeout=15.0)
             if self.imaging_thread.is_alive():
                 self.logger.warning("Imaging thread did not stop cleanly")
+            else:
+                self.logger.debug("Imaging thread stopped successfully")
     
     def is_running(self) -> bool:
         return self._running
@@ -434,13 +566,16 @@ class SpectroscopySession:
 
     def __init__(self, camera_manager, corrector, config_loader, telescope_driver,
                  mirror_file: str = None, ignore_twilight: bool = False,
-                 dry_run: bool = False):
+                 dry_run: bool = False, exposure_override: Optional[float] = None,
+                 duration_override: Optional[float] = None):
         self.camera_manager = camera_manager
         self.corrector = corrector
         self.config_loader = config_loader
         self.telescope_driver = telescope_driver
         self.ignore_twilight = ignore_twilight
         self.dry_run = dry_run
+        self.exposure_override = exposure_override
+        self.duration_override = duration_override
 
         self.mirror = TelescopeMirror(mirror_file) if mirror_file else None
         self.current_session = None
@@ -569,11 +704,16 @@ class SpectroscopySession:
                 config_loader=self.config_loader,
                 target_info=target_info,
                 ignore_twilight=self.ignore_twilight,
-                dry_run=self.dry_run
+                dry_run=self.dry_run,
+                exposure_override=self.exposure_override
             )
 
             # Start imaging asynchronously so monitoring can continue
-            session.start_imaging_loop_async(duration_hours=1.0)
+            platesolve_config = self.config_loader.get_config("platesolving")
+            spectro_config = platesolve_config.get("spectro_acquisition", {})
+            default_duration = spectro_config.get("default_session_duration_hours", 1.0)
+            duration_hours = self.duration_override or default_duration
+            session.start_imaging_loop_async(duration_hours=duration_hours)
 
             self.current_session = session
             self.current_target = target_data
@@ -595,8 +735,9 @@ def main():
                         help="Bypass twilight checks for daytime testing")
     parser.add_argument("--dry-run", action="store_true", 
                         help="Simulate without any hardware movement")
-    parser.add_argument("--duration", type=float, help="Duration in hours")
-    parser.add_argument("--poll-interval", type=float, default=10.0)
+    parser.add_argument("--duration", type=float, help="Imaging session duration in hours")
+    parser.add_argument("--poll-interval", type=float, default=10.0, help="How often to check the mirror json for new targets in seconds (default 10 s)")
+    parser.add_argument("--exposure-time", type=float, help="Override exposure time in seconds")
     args = parser.parse_args()
 
     if args.target_mode in ['tic', 'coords'] and not args.target_value:
@@ -677,14 +818,16 @@ def main():
             logger.info("DRY RUN MODE - Simulating hardware initialization")
 
         if args.target_mode == "mirror":
-            mirror_file = args.target_value or "P:\\temp\\mirror_telescope.json"
+            mirror_file = args.target_value or config_loader.get_config("paths")["spectro_mirror_file"]
             logger.info(f"Starting mirror mode with file: {mirror_file}")
             
             spectro_session = SpectroscopySession(
                 camera_manager, corrector, config_loader, telescope_driver,
                 mirror_file=mirror_file,
                 ignore_twilight=args.ignore_twilight,
-                dry_run=args.dry_run
+                dry_run=args.dry_run,
+                exposure_override=args.exposure_time,
+                duration_override=args.duration
             )
             spectro_session.start_monitoring(args.poll_interval)
 
@@ -766,7 +909,8 @@ def main():
             session = SpectroscopyImagingSession(
                 camera_manager, corrector, config_loader, target_info,
                 ignore_twilight=args.ignore_twilight,
-                dry_run=args.dry_run
+                dry_run=args.dry_run,
+                exposure_override=args.exposure_time
             )
             
             if args.dry_run:
