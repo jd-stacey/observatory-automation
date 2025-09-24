@@ -362,7 +362,7 @@ class ImagingSession:
         if max_exposures:
             logger.info(f"Maximum exposures: {max_exposures}")
         if duration_hours:
-            logger.info(f"Maximum duration: {duration_hours:.1f} hours")
+            logger.info(f"Maximum duration: {duration_hours:.3f} hours")
             
         self.session_start_time = time.time()
         self.exposure_count = 0
@@ -405,7 +405,7 @@ class ImagingSession:
                         elapsed_time = (time.time() - self.session_start_time) / 3600
                         phase_info = f"[{self.current_phase.value.upper()}]"
                         logger.info(f"{phase_info} Exposure {self.exposure_count}: {Path(image_filepath).name} "
-                                   f"(Session: {elapsed_time:.1f} h)")
+                                   f"(Session: {elapsed_time:.3f} h)")
                     else:
                         self.consecutive_failures += 1
                         logger.warning(f"Capture failed ({self.consecutive_failures}/{self.max_consecutive_failures})")
@@ -444,7 +444,7 @@ class ImagingSession:
                 logger.info(f"  Science: {self.science_count}")
             logger.info(f"Final phase: {self.current_phase.value}")
             logger.info(f"Files saved to: {self.current_target_dir}")
-            logger.info(f"Session duration: {session_duration:.1f} hours")
+            logger.info(f"Session duration: {session_duration:.3f} hours")
             return True
             
         except KeyboardInterrupt:
@@ -556,7 +556,7 @@ class ImagingSession:
         if duration_hours and self.session_start_time:
             elapsed_hours = (time.time() - self.session_start_time) / 3600
             if elapsed_hours >= duration_hours:
-                return True, f"Maximum duration reached ({duration_hours:.1f} hours)"
+                return True, f"Maximum duration reached ({duration_hours:.3f} hours)"
         
         try:
             obs_status = self.observability_checker.check_target_observability(
