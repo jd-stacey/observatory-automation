@@ -1,125 +1,327 @@
-def start_imaging_loop(self, max_exposures: Optional[int] = None,
-                       duration_hours: Optional[float] = None,
-                       telescope_driver = None) -> bool:
-    
-    # Call parent initialization
-    logger.info("="*75)
-    logger.info(" "*25+"STARTING IMAGING SESSION")
-    logger.info("="*75)
-    
-    if self.acquisition_enabled and self.current_phase == SessionPhase.ACQUISITION:
-        logger.info("Starting with target acquisition phase")
-        acq_exp_time = self.acquisition_config.get('exposure_time', 3.0)
-        max_acq_attempts = self.acquisition_config.get('max_attempts', 20)
-        logger.info(f"Acquisition: {acq_exp_time}s exposures, max {max_acq_attempts} attempts")
-    
-    if max_exposures:
-        logger.info(f"Maximum exposures: {max_exposures}")
-    if duration_hours:
-        logger.info(f"Maximum duration: {duration_hours:.1f} hours")
-        
-    self.session_start_time = time.time()
-    self.exposure_count = 0
-    self.consecutive_failures = 0
-    
-    # Field rotation setup (same as parent)
-    try:
-        if self.rotator_driver:
-            fr_cfg = self.config_loader.get_config('field_rotation')
-            if fr_cfg.get('enabled', True):
-                obs_cfg = self.config_loader.get_config('observatory')
-                if self.rotator_driver.initialize_field_rotation(obs_cfg, fr_cfg):
-                    self.rotator_driver.set_tracking_target(
-                        self.target_info.ra_j2000_hours,
-                        self.target_info.dec_j2000_deg,
-                        reference_pa_deg=None
-                    )
-                    self.rotator_driver.start_field_tracking()
-                    logger.info("Field-rotation tracking: started (continuous for session)")
-    except Exception as e:
-        logger.warning(f"Field-rotation start failed: {e}")
-    
-    try:
-        while True:
-            # **ADD THIS STOP CHECK**
-            if self._stop_event.is_set():
-                logger.info("Stop event detected, ending imaging loop")
-                break
-            
-            try:
-                image_filepath = self.capture_single_exposure(telescope_driver=telescope_driver)
-                if image_filepath:
-                    self.exposure_count += 1
-                    self.consecutive_failures = 0
-                    
-                    # Update phase-specific counters
-                    if self.current_phase == SessionPhase.ACQUISITION:
-                        self.acquisition_count += 1
-                    else:
-                        self.science_count += 1
-                    
-                    elapsed_time = (time.time() - self.session_start_time) / 3600
-                    phase_info = f"[{self.current_phase.value.upper()}]"
-                    logger.info(f"{phase_info} Exposure {self.exposure_count}: {Path(image_filepath).name} "
-                               f"(Session: {elapsed_time:.1f} h)")
-                else:
-                    self.consecutive_failures += 1
-                    logger.warning(f"Capture failed ({self.consecutive_failures}/{self.max_consecutive_failures})")
-                    
-            except Exception as e:
-                self.consecutive_failures += 1
-                logger.error(f"Exposure error: {e} ({self.consecutive_failures}/{self.max_consecutive_failures})")
-                
-                if self.consecutive_failures > self.max_consecutive_failures:
-                    logger.error("Too many consecutive failures, terminating session")
-                    return False
-            
-            # **ADD STOP CHECK AFTER EACH EXPOSURE TOO**
-            if self._stop_event.is_set():
-                logger.info("Stop event detected after exposure, ending imaging loop")
-                break
-            
-            # Check if acquisition phase should end
-            if (self.current_phase == SessionPhase.ACQUISITION and 
-                self.acquisition_count > 0 and
-                self._check_acquisition_complete()):
-                self._switch_to_science_phase()
-            
-            # Check general termination conditions
-            should_terminate, reason = self.check_termination_conditions(max_exposures, duration_hours)
-            if should_terminate:
-                logger.info(f"Session terminating: {reason}")
-                break
-            
-            # Apply corrections based on current phase
-            if self._should_apply_correction():
-                self._apply_periodic_correction()
-        
-        # Rest of the method is the same as parent...
-        session_duration = (time.time() - self.session_start_time) / 3600
-        logger.info("="*75)
-        logger.info(" "*30+"IMAGING COMPLETED")
-        logger.info("="*75)
-        logger.info(f"Total exposures: {self.exposure_count}")
-        if self.acquisition_enabled:
-            logger.info(f"  Acquisition: {self.acquisition_count}")
-            logger.info(f"  Science: {self.science_count}")
-        logger.info(f"Final phase: {self.current_phase.value}")
-        logger.info(f"Files saved to: {self.current_target_dir}")
-        logger.info(f"Session duration: {session_duration:.1f} hours")
-        return True
-        
-    except KeyboardInterrupt:
-        logger.info("Session interrupted by user")
-        return True
-    except Exception as e:
-        logger.error(f"Session failed: {e}")
-        return False
-    finally:
-        # Stop continuous tracking when session ends
-        try:
-            if self.rotator_driver:
-                self.rotator_driver.stop_field_tracking()
-                logger.info("Field-rotation tracking: stopped")
-        except Exception:
-            pass
+# Automated Spectroscopy System
+
+A Python-based automated spectroscopy system that monitors telescope positions and performs synchronized spectroscopic observations using guide cameras.
+
+## Overview
+
+This system provides three main operating modes:
+
+1. **Single Target Mode** - Observe a specific TIC catalog target or manual coordinates
+2. **Mirror Mode** - Continuously monitor another telescope's position and mirror its targets
+3. **Dry Run Mode** - Simulate operations without hardware movement for testing
+
+The system handles telescope slewing, guide camera imaging, platesolving corrections, and automated session management with proper hardware safety and cleanup.
+
+## System Architecture
+
+```
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│   Main Script   │───▶│  Configuration   │───▶│   Hardware      │
+│                 │    │   (YAML files)   │    │   Drivers       │
+└─────────────────┘    └──────────────────┘    └─────────────────┘
+         │                       │                       │
+         ▼                       ▼                       ▼
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│ SpectroscopySession  │ SpectroscopyCorrector │  Guide Camera   │
+│ (Mirror Monitoring)  │ (Platesolving)    │    │ (Imaging)       │
+└─────────────────┘    └──────────────────┘    └─────────────────┘
+```
+
+## Prerequisites
+
+### Hardware Requirements
+- ASCOM-compatible telescope mount with Alpaca interface
+- Guide camera (ZWO ASI recommended)
+- Windows system with ASCOM drivers installed
+- Spectrograph attached to telescope
+
+### Software Dependencies
+- Python 3.8+
+- ASCOM Alpaca drivers for telescope/camera
+- External platesolving software (e.g., Minerva Photometry)
+- Required Python packages (see imports in script)
+
+## Configuration Files
+
+The system requires several YAML configuration files in a `config/` directory:
+
+### `paths.yaml`
+```yaml
+raw_images: "P:\\Photometry"
+spectro_images: "P:\\Spectroscopy"
+logs: "P:\\temp\\logs\\T2"
+target_json: "P:\\temp\\target_2.json"
+platesolve_json: "P:\\temp\\wcssolution_2.json"
+spectro_platesolve_json: "P:\\temp\\wcssolution_2.json"
+spectro_mirror_file: "P:\\temp\\mirror_telescope.json"
+```
+
+### `platesolving.yaml`
+```yaml
+correction_thresholds:
+  min_arcsec: 0.5
+  small_offset: 0.5
+  large_offset: 3.0
+
+correction_scale_factor: 1.0
+settle_time:
+  min: 5
+  max: 60
+
+spectro_acquisition:
+  exposure_time: 10.0
+  max_total_offset_arcsec: 1.0
+  default_session_duration_hours: 1.0
+  enabled: true
+  max_attempts: 20
+  correction_interval: 1
+  folder_suffix: "_acq"
+```
+
+### Additional Required Configs
+- `observatory.yaml` - Site coordinates and observing parameters
+- `telescope.yaml` - Telescope connection settings
+- `cameras.yaml` - Camera configurations
+- `cover.yaml` - Dust cover settings (if applicable)
+
+## Usage
+
+### Basic Command Structure
+```bash
+python spectro.py [MODE] [TARGET] [OPTIONS]
+```
+
+### Operating Modes
+
+#### 1. Single TIC Target
+```bash
+python spectro.py tic TIC123456789 --duration 2.0 --exposure-time 30
+```
+
+#### 2. Manual Coordinates
+```bash
+python spectro.py coords "45.5 +30.2" --duration 1.5
+```
+*Note: Coordinates are in degrees (RA DEC)*
+
+#### 3. Mirror Mode (Continuous Monitoring)
+```bash
+python spectro.py mirror --poll-interval 5.0 --exposure-time 15
+python spectro.py mirror "P:\\custom\\mirror_file.json"
+```
+
+### Command Line Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--config-dir` | Configuration directory | `config` |
+| `--log-level` | Logging level (DEBUG/INFO/WARNING/ERROR) | `INFO` |
+| `--duration` | Session duration in hours | `1.0` |
+| `--exposure-time` | Override exposure time in seconds | *From config/magnitude* |
+| `--poll-interval` | Mirror file check interval (seconds) | `10.0` |
+| `--ignore-twilight` | Bypass twilight checks for testing | `False` |
+| `--dry-run` | Simulate without hardware movement | `False` |
+
+### Exposure Time Hierarchy
+The system determines exposure time using this priority order:
+1. `--exposure-time` command line argument (highest)
+2. `spectro_acquisition.exposure_time` in YAML config
+3. Calculated from target magnitude (Gaia G-mag)
+4. Default fallback (120 seconds)
+
+## Mirror Mode Operation
+
+### Mirror File Format
+The system monitors a JSON file for telescope position updates:
+```json
+{
+  "latest_move": {
+    "timestamp": "2025-09-24T10:30:00Z",
+    "ra_deg": 123.456,
+    "dec_deg": +45.678
+  }
+}
+```
+
+### Mirror Mode Workflow
+1. **Monitor** - Continuously polls mirror file every `--poll-interval` seconds
+2. **Detect** - New timestamp triggers target acquisition
+3. **Validate** - Checks target observability and coordinate validity
+4. **Slew** - Moves telescope to new position
+5. **Image** - Runs acquisition + science sequence
+6. **Repeat** - Returns to monitoring for next target
+
+### Failed Target Handling
+- Invalid coordinates are logged and skipped
+- Unobservable targets are marked as failed
+- Failed targets are cached to prevent retry loops
+- System continues monitoring for new valid targets
+
+## Operational Phases
+
+### Acquisition Phase (if enabled)
+- **Purpose**: Achieve precise target centering for spectroscopy
+- **Exposure**: Short exposures (typically 3-10s)
+- **Corrections**: Applied every frame until within 1.0" threshold
+- **Directory**: Target name + `_acq` suffix
+- **Completion**: Automatically switches to science when centered
+
+### Science Phase
+- **Purpose**: Collect spectroscopic data
+- **Exposure**: Full exposure time based on target magnitude
+- **Corrections**: Applied every 5 frames to maintain pointing
+- **Directory**: Main target directory
+- **Duration**: Runs until session time limit or observability ends
+
+## File Organization
+
+```
+P:\Spectroscopy\
+├── TIC123456789\              # Science frames
+│   ├── 20240924_TIC123456789_C_001.fits
+│   └── 20240924_TIC123456789_C_002.fits
+├── TIC123456789_acq\          # Acquisition frames
+│   ├── 20240924_TIC123456789_C_acq_001.fits
+│   └── 20240924_TIC123456789_C_acq_002.fits
+└── 20250924_143022\           # Mirror mode (timestamp-based)
+    ├── 20250924_143022_C_001.fits
+    └── 20250924_143022_C_002.fits
+```
+
+## Safety Features
+
+### Hardware Protection
+- **Telescope parking** on program exit
+- **Motor shutdown** during cleanup
+- **Camera cooler management** - proper shutdown sequence
+- **Cover control** - automatic opening/closing if configured
+- **Park status verification** before motor enable
+
+### Observability Checks
+- **Altitude limits** - Target must be above minimum elevation
+- **Twilight constraints** - Respects astronomical twilight (unless bypassed)
+- **Continuous monitoring** - Stops session if target becomes unobservable
+
+### Error Recovery
+- **Connection timeouts** with automatic retry
+- **Exposure abortion** on user interrupt (Ctrl+C)
+- **Session cleanup** ensures hardware safety on exit
+- **Failed target caching** prevents infinite retry loops
+
+## Troubleshooting
+
+### Common Issues
+
+#### 1. "Camera not found for spectroscopy"
+- **Cause**: Guide camera not configured or not connected
+- **Check**: `cameras.yaml` configuration
+- **Fix**: Ensure guide camera is properly defined and ASCOM driver is working
+
+#### 2. "Failed to slew to target"
+- **Cause**: Telescope connection issues or target unreachable
+- **Check**: 
+  - Telescope ASCOM connection
+  - Target coordinates validity
+  - Mount physical limits
+- **Fix**: Verify telescope is unparked and tracking enabled
+
+#### 3. "Mirror file disappeared during read"
+- **Cause**: Race condition with file writer
+- **Check**: Mirror file write process using atomic operations
+- **Fix**: Ensure writer uses temporary file + rename pattern
+
+#### 4. "Imaging thread did not stop cleanly"
+- **Cause**: Camera exposure in progress during shutdown
+- **Check**: Log for exposure abortion attempts
+- **Fix**: Wait for current exposure to complete or upgrade to newer stop handling
+
+#### 5. "Target not observable"
+- **Cause**: Target below horizon or during twilight
+- **Check**: Target altitude and sun position in logs
+- **Fix**: Use `--ignore-twilight` for testing or wait for better conditions
+
+### Log Analysis
+
+#### Key Log Sections
+- **Initialization**: Hardware connection status
+- **Target Resolution**: TIC lookup and coordinate validation  
+- **Observability**: Real-time altitude and twilight status
+- **Corrections**: Platesolving offsets and mount adjustments
+- **Session Stats**: Exposure counts and timing information
+
+#### Debug Mode
+```bash
+python spectro.py tic TIC123456789 --log-level DEBUG
+```
+Enables detailed logging including:
+- Platesolving JSON file monitoring
+- Camera exposure parameters
+- Mount coordinate tracking
+- Correction decision logic
+
+### Configuration Validation
+
+#### Test Configuration
+```bash
+python spectro.py coords "180.0 +45.0" --dry-run --duration 0.1
+```
+Validates configuration files and simulates operation without hardware.
+
+#### Check Hardware Connections
+```bash
+python spectro.py tic TIC123456789 --dry-run --log-level DEBUG
+```
+Attempts hardware initialization and reports connection status.
+
+## Performance Optimization
+
+### Mirror Mode Tuning
+- **Poll Interval**: Balance responsiveness vs. system load
+- **File Location**: Use fast SSD for mirror file I/O
+- **Network Latency**: Consider delays in shared filesystem access
+
+### Exposure Optimization
+- **Binning**: Guide cameras typically use 4x4 binning for speed
+- **Gain Settings**: Optimize for target brightness and camera noise
+- **Exposure Time**: Balance SNR requirements with tracking accuracy
+
+### System Resources
+- **CPU Usage**: Monitor during intensive platesolving operations
+- **Disk Space**: Spectroscopy generates large FITS files continuously
+- **Memory**: Camera drivers may accumulate memory over long sessions
+
+## Integration Notes
+
+### External Platesolving
+The system relies on external software (e.g., Minerva Photometry) for astrometric solutions. Ensure:
+- Platesolving software monitors the target JSON file
+- WCS solutions are written to the configured JSON path
+- Timeout settings allow for platesolving computation time
+
+### Database Integration
+Target JSON files contain metadata for external database integration:
+- TIC IDs for catalog cross-matching
+- Observation timestamps and conditions
+- File path references for data reduction pipelines
+
+### Automation Frameworks
+The system is designed for integration with observatory automation:
+- Command-line interface for scheduler integration
+- Comprehensive logging for automated monitoring
+- Graceful error handling for unattended operation
+
+## Development and Customization
+
+### Extending Functionality
+- Inherit from `SpectroscopyImagingSession` for custom behavior
+- Override `SpectroscopyCorrector` for different platesolving backends
+- Customize exposure time calculations in session initialization
+
+### Testing Framework
+- Use `--dry-run` mode for development
+- Mock camera objects for hardware-free testing  
+- Simulate platesolving data for correction algorithm testing
+
+---
+
+*For additional support, check the detailed logs in the configured log directory and verify all YAML configuration files are properly formatted.*
