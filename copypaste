@@ -1,19 +1,100 @@
-# In SpectroscopyImagingSession.__init__, right after the camera manager setup:
-if camera_manager and not dry_run:
-    # Force spectro to only use 294MM camera
-    cameras_to_remove = []
-    for name, camera in camera_manager.cameras.items():
-        if '294MM' not in camera.name:
-            cameras_to_remove.append(name)
+def __init__(self, camera_manager, corrector, config_loader, target_info: TargetInfo,
+             ignore_twilight: bool = False, exposure_override: Optional[float] = None,
+             dry_run: bool = False):
     
-    for name in cameras_to_remove:
-        logger.debug(f"Removing non-294MM camera for spectroscopy: {camera_manager.cameras[name].name}")
-        camera_manager.cameras.pop(name)
+    self.dry_run = dry_run
+    self.logger = logging.getLogger(__name__)
     
-    # Ensure we have the 294MM as both main and guide
-    guide_camera = camera_manager.get_guide_camera()
-    if guide_camera and '294MM' in guide_camera.name:
+    # Load platesolve config first to get spectro settings
+    platesolve_config = config_loader.get_config('platesolving')
+    spectro_acq_cfg = platesolve_config.get('spectro_acquisition', {})
+    
+    # Calculate exposure based on priority: override -> YAML -> magnitude calculation
+    if exposure_override is not None:
+        # Explicit override provided
+        final_exposure = exposure_override
+        self.logger.debug(f"Using explicit exposure override: {final_exposure:.1f}s")
+    else:
+        # Try to get from YAML config first
+        yaml_exposure = spectro_acq_cfg.get('exposure_time')
+        if yaml_exposure is not None:
+            final_exposure = yaml_exposure
+            self.logger.debug(f"Using YAML spectro_acquisition.exposure_time: {final_exposure:.1f}s")
+        elif hasattr(target_info, 'gaia_g_mag'):
+            # Calculate from magnitude as fallback
+            base_exp = 30.0
+            mag_diff = target_info.gaia_g_mag - 12.0
+            calculated_exp = base_exp * (2.5 ** mag_diff)  # 2.5x per magnitude
+            final_exposure = max(1.0, min(calculated_exp, 300.0))  # Clamp 1-300s
+            self.logger.debug(f"Calculated exposure from magnitude {target_info.gaia_g_mag}: {final_exposure:.1f}s")
+        else:
+            # Final fallback
+            final_exposure = 120.0
+            self.logger.debug(f"Using fallback exposure time: {final_exposure:.1f}s")
+    
+    # Store the final exposure time
+    exposure_override = final_exposure
+    
+    # For spectroscopy, filter to only use 294MM cameras
+    if camera_manager and not dry_run:
+        cameras_to_remove = []
+        for name, camera in camera_manager.cameras.items():
+            if '294MM' not in camera.name:
+                cameras_to_remove.append(name)
+        
+        for name in cameras_to_remove:
+            logger.debug(f"Removing non-294MM camera for spectroscopy: {camera_manager.cameras[name].name}")
+            camera_manager.cameras.pop(name)
+        
+        # Ensure we have the 294MM as both main and guide
+        guide_camera = camera_manager.get_guide_camera()
+        if not guide_camera or '294MM' not in guide_camera.name:
+            raise ImagingSessionError("294MM guide camera not found for spectroscopy")
+        
+        if not guide_camera.connected and not guide_camera.connect():
+            raise ImagingSessionError("Failed to connect to 294MM camera")
+        
+        # Set 294MM as main camera for spectroscopy
         camera_manager.cameras['main'] = guide_camera
         logger.info(f"Using 294MM camera for spectroscopy: {guide_camera.name}")
-    else:
-        raise ImagingSessionError("294MM camera not found for spectroscopy")
+    
+    # Initialize paths and parent class
+    paths_config = config_loader.get_config('paths')
+    spectro_root = Path(paths_config['spectro_images'])
+    
+    # Initialize parent with 'C' filter (clear) for spectroscopy
+    super().__init__(camera_manager, corrector, config_loader, target_info,
+                     filter_code='C', ignore_twilight=ignore_twilight,
+                     exposure_override=exposure_override, images_base_path=spectro_root,
+                     is_spectroscopy=True)
+    
+    self.acquisition_config.update(spectro_acq_cfg)
+    
+    # Setup directory structure
+    full_dir = self.file_manager.create_target_directory(self.target_info.tic_id, base_path=spectro_root)
+    self.science_dir = full_dir
+    self.acquisition_dir = full_dir.parent / (full_dir.name + "_acq")
+    self.current_target_dir = self.acquisition_dir if self.acquisition_enabled else self.science_dir
+    
+    # Configure acquisition settings
+    if self.acquisition_enabled and hasattr(self, 'acquisition_config'):
+        self.acquisition_config['exposure'] = self.exposure_override
+        self.logger.debug(f"Acquisition exposure set to {self.exposure_override}")
+    
+    # Update acquisition settings for tighter spectroscopy requirements
+    if hasattr(self, 'acquisition_config'):
+        # Tighten acquisition threshold for spectroscopy (fiber alignment critical)
+        self.acquisition_config['max_total_offset_arcsec'] = 1.0
+        self.logger.debug("Tightened acquisition threshold to 1.0\" for spectroscopy")
+    
+    # Initialize session state
+    self._running = False
+    self._stop_event = threading.Event()
+    
+    if dry_run:
+        self.main_camera = None
+        self.logger.info("DRY RUN MODE - No camera operations will be performed")
+    
+    # Set target in corrector for stale data detection
+    self._set_target_in_corrector()
+    logger.debug(f"SpectroscopyImagingSession initialized with immediate correction checking")
