@@ -1,16 +1,43 @@
-def set_current_target(self, target_id: str, base_exposure_time: Optional[float] = None):
-    """Set the current target ID to help detect stale platesolve data"""
-    if self.current_target_id != target_id:
-        self.current_target_id = target_id
-        self.target_start_time = time.time()
-        # Reset adaptive exposure for new target - THIS IS THE CRITICAL PART
-        self.base_exposure_time = base_exposure_time if base_exposure_time is not None else self.spectro_config.get("exposure_time", 30.0)
-        self.current_exposure_time = self.base_exposure_time  # Reset to base exposure
-        logger.info(f"New spectroscopy target: {target_id}")
-        logger.info(f"Reset adaptive exposure time to {self.current_exposure_time:.1f}s for new target")  # Change this from DEBUG to INFO so you can see it
-    else:
-        # Same target, but update base exposure if provided
-        if base_exposure_time is not None and base_exposure_time != self.base_exposure_time:
-            self.base_exposure_time = base_exposure_time
-            self.current_exposure_time = base_exposure_time
-            logger.info(f"Updated base exposure time to {base_exposure_time:.1f}s for target {target_id}")
+def detect_platesolve_failure(self, data: Dict[str, Any]) -> Optional[float]:
+    """Detect if platesolve failed and return new exposure time if needed"""
+    try:
+        ra_offset_deg = float(data['ra_offset']["0"])
+        dec_offset_deg = float(data['dec_offset']["0"])
+        
+        # Check if we've already processed this exact platesolve data
+        current_filename = data.get('fitsname', {}).get("0", "")
+        if current_filename and current_filename == getattr(self, 'last_failed_filename', None):
+            logger.debug("Already processed this failed platesolve data, not increasing exposure again")
+            return self.current_exposure_time  # Return current time without increasing
+        
+        # Exact zeros indicate platesolve failure
+        if ra_offset_deg == 0.0 and dec_offset_deg == 0.0:
+            logger.debug("Detected platesolve failure: exact zero offsets")
+            
+            # Remember this failed filename to prevent re-processing
+            self.last_failed_filename = current_filename
+            
+            # Calculate new exposure time
+            if self.current_exposure_time < self.max_exposure_time:
+                new_exposure = min(
+                    self.current_exposure_time * self.exposure_increase_factor,
+                    self.max_exposure_time
+                )
+                self.current_exposure_time = new_exposure
+                logger.debug(f"Increased exposure time to {new_exposure:.1f}s")
+                return new_exposure
+            else:
+                logger.debug(f"Already at maximum exposure time ({self.max_exposure_time}s)")
+                return self.current_exposure_time
+        
+        # Successful platesolve - reset exposure time and clear failed filename
+        if self.current_exposure_time != self.base_exposure_time:
+            self.current_exposure_time = self.base_exposure_time
+            logger.info(f"Platesolve successful - reset exposure time to {self.base_exposure_time:.1f}s")
+        self.last_failed_filename = None  # Clear on success
+        
+        return None  # No failure detected
+        
+    except (KeyError, ValueError, TypeError) as e:
+        logger.warning(f"Could not check for platesolve failure: {e}")
+        return None
