@@ -1,321 +1,155 @@
+# Add these methods to your SpectroscopyImagingSession class
 
-class SpectroscopyCorrector(PlatesolveCorrector):
-    """Enhanced platesolve corrector for spectroscopy with immediate corrections and adaptive exposure"""
-    
-    def __init__(self, telescope_driver, config_loader):
-        # Initialize with memory enabled for spectroscopy
-        super().__init__(telescope_driver, config_loader, rotator_driver=None, store_last_measurements=True)
-        
-        # Use spectro-specific platesolve path if configured
-        paths_config = config_loader.get_config('paths')
-        self.json_file_path = Path(paths_config.get('spectro_platesolve_json', 
-                                                paths_config.get('platesolve_json')))
-        
-        # Load spectro-specific configuration
-        platesolve_config = config_loader.get_config('platesolving')
-        self.spectro_config = platesolve_config.get('spectro_acquisition', {})
-        
-        # Track current target for stale data detection
-        self.current_target_id = None
-        self.target_start_time = None
-        
-        # Adaptive exposure tracking
-        self.consecutive_zero_corrections = 0
-        self.current_exposure_time = self.spectro_config.get('exposure_time', 10.0)
-        self.max_exposure_time = self.spectro_config.get('max_exposure_time', 120.0)  # 2 minutes
-        self.exposure_increase_factor = self.spectro_config.get('exposure_increase_factor', 2.0)
-        self.max_zero_attempts = self.spectro_config.get('max_zero_attempts', 4)  # 2 attempts at max exposure
-        
-        logger.info("SpectroscopyCorrector initialized with immediate corrections and adaptive exposure")
-    
-    def set_current_target(self, target_id: str):
-        """Set the current target ID to help detect stale platesolve data"""
-        if self.current_target_id != target_id:
-            self.current_target_id = target_id
-            self.target_start_time = time.time()
-            # Reset adaptive exposure for new target
-            self.consecutive_zero_corrections = 0
-            self.current_exposure_time = self.spectro_config.get('exposure_time', 10.0)
-            logger.info(f"New spectroscopy target: {target_id}")
-            logger.debug(f"Reset exposure time to {self.current_exposure_time}s for new target")
-    
-    def is_platesolve_data_current(self, data: Dict[str, Any]) -> bool:
-        """Check if platesolve data is current for the active target"""
-        try:
-            # Check if we have a target set
-            if not self.current_target_id or not self.target_start_time:
-                logger.debug("No current target set, assuming data is current")
-                return True
-            
-            # Check calc_time if available (platesolve timestamp)
-            calc_time_str = data.get('calctime', {}).get("0")
-            if calc_time_str:
-                try:
-                    # Parse calc_time format (adjust format string as needed for your platesolve output)
-                    calc_time = datetime.fromisoformat(calc_time_str.replace('Z', '+00:00'))
-                    calc_timestamp = calc_time.timestamp()
-                    
-                    # Data should be newer than when we started this target (with small buffer)
-                    if calc_timestamp >= (self.target_start_time - 10):  # 10s buffer
-                        logger.debug(f"Platesolve data is current (calc_time: {calc_time_str})")
-                        return True
-                    else:
-                        logger.warning(f"Platesolve data is stale: calc_time={calc_time_str}, target_start={datetime.fromtimestamp(self.target_start_time)}")
-                        return False
-                except Exception as e:
-                    logger.debug(f"Could not parse calc_time '{calc_time_str}': {e}")
-            
-            # Fallback: check filename contains target ID or is recent enough
-            filename = data.get('fitsname', {}).get("0", "")
-            if filename:
-                # If filename contains target ID, it's probably current
-                if self.current_target_id in filename:
-                    logger.debug(f"Filename contains target ID: {filename}")
-                    return True
-                
-                # Otherwise check file age from JSON file modification time
-                if self.json_file_path.exists():
-                    file_mod_time = self.json_file_path.stat().st_mtime
-                    if file_mod_time >= (self.target_start_time - 10):  # 10s buffer
-                        logger.debug(f"JSON file is recent enough for current target")
-                        return True
-                    else:
-                        logger.warning(f"JSON file too old for current target")
-                        return False
-            
-            logger.debug("No reliable way to verify data currency, assuming it's current")
-            return True
-            
-        except Exception as e:
-            logger.warning(f"Error checking data currency: {e}")
-            return True  # Default to assuming it's current to avoid blocking corrections
-    
-    def detect_platesolve_failure(self, data: Dict[str, Any]) -> bool:
-        """Detect if platesolve failed by checking for exact zero offsets"""
-        try:
-            ra_offset_deg = float(data['ra_offset']["0"])
-            dec_offset_deg = float(data['dec_offset']["0"])
-            
-            # Exact zeros indicate platesolve failure
-            if ra_offset_deg == 0.0 and dec_offset_deg == 0.0:
-                logger.debug("Detected platesolve failure: exact zero offsets")
-                return True
-            
-            return False
-            
-        except (KeyError, ValueError, TypeError) as e:
-            logger.warning(f"Could not check for platesolve failure: {e}")
-            return False
-    
-    def handle_platesolve_failure(self) -> Optional[float]:
-        """Handle platesolve failure by increasing exposure time"""
-        self.consecutive_zero_corrections += 1
-        
-        if self.consecutive_zero_corrections >= self.max_zero_attempts:
-            logger.error(f"Too many consecutive platesolve failures ({self.consecutive_zero_corrections})")
-            logger.error("Consider skipping this target")
-            return None
-        
-        if self.current_exposure_time < self.max_exposure_time:
-            old_exposure = self.current_exposure_time
-            self.current_exposure_time = min(
-                self.current_exposure_time * self.exposure_increase_factor,
-                self.max_exposure_time
-            )
-            logger.warning(f"Platesolve failed, increasing exposure: {old_exposure}s → {self.current_exposure_time}s")
-            logger.warning(f"Failure attempt {self.consecutive_zero_corrections}/{self.max_zero_attempts}")
-            return self.current_exposure_time
+def capture_single_exposure(self, telescope_driver=None) -> Optional[str]:
+    """Override to integrate immediate platesolve correction checking"""
+    try:
+        # Get current adaptive exposure time from corrector if available
+        if hasattr(self.corrector, 'get_current_exposure_time') and self.current_phase == SessionPhase.ACQUISITION:
+            adaptive_exposure = self.corrector.get_current_exposure_time()
+            if adaptive_exposure != self.exposure_override:
+                logger.info(f"Using adaptive exposure time: {adaptive_exposure:.1f}s (was {self.exposure_override:.1f}s)")
+                # Temporarily update exposure time for this capture
+                original_exposure = self.exposure_override
+                self.exposure_override = adaptive_exposure
+                # Update acquisition config too
+                if hasattr(self, 'acquisition_config'):
+                    self.acquisition_config['exposure'] = adaptive_exposure
         else:
-            logger.error(f"Already at maximum exposure time ({self.max_exposure_time}s)")
-            logger.error(f"Failure attempt {self.consecutive_zero_corrections}/{self.max_zero_attempts}")
-            return self.current_exposure_time
+            original_exposure = None
+        
+        # Call parent method to capture the image
+        image_filepath = super().capture_single_exposure(telescope_driver=telescope_driver)
+        
+        # Restore original exposure if we modified it
+        if original_exposure is not None:
+            self.exposure_override = original_exposure
+            if hasattr(self, 'acquisition_config'):
+                self.acquisition_config['exposure'] = original_exposure
+        
+        if image_filepath and self.corrector:
+            # Check for immediate correction after each image
+            self._check_immediate_correction()
+        
+        return image_filepath
+        
+    except Exception as e:
+        logger.error(f"Error in spectro capture_single_exposure: {e}")
+        # Restore original exposure on error
+        if 'original_exposure' in locals() and original_exposure is not None:
+            self.exposure_override = original_exposure
+            if hasattr(self, 'acquisition_config'):
+                self.acquisition_config['exposure'] = original_exposure
+        raise
+
+def _check_immediate_correction(self):
+    """Check for and apply immediate platesolve correction after each image"""
+    if not self.corrector or not hasattr(self.corrector, 'apply_immediate_correction_if_available'):
+        return
     
-    def get_current_exposure_time(self) -> float:
-        """Get the current adaptive exposure time"""
-        return self.current_exposure_time
-    
-    def reset_adaptive_exposure(self):
-        """Reset adaptive exposure to initial value (call after successful correction)"""
-        if self.consecutive_zero_corrections > 0:
-            self.consecutive_zero_corrections = 0
-            old_exposure = self.current_exposure_time
-            self.current_exposure_time = self.spectro_config.get('exposure_time', 10.0)
-            logger.info(f"Reset exposure time: {old_exposure}s → {self.current_exposure_time}s")
-    
-    def process_platesolve_data(self, data: Dict[str, Any]) -> Tuple[float, float, float, float]:
-        """Override to use immediate full corrections for spectroscopy"""
-        try:
-            # First check if data is current for our target
-            if not self.is_platesolve_data_current(data):
-                raise PlatesolveCorrectorError("Platesolve data is stale for current target")
-            
-            # Check for platesolve failure
-            if self.detect_platesolve_failure(data):
-                new_exposure = self.handle_platesolve_failure()
-                if new_exposure is None:
-                    raise PlatesolveCorrectorError("Maximum platesolve failure attempts exceeded")
-                else:
-                    raise PlatesolveCorrectorError(f"Platesolve failed, try exposure time {new_exposure:.1f}s")
-            
-            # Reset failure counter on successful platesolve
-            if self.consecutive_zero_corrections > 0:
-                self.reset_adaptive_exposure()
-            
-            ra_offset_deg = float(data['ra_offset']["0"])
-            dec_offset_deg = float(data['dec_offset']["0"])
-            # Ignore rotation offset for spectroscopy
-            rot_offset_deg = 0.0  
-            base_settle_time = float(data['exptime']["0"])
-            
-            ra_offset_arcsec = ra_offset_deg * 3600.0
-            dec_offset_arcsec = dec_offset_deg * 3600.0
-            total_offset_arcsec = (ra_offset_arcsec**2 + dec_offset_arcsec**2)**0.5
-            
-            logger.debug(f"Spectro offsets: RA={ra_offset_arcsec:.2f}\", Dec={dec_offset_arcsec:.2f}\", "
-                         f"Total={total_offset_arcsec:.2f}\" (rotation ignored)")
-            
-            # Use spectro-specific thresholds - much tighter for fiber alignment
-            spectro_thresholds = self.platesolve_config.get('spectro_thresholds', {})
-            min_threshold = spectro_thresholds.get('min_arcsec', 0.01)  # Very tight for spectroscopy
-            
-            if total_offset_arcsec < min_threshold:
-                scale_factor = 0.0
-                settle_time = 1.0  # Minimal settle time for spectroscopy
-                logger.debug(f"Offset below spectro minimum threshold ({min_threshold:.2f}\"), no correction")
-            else:
-                # Always apply full correction for spectroscopy - no scaling down
-                scale_factor = 1.0
-                settle_time = 3.0  # Quick settle for spectroscopy
-                logger.debug(f"Spectro offset above threshold, applying full correction")
+    try:
+        logger.debug("Checking for immediate platesolve correction...")
+        result = self.corrector.apply_immediate_correction_if_available()
+        
+        if result.applied:
+            logger.info(f"✓ Immediate correction applied: {result.total_offset_arcsec:.2f}\" total offset")
+            # Apply settle time
+            if result.settle_time > 0:
+                logger.debug(f"Settling for {result.settle_time:.1f}s after correction")
+                time.sleep(result.settle_time)
                 
-            ra_offset_deg *= scale_factor
-            dec_offset_deg *= scale_factor
+            # Check if we should switch to science phase
+            if (self.current_phase == SessionPhase.ACQUISITION and 
+                self._should_switch_to_science_from_correction(result)):
+                logger.info(f"Correction result indicates target acquired (≤{self.acquisition_config.get('max_total_offset_arcsec', 2.0)}\")")
+                self._switch_to_science_phase()
+                
+        elif "threshold" in result.reason.lower():
+            logger.debug(f"No correction needed: {result.reason}")
+            # Even if no correction applied, check if we should switch to science
+            if (self.current_phase == SessionPhase.ACQUISITION and
+                result.total_offset_arcsec <= self.acquisition_config.get('max_total_offset_arcsec', 2.0)):
+                logger.info(f"Target acquired based on small offset: {result.total_offset_arcsec:.2f}\"")
+                self._switch_to_science_phase()
+                
+        elif "stale" in result.reason.lower():
+            logger.warning(f"Platesolve data is stale: {result.reason}")
             
-            # Minimal settle time for spectroscopy
-            settle_limits = self.spectro_config.get('settle_time', {})
-            min_settle = settle_limits.get('min', 1)
-            max_settle = settle_limits.get('max', 5)  # Much shorter for spectroscopy
-            settle_time = max(min_settle, min(max_settle, settle_time))
+        elif "exposure" in result.reason.lower():
+            # This is an adaptive exposure increase recommendation
+            logger.warning(f"Adaptive exposure triggered: {result.reason}")
             
-            return ra_offset_deg, dec_offset_deg, rot_offset_deg, settle_time
-            
-        except KeyError as e:
-            logger.error(f"Missing key in platesolve data: {e}")
-            raise PlatesolveCorrectorError(f"Invalid platesolve data format: missing {e}")
-        except (ValueError, TypeError) as e:
-            logger.error(f"Invalid data type in platesolve data: {e}")
-            raise PlatesolveCorrectorError(f"Invalid platesolve data values: {e}")
-    
-    def apply_immediate_correction_if_available(self) -> CorrectionResult:
-        """Apply correction immediately if fresh platesolve data is available"""
-        try:
-            # Check for fresh data without waiting
-            file_ready, data = self.check_json_file_ready()
-            
-            if not file_ready:
-                return CorrectionResult(
-                    applied=False,
-                    ra_offset_arcsec=0.0,
-                    dec_offset_arcsec=0.0, 
-                    rotation_offset_deg=0.0,
-                    total_offset_arcsec=0.0, 
-                    settle_time=0.0, 
-                    reason="No fresh platesolve data available"
-                )
-            
-            # Check if we've already processed this exact solution
-            current_filename = data.get('fitsname', {}).get("0", "")
-            if current_filename and current_filename == self.last_processed_file:
-                return CorrectionResult(
-                    applied=False,
-                    ra_offset_arcsec=0.0,
-                    dec_offset_arcsec=0.0, 
-                    rotation_offset_deg=0.0,
-                    total_offset_arcsec=0.0, 
-                    settle_time=0.0, 
-                    reason="Already processed this solution"
-                )
-            
-            # Process the correction
-            return self._apply_correction_from_data(data, current_filename)
-            
-        except PlatesolveCorrectorError:
-            # Re-raise specific corrector errors
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error in immediate correction: {e}")
-            raise PlatesolveCorrectorError(f"Immediate correction failed: {e}")
-    
-    def _apply_correction_from_data(self, data: Dict[str, Any], filename: str) -> CorrectionResult:
-        """Apply correction from platesolve data"""
-        ra_offset_deg, dec_offset_deg, rot_offset_deg, settle_time = self.process_platesolve_data(data)
-        
-        ra_offset_arcsec = ra_offset_deg * 3600.0
-        dec_offset_arcsec = dec_offset_deg * 3600.0
-        total_offset_arcsec = (ra_offset_arcsec**2 + dec_offset_arcsec**2)**0.5
-        
-        # Store last measurements
-        if self.store_last_measurements:
-            self.last_total_offset_arcsec = total_offset_arcsec
-            self.last_ra_offset_arcsec = ra_offset_arcsec
-            self.last_dec_offset_arcsec = dec_offset_arcsec
-            self.last_rotation_offset_deg = rot_offset_deg
-            self.last_measurement_time = time.time()
-        
-        # Check if correction is needed (use spectro thresholds)
-        spectro_thresholds = self.platesolve_config.get('spectro_thresholds', {})
-        min_correction = spectro_thresholds.get('min_arcsec', 0.01)
-        
-        if total_offset_arcsec < min_correction:
-            return CorrectionResult(
-                applied=False,
-                ra_offset_arcsec=ra_offset_arcsec,
-                dec_offset_arcsec=dec_offset_arcsec, 
-                rotation_offset_deg=rot_offset_deg,
-                total_offset_arcsec=total_offset_arcsec, 
-                settle_time=settle_time, 
-                reason=f"Spectro offset below threshold: {total_offset_arcsec:.3f}\" < {min_correction:.3f}\""
-            )
-        
-        # Apply coordinate correction
-        logger.info(f"Applying immediate spectro correction: RA={ra_offset_arcsec:.2f}\", Dec={dec_offset_arcsec:.2f}\", Total={total_offset_arcsec:.2f}\"")
-        
-        if not self.telescope_driver or not self.telescope_driver.is_connected():
-            return CorrectionResult(
-                applied=False,
-                ra_offset_arcsec=ra_offset_arcsec,
-                dec_offset_arcsec=dec_offset_arcsec, 
-                rotation_offset_deg=rot_offset_deg,
-                total_offset_arcsec=total_offset_arcsec, 
-                settle_time=settle_time, 
-                reason="Telescope not connected"
-            )
-        
-        success = self.telescope_driver.apply_coordinate_correction(ra_offset_deg, dec_offset_deg)
-        
-        if success:
-            self.last_processed_file = filename
-            logger.info(f"Spectro correction applied successfully, settling for {settle_time:.1f}s")
-            
-            return CorrectionResult(
-                applied=True, 
-                ra_offset_arcsec=ra_offset_arcsec, 
-                dec_offset_arcsec=dec_offset_arcsec, 
-                rotation_offset_deg=rot_offset_deg,
-                total_offset_arcsec=total_offset_arcsec, 
-                settle_time=settle_time, 
-                reason="Spectro correction applied successfully",
-                rotation_applied=False
-            )
         else:
-            logger.error("Spectro coordinate correction failed")
-            return CorrectionResult(
-                applied=False, 
-                ra_offset_arcsec=ra_offset_arcsec, 
-                dec_offset_arcsec=dec_offset_arcsec, 
-                rotation_offset_deg=rot_offset_deg,
-                total_offset_arcsec=total_offset_arcsec, 
-                settle_time=settle_time, 
-                reason="Coordinate correction failed",
-                rotation_applied=False
-            )
+            logger.debug(f"Correction not available: {result.reason}")
+            
+    except PlatesolveCorrectorError as e:
+        # Handle platesolve-specific errors
+        if "stale" in str(e).lower():
+            logger.debug(f"Platesolve data stale: {e}")
+        elif "exposure" in str(e).lower():
+            logger.warning(f"Adaptive exposure needed: {e}")
+        elif "exceeded" in str(e).lower():
+            logger.error(f"Too many platesolve failures: {e}")
+            logger.error("Consider skipping this target or checking camera/mount alignment")
+        else:
+            logger.warning(f"Platesolve correction error: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error checking immediate correction: {e}")
+
+def _should_switch_to_science_from_correction(self, correction_result) -> bool:
+    """Determine if correction result indicates we should switch to science phase"""
+    if self.current_phase != SessionPhase.ACQUISITION:
+        return False
+    
+    max_offset = self.acquisition_config.get('max_total_offset_arcsec', 2.0)
+    
+    # Switch if total offset is within threshold
+    if correction_result.total_offset_arcsec <= max_offset:
+        logger.debug(f"Offset {correction_result.total_offset_arcsec:.2f}\" ≤ {max_offset}\" threshold")
+        return True
+    
+    return False
+
+def _set_target_in_corrector(self):
+    """Set current target info in corrector for stale data detection"""
+    if self.corrector and hasattr(self.corrector, 'set_current_target'):
+        target_id = self.target_info.tic_id
+        self.corrector.set_current_target(target_id)
+        logger.debug(f"Set corrector target: {target_id}")
+
+# Also update the __init__ method to set the target in corrector:
+
+def __init__(self, camera_manager, corrector, config_loader, target_info: TargetInfo,
+             ignore_twilight: bool = False, exposure_override: Optional[float] = None,
+             dry_run: bool = False):
+    
+    # ... existing initialization code ...
+    
+    # At the end of __init__, set target in corrector
+    self._set_target_in_corrector()
+    
+    logger.debug(f"SpectroscopyImagingSession initialized with immediate correction checking")
+
+# Update the _start_new_session method in SpectroscopySession to set target:
+
+def _start_new_session(self, target_data: Dict[str, Any]) -> bool:
+    """Start new session with proper error handling and safety checks"""
+    try:
+        target_info = TargetInfo(
+            tic_id=f"{target_data['timestamp'].strftime('%Y%m%d_%H%M%S')}",
+            ra_j2000_hours=target_data['ra_hours'],
+            dec_j2000_deg=target_data['dec_deg'],
+            gaia_g_mag=12.0,
+            magnitude_source="spectro-default"
+        )
+
+        # Set target in corrector before starting session
+        if self.corrector and hasattr(self.corrector, 'set_current_target'):
+            self.corrector.set_current_target(target_info.tic_id)
+
+        # ... rest of existing method ...
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to start new session: {e}")
+        return False
