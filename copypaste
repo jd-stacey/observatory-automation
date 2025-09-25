@@ -1,43 +1,21 @@
-def detect_platesolve_failure(self, data: Dict[str, Any]) -> Optional[float]:
-    """Detect if platesolve failed and return new exposure time if needed"""
-    try:
-        ra_offset_deg = float(data['ra_offset']["0"])
-        dec_offset_deg = float(data['dec_offset']["0"])
-        
-        # Check if we've already processed this exact platesolve data
-        current_filename = data.get('fitsname', {}).get("0", "")
-        if current_filename and current_filename == getattr(self, 'last_failed_filename', None):
-            logger.debug("Already processed this failed platesolve data, not increasing exposure again")
-            return self.current_exposure_time  # Return current time without increasing
-        
-        # Exact zeros indicate platesolve failure
-        if ra_offset_deg == 0.0 and dec_offset_deg == 0.0:
-            logger.debug("Detected platesolve failure: exact zero offsets")
-            
-            # Remember this failed filename to prevent re-processing
-            self.last_failed_filename = current_filename
-            
-            # Calculate new exposure time
-            if self.current_exposure_time < self.max_exposure_time:
-                new_exposure = min(
-                    self.current_exposure_time * self.exposure_increase_factor,
-                    self.max_exposure_time
-                )
-                self.current_exposure_time = new_exposure
-                logger.debug(f"Increased exposure time to {new_exposure:.1f}s")
-                return new_exposure
-            else:
-                logger.debug(f"Already at maximum exposure time ({self.max_exposure_time}s)")
-                return self.current_exposure_time
-        
-        # Successful platesolve - reset exposure time and clear failed filename
-        if self.current_exposure_time != self.base_exposure_time:
-            self.current_exposure_time = self.base_exposure_time
-            logger.info(f"Platesolve successful - reset exposure time to {self.base_exposure_time:.1f}s")
-        self.last_failed_filename = None  # Clear on success
-        
-        return None  # No failure detected
-        
-    except (KeyError, ValueError, TypeError) as e:
-        logger.warning(f"Could not check for platesolve failure: {e}")
-        return None
+def capture_single_exposure(self, telescope_driver=None) -> Optional[str]:
+    """Override to check platesolve results after each exposure"""
+    # Just call parent method - no retry loop
+    image_filepath = super().capture_single_exposure(telescope_driver=telescope_driver)
+    
+    if image_filepath and self.corrector:
+        # Give solver time to process
+        time.sleep(3.0)
+        # Check for immediate correction, passing current phase
+        try:
+            result = self.corrector.apply_immediate_correction_if_available(current_phase=self.current_phase.value)
+            if result.applied:
+                logger.info(f"✓ Correction applied: {result.total_offset_arcsec:.2f}\" offset")
+            elif "exposure" in result.reason.lower() and self.current_phase.value == "acquisition":
+                logger.debug(f"Adaptive exposure triggered during acquisition: {result.reason}")
+            elif "exposure" in result.reason.lower() and self.current_phase.value == "science":
+                logger.debug(f"Platesolve failed during science phase - continuing with current exposure")
+        except Exception as e:
+            logger.debug(f"Correction check: {e}")
+    
+    return image_filepath
