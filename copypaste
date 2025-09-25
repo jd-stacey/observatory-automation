@@ -58,11 +58,6 @@ def capture_single_exposure(self, telescope_driver=None) -> Optional[str]:
             
         except Exception as e:
             logger.error(f"Error in capture attempt {attempt + 1}/{max_retries}: {e}")
-            # Restore original exposure on error
-            if 'original_exposure' in locals() and original_exposure is not None:
-                self.exposure_override = original_exposure
-                if hasattr(self, 'acquisition_config'):
-                    self.acquisition_config['exposure'] = original_exposure
             continue
     
     # All retries exhausted
