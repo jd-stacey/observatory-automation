@@ -1,155 +1,46 @@
-# Add these methods to your SpectroscopyImagingSession class
+file_max_age_seconds: 200
+check_interval_seconds: 5
+correction_scale_factor: 1.0
+timeout_seconds: 600
 
-def capture_single_exposure(self, telescope_driver=None) -> Optional[str]:
-    """Override to integrate immediate platesolve correction checking"""
-    try:
-        # Get current adaptive exposure time from corrector if available
-        if hasattr(self.corrector, 'get_current_exposure_time') and self.current_phase == SessionPhase.ACQUISITION:
-            adaptive_exposure = self.corrector.get_current_exposure_time()
-            if adaptive_exposure != self.exposure_override:
-                logger.info(f"Using adaptive exposure time: {adaptive_exposure:.1f}s (was {self.exposure_override:.1f}s)")
-                # Temporarily update exposure time for this capture
-                original_exposure = self.exposure_override
-                self.exposure_override = adaptive_exposure
-                # Update acquisition config too
-                if hasattr(self, 'acquisition_config'):
-                    self.acquisition_config['exposure'] = adaptive_exposure
-        else:
-            original_exposure = None
-        
-        # Call parent method to capture the image
-        image_filepath = super().capture_single_exposure(telescope_driver=telescope_driver)
-        
-        # Restore original exposure if we modified it
-        if original_exposure is not None:
-            self.exposure_override = original_exposure
-            if hasattr(self, 'acquisition_config'):
-                self.acquisition_config['exposure'] = original_exposure
-        
-        if image_filepath and self.corrector:
-            # Check for immediate correction after each image
-            self._check_immediate_correction()
-        
-        return image_filepath
-        
-    except Exception as e:
-        logger.error(f"Error in spectro capture_single_exposure: {e}")
-        # Restore original exposure on error
-        if 'original_exposure' in locals() and original_exposure is not None:
-            self.exposure_override = original_exposure
-            if hasattr(self, 'acquisition_config'):
-                self.acquisition_config['exposure'] = original_exposure
-        raise
+settle_time:
+  min: 10
+  max: 140
 
-def _check_immediate_correction(self):
-    """Check for and apply immediate platesolve correction after each image"""
-    if not self.corrector or not hasattr(self.corrector, 'apply_immediate_correction_if_available'):
-        return
-    
-    try:
-        logger.debug("Checking for immediate platesolve correction...")
-        result = self.corrector.apply_immediate_correction_if_available()
-        
-        if result.applied:
-            logger.info(f"✓ Immediate correction applied: {result.total_offset_arcsec:.2f}\" total offset")
-            # Apply settle time
-            if result.settle_time > 0:
-                logger.debug(f"Settling for {result.settle_time:.1f}s after correction")
-                time.sleep(result.settle_time)
-                
-            # Check if we should switch to science phase
-            if (self.current_phase == SessionPhase.ACQUISITION and 
-                self._should_switch_to_science_from_correction(result)):
-                logger.info(f"Correction result indicates target acquired (≤{self.acquisition_config.get('max_total_offset_arcsec', 2.0)}\")")
-                self._switch_to_science_phase()
-                
-        elif "threshold" in result.reason.lower():
-            logger.debug(f"No correction needed: {result.reason}")
-            # Even if no correction applied, check if we should switch to science
-            if (self.current_phase == SessionPhase.ACQUISITION and
-                result.total_offset_arcsec <= self.acquisition_config.get('max_total_offset_arcsec', 2.0)):
-                logger.info(f"Target acquired based on small offset: {result.total_offset_arcsec:.2f}\"")
-                self._switch_to_science_phase()
-                
-        elif "stale" in result.reason.lower():
-            logger.warning(f"Platesolve data is stale: {result.reason}")
-            
-        elif "exposure" in result.reason.lower():
-            # This is an adaptive exposure increase recommendation
-            logger.warning(f"Adaptive exposure triggered: {result.reason}")
-            
-        else:
-            logger.debug(f"Correction not available: {result.reason}")
-            
-    except PlatesolveCorrectorError as e:
-        # Handle platesolve-specific errors
-        if "stale" in str(e).lower():
-            logger.debug(f"Platesolve data stale: {e}")
-        elif "exposure" in str(e).lower():
-            logger.warning(f"Adaptive exposure needed: {e}")
-        elif "exceeded" in str(e).lower():
-            logger.error(f"Too many platesolve failures: {e}")
-            logger.error("Consider skipping this target or checking camera/mount alignment")
-        else:
-            logger.warning(f"Platesolve correction error: {e}")
-    except Exception as e:
-        logger.error(f"Unexpected error checking immediate correction: {e}")
+correction_thresholds:
+  min_arcsec: 1.0     # dont correct below this
+  small_offset: 1.0   # use scale factor 0
+  large_offset: 5.0   # use scale factor 0.5
 
-def _should_switch_to_science_from_correction(self, correction_result) -> bool:
-    """Determine if correction result indicates we should switch to science phase"""
-    if self.current_phase != SessionPhase.ACQUISITION:
-        return False
-    
-    max_offset = self.acquisition_config.get('max_total_offset_arcsec', 2.0)
-    
-    # Switch if total offset is within threshold
-    if correction_result.total_offset_arcsec <= max_offset:
-        logger.debug(f"Offset {correction_result.total_offset_arcsec:.2f}\" ≤ {max_offset}\" threshold")
-        return True
-    
-    return False
+# New: Spectroscopy-specific thresholds for much tighter control
+spectro_thresholds:
+  min_arcsec: 0.01    # Extremely tight threshold - correct almost any offset
+  small_offset: 0.05  # Not used in spectro (always full correction)
+  large_offset: 3.0   # Not used in spectro (always full correction)
 
-def _set_target_in_corrector(self):
-    """Set current target info in corrector for stale data detection"""
-    if self.corrector and hasattr(self.corrector, 'set_current_target'):
-        target_id = self.target_info.tic_id
-        self.corrector.set_current_target(target_id)
-        logger.debug(f"Set corrector target: {target_id}")
+acquisition:
+  enabled: true
+  exposure_time: 10.0              # exposure time during acquisition phase
+  correction_interval: 2          # checks for correction required between N frames during acquisition
+  max_total_offset_arcsec: 3.0    # once total offset <= this number, switch to science frames/folder
+  max_attempts:  25              # dont acquire forever and ever and ever and ever and ever
+  folder_suffix: "_acq"           
 
-# Also update the __init__ method to set the target in corrector:
-
-def __init__(self, camera_manager, corrector, config_loader, target_info: TargetInfo,
-             ignore_twilight: bool = False, exposure_override: Optional[float] = None,
-             dry_run: bool = False):
-    
-    # ... existing initialization code ...
-    
-    # At the end of __init__, set target in corrector
-    self._set_target_in_corrector()
-    
-    logger.debug(f"SpectroscopyImagingSession initialized with immediate correction checking")
-
-# Update the _start_new_session method in SpectroscopySession to set target:
-
-def _start_new_session(self, target_data: Dict[str, Any]) -> bool:
-    """Start new session with proper error handling and safety checks"""
-    try:
-        target_info = TargetInfo(
-            tic_id=f"{target_data['timestamp'].strftime('%Y%m%d_%H%M%S')}",
-            ra_j2000_hours=target_data['ra_hours'],
-            dec_j2000_deg=target_data['dec_deg'],
-            gaia_g_mag=12.0,
-            magnitude_source="spectro-default"
-        )
-
-        # Set target in corrector before starting session
-        if self.corrector and hasattr(self.corrector, 'set_current_target'):
-            self.corrector.set_current_target(target_info.tic_id)
-
-        # ... rest of existing method ...
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"Failed to start new session: {e}")
-        return False
+spectro_acquisition:
+  enabled: true
+  exposure_time: 10.0                   # default initial exposure time (can be overridden using --exposure-time CLI)
+  correction_interval: 1                # checks for correction after EVERY frame during acquisition
+  max_total_offset_arcsec: 1.0          # tighter threshold for spectroscopy fiber alignment
+  max_attempts: 45                      # max num of acq frames to take - change this to 1 to bypass acq phase
+  default_session_duration_hours: 1.0   # Default hours per imaging session (can be overridden using --duration CLI)
+  folder_suffix: "_acq"
+  
+  # New: Adaptive exposure settings for handling platesolve failures
+  max_exposure_time: 120.0              # Maximum exposure time (2 minutes)
+  exposure_increase_factor: 2.0         # Multiply exposure by this when platesolve fails
+  max_zero_attempts: 4                  # Max consecutive zero-offset attempts before giving up (2 tries at max exposure)
+  
+  # New: Faster settle times for spectroscopy
+  settle_time:
+    min: 1                              # Minimal settle time
+    max: 5                              # Much shorter max settle for quick spectro corrections
