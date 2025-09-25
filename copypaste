@@ -1,86 +1,33 @@
-def capture_single_exposure(self, telescope_driver=None) -> Optional[str]:
-    """Override to handle adaptive exposure retries when platesolve fails"""
-    max_retries = self.spectro_config.get('max_zero_attempts', 4)
-    solver_wait_time = self.spectro_config.get('solver_wait_time', 3.0)
-    
-    for attempt in range(max_retries):
-        try:
-            # Get current adaptive exposure time from corrector if available
-            original_exposure = None
-            if hasattr(self.corrector, 'get_current_exposure_time') and self.current_phase == SessionPhase.ACQUISITION:
-                adaptive_exposure = self.corrector.get_current_exposure_time()
-                if adaptive_exposure != self.exposure_override:
-                    logger.info(f"Using adaptive exposure time: {adaptive_exposure:.1f}s (was {self.exposure_override:.1f}s)")
-                    # Temporarily update exposure time for this capture
-                    original_exposure = self.exposure_override
-                    self.exposure_override = adaptive_exposure
-                    # Update acquisition config too
-                    if hasattr(self, 'acquisition_config'):
-                        self.acquisition_config['exposure'] = adaptive_exposure
+def detect_platesolve_failure(self, data: Dict[str, Any]) -> Optional[float]:
+    """Detect if platesolve failed and return new exposure time if needed"""
+    try:
+        ra_offset_deg = float(data['ra_offset']["0"])
+        dec_offset_deg = float(data['dec_offset']["0"])
+        
+        # Exact zeros indicate platesolve failure
+        if ra_offset_deg == 0.0 and dec_offset_deg == 0.0:
+            logger.debug("Detected platesolve failure: exact zero offsets")
             
-            # Take the exposure
-            image_filepath = super().capture_single_exposure(telescope_driver=telescope_driver)
-            
-            # Restore original exposure if we modified it
-            if original_exposure is not None:
-                self.exposure_override = original_exposure
-                if hasattr(self, 'acquisition_config'):
-                    self.acquisition_config['exposure'] = original_exposure
-            
-            if not image_filepath:
-                logger.warning(f"No image captured on attempt {attempt + 1}/{max_retries}")
-                continue
-                
-            logger.debug(f"Image captured, waiting {solver_wait_time}s for solver to process...")
-            time.sleep(solver_wait_time)  # Give solver time to process the new image
-            
-            # Check the immediate correction result
-            if self.corrector:
-                try:
-                    result = self.corrector.apply_immediate_correction_if_available()
-                    
-                    # If we got a successful platesolve (not zero offsets), we're done
-                    if result.applied:
-                        logger.info(f"✓ Platesolve successful on attempt {attempt + 1}: {result.total_offset_arcsec:.2f}\" total offset")
-                        return image_filepath
-                    elif "threshold" in result.reason.lower():
-                        logger.info(f"✓ Platesolve successful on attempt {attempt + 1}: offset below threshold")
-                        return image_filepath
-                        
-                    # If it's a platesolve failure with adaptive exposure recommendation
-                    elif "exposure" in result.reason.lower():
-                        logger.warning(f"✗ Platesolve failed on attempt {attempt + 1}/{max_retries}: {result.reason}")
-                        if attempt < max_retries - 1:  # Don't log "trying again" on the last attempt
-                            logger.info(f"Taking another exposure with increased time...")
-                        continue  # Try again with new exposure time
-                    else:
-                        # Other reasons (stale data, etc.) - return the image anyway
-                        logger.debug(f"Platesolve unavailable: {result.reason}")
-                        return image_filepath
-                        
-                except PlatesolveCorrectorError as e:
-                    if "exposure" in str(e).lower():
-                        logger.warning(f"✗ Platesolve failed on attempt {attempt + 1}/{max_retries}: {e}")
-                        if attempt < max_retries - 1:
-                            logger.info(f"Taking another exposure with increased time...")
-                        continue
-                    else:
-                        # Other corrector error, return the image anyway
-                        logger.debug(f"Corrector error: {e}")
-                        return image_filepath
+            # Calculate new exposure time
+            if self.current_exposure_time < self.max_exposure_time:
+                new_exposure = min(
+                    self.current_exposure_time * self.exposure_increase_factor,
+                    self.max_exposure_time
+                )
+                self.current_exposure_time = new_exposure
+                logger.debug(f"Increased exposure time to {new_exposure:.1f}s")
+                return new_exposure
             else:
-                # No corrector available, return the image
-                return image_filepath
-            
-        except Exception as e:
-            logger.error(f"Error in capture attempt {attempt + 1}/{max_retries}: {e}")
-            # Restore original exposure on error
-            if 'original_exposure' in locals() and original_exposure is not None:
-                self.exposure_override = original_exposure
-                if hasattr(self, 'acquisition_config'):
-                    self.acquisition_config['exposure'] = original_exposure
-            continue
-    
-    # All retries exhausted
-    logger.error(f"All {max_retries} adaptive exposure attempts failed - giving up on this target")
-    return None
+                logger.debug(f"Already at maximum exposure time ({self.max_exposure_time}s)")
+                return self.current_exposure_time
+        
+        # Successful platesolve - reset exposure time
+        if self.current_exposure_time != self.base_exposure_time:
+            self.current_exposure_time = self.base_exposure_time
+            logger.info(f"Platesolve successful - reset exposure time to {self.base_exposure_time:.1f}s")
+        
+        return None  # No failure detected
+        
+    except (KeyError, ValueError, TypeError) as e:
+        logger.warning(f"Could not check for platesolve failure: {e}")
+        return None
