@@ -1,100 +1,296 @@
-def __init__(self, camera_manager, corrector, config_loader, target_info: TargetInfo,
-             ignore_twilight: bool = False, exposure_override: Optional[float] = None,
-             dry_run: bool = False):
+#!/usr/bin/env python3
+"""
+Test JSON generator for spectroscopy system testing
+Generates realistic platesolve and mirror telescope data for testing
+"""
+
+import json
+import time
+import random
+import math
+from pathlib import Path
+from datetime import datetime, timezone
+from typing import Dict, Any
+import argparse
+
+# Test configuration
+PLATESOLVE_JSON = Path("P:/temp/wcssolution_2.json")
+MIRROR_JSON = Path("P:/temp/mirror_telescope.json")
+
+class SpectroscopyTestGenerator:
+    def __init__(self):
+        self.current_target = None
+        self.target_start_time = None
+        self.frame_counter = 0
+        self.correction_cycle = 0
+        self.acquisition_phase = True
+        
+        # Test scenarios
+        self.test_scenarios = [
+            "perfect_acquisition",
+            "gradual_convergence", 
+            "platesolve_failures",
+            "large_initial_offset",
+            "stale_data_test"
+        ]
+        self.current_scenario = 0
+        
+    def generate_target_coordinates(self) -> Dict[str, float]:
+        """Generate realistic target coordinates"""
+        # Generate coordinates for objects currently visible
+        ra_hours = random.uniform(18, 24)  # Evening sky
+        dec_deg = random.uniform(20, 60)   # Northern hemisphere
+        
+        return {
+            "ra_hours": ra_hours,
+            "dec_deg": dec_deg,
+            "ra_deg": ra_hours * 15.0
+        }
     
-    self.dry_run = dry_run
-    self.logger = logging.getLogger(__name__)
+    def start_new_target(self):
+        """Start a new target sequence"""
+        coords = self.generate_target_coordinates()
+        self.current_target = coords
+        self.target_start_time = time.time()
+        self.frame_counter = 0
+        self.correction_cycle = 0
+        self.acquisition_phase = True
+        
+        # Write new target to mirror file
+        self.write_mirror_json()
+        print(f"📡 New target: RA={coords['ra_hours']:.3f}h, Dec={coords['dec_deg']:.2f}°")
     
-    # Load platesolve config first to get spectro settings
-    platesolve_config = config_loader.get_config('platesolving')
-    spectro_acq_cfg = platesolve_config.get('spectro_acquisition', {})
+    def write_mirror_json(self):
+        """Write mirror telescope JSON with current target"""
+        if not self.current_target:
+            return
+            
+        timestamp = datetime.now(timezone.utc)
+        
+        mirror_data = {
+            "latest_move": {
+                "timestamp": timestamp.isoformat(),
+                "ra_deg": self.current_target["ra_deg"],
+                "dec_deg": self.current_target["dec_deg"],
+                "source": "test_generator"
+            },
+            "status": "tracking",
+            "last_updated": timestamp.isoformat()
+        }
+        
+        # Atomic write using temp file
+        temp_file = MIRROR_JSON.with_suffix('.tmp')
+        try:
+            with open(temp_file, 'w') as f:
+                json.dump(mirror_data, f, indent=2)
+            temp_file.replace(MIRROR_JSON)
+            print(f"📄 Updated mirror file: {MIRROR_JSON}")
+        except Exception as e:
+            print(f"❌ Error writing mirror file: {e}")
+            if temp_file.exists():
+                temp_file.unlink()
     
-    # Calculate exposure based on priority: override -> YAML -> magnitude calculation
-    if exposure_override is not None:
-        # Explicit override provided
-        final_exposure = exposure_override
-        self.logger.debug(f"Using explicit exposure override: {final_exposure:.1f}s")
-    else:
-        # Try to get from YAML config first
-        yaml_exposure = spectro_acq_cfg.get('exposure_time')
-        if yaml_exposure is not None:
-            final_exposure = yaml_exposure
-            self.logger.debug(f"Using YAML spectro_acquisition.exposure_time: {final_exposure:.1f}s")
-        elif hasattr(target_info, 'gaia_g_mag'):
-            # Calculate from magnitude as fallback
-            base_exp = 30.0
-            mag_diff = target_info.gaia_g_mag - 12.0
-            calculated_exp = base_exp * (2.5 ** mag_diff)  # 2.5x per magnitude
-            final_exposure = max(1.0, min(calculated_exp, 300.0))  # Clamp 1-300s
-            self.logger.debug(f"Calculated exposure from magnitude {target_info.gaia_g_mag}: {final_exposure:.1f}s")
+    def generate_platesolve_offsets(self) -> Dict[str, float]:
+        """Generate realistic platesolve offsets based on current test scenario"""
+        scenario = self.test_scenarios[self.current_scenario % len(self.test_scenarios)]
+        
+        if scenario == "perfect_acquisition":
+            # Quick convergence
+            if self.correction_cycle == 0:
+                ra_offset = random.uniform(-2.0, 2.0)  # arcsec
+                dec_offset = random.uniform(-2.0, 2.0)
+            elif self.correction_cycle == 1:
+                ra_offset = random.uniform(-0.5, 0.5)
+                dec_offset = random.uniform(-0.5, 0.5)
+            else:
+                ra_offset = random.uniform(-0.1, 0.1)
+                dec_offset = random.uniform(-0.1, 0.1)
+                
+        elif scenario == "gradual_convergence":
+            # Slowly converging offsets
+            base_offset = max(0.1, 5.0 - (self.correction_cycle * 0.8))
+            ra_offset = random.uniform(-base_offset, base_offset)
+            dec_offset = random.uniform(-base_offset, base_offset)
+            
+        elif scenario == "platesolve_failures":
+            # Simulate platesolve failures (exact zeros) then recovery
+            if self.correction_cycle < 3:
+                ra_offset = 0.0
+                dec_offset = 0.0
+            else:
+                ra_offset = random.uniform(-1.0, 1.0)
+                dec_offset = random.uniform(-1.0, 1.0)
+                
+        elif scenario == "large_initial_offset":
+            # Large initial offset that corrects
+            if self.correction_cycle == 0:
+                ra_offset = random.uniform(-10.0, 10.0)
+                dec_offset = random.uniform(-10.0, 10.0)
+            elif self.correction_cycle == 1:
+                ra_offset = random.uniform(-3.0, 3.0)
+                dec_offset = random.uniform(-3.0, 3.0)
+            else:
+                ra_offset = random.uniform(-0.5, 0.5)
+                dec_offset = random.uniform(-0.5, 0.5)
+                
+        elif scenario == "stale_data_test":
+            # Use old timestamp to test stale data detection
+            ra_offset = random.uniform(-1.0, 1.0)
+            dec_offset = random.uniform(-1.0, 1.0)
+            
         else:
-            # Final fallback
-            final_exposure = 120.0
-            self.logger.debug(f"Using fallback exposure time: {final_exposure:.1f}s")
-    
-    # Store the final exposure time
-    exposure_override = final_exposure
-    
-    # For spectroscopy, filter to only use 294MM cameras
-    if camera_manager and not dry_run:
-        cameras_to_remove = []
-        for name, camera in camera_manager.cameras.items():
-            if '294MM' not in camera.name:
-                cameras_to_remove.append(name)
+            # Default random offsets
+            ra_offset = random.uniform(-2.0, 2.0)
+            dec_offset = random.uniform(-2.0, 2.0)
         
-        for name in cameras_to_remove:
-            logger.debug(f"Removing non-294MM camera for spectroscopy: {camera_manager.cameras[name].name}")
-            camera_manager.cameras.pop(name)
+        return {
+            "ra_offset_arcsec": ra_offset,
+            "dec_offset_arcsec": dec_offset,
+            "ra_offset_deg": ra_offset / 3600.0,
+            "dec_offset_deg": dec_offset / 3600.0
+        }
+    
+    def write_platesolve_json(self, exposure_time: float = 10.0):
+        """Write platesolve JSON with realistic data"""
+        if not self.current_target:
+            return
+            
+        offsets = self.generate_platesolve_offsets()
+        self.frame_counter += 1
         
-        # Ensure we have the 294MM as both main and guide
-        guide_camera = camera_manager.get_guide_camera()
-        if not guide_camera or '294MM' not in guide_camera.name:
-            raise ImagingSessionError("294MM guide camera not found for spectroscopy")
+        # Generate realistic filename
+        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"MIRROR_{self.current_target['ra_hours']:.3f}h_{self.current_target['dec_deg']:+.3f}d_C_{timestamp_str}_{exposure_time:g}s_{self.frame_counter:05d}.fits"
         
-        if not guide_camera.connected and not guide_camera.connect():
-            raise ImagingSessionError("Failed to connect to 294MM camera")
+        # Use old timestamp for stale data test
+        scenario = self.test_scenarios[self.current_scenario % len(self.test_scenarios)]
+        if scenario == "stale_data_test" and self.correction_cycle < 2:
+            calc_time = datetime.fromtimestamp(self.target_start_time - 60, tz=timezone.utc)
+        else:
+            calc_time = datetime.now(timezone.utc)
         
-        # Set 294MM as main camera for spectroscopy
-        camera_manager.cameras['main'] = guide_camera
-        logger.info(f"Using 294MM camera for spectroscopy: {guide_camera.name}")
+        platesolve_data = {
+            "fitsname": {"0": filename},
+            "calctime": {"0": calc_time.isoformat()},
+            "ra_offset": {"0": offsets["ra_offset_deg"]},
+            "dec_offset": {"0": offsets["dec_offset_deg"]}, 
+            "theta_offset": {"0": 0.0},  # No rotation for spectroscopy
+            "exptime": {"0": exposure_time},
+            "solved": {"0": True if (offsets["ra_offset_deg"] != 0.0 or offsets["dec_offset_deg"] != 0.0) else False},
+            "ra_center_deg": {"0": self.current_target["ra_deg"]},
+            "dec_center_deg": {"0": self.current_target["dec_deg"]},
+            "pixel_scale": {"0": 2.1},  # arcsec/pixel for 294MM
+            "image_width": {"0": 1936},
+            "image_height": {"0": 1216}
+        }
+        
+        # Atomic write
+        temp_file = PLATESOLVE_JSON.with_suffix('.tmp')
+        try:
+            with open(temp_file, 'w') as f:
+                json.dump(platesolve_data, f, indent=2)
+            temp_file.replace(PLATESOLVE_JSON)
+            
+            total_offset = math.sqrt(offsets["ra_offset_arcsec"]**2 + offsets["dec_offset_arcsec"]**2)
+            status = "❌ FAIL" if (offsets["ra_offset_deg"] == 0.0 and offsets["dec_offset_deg"] == 0.0) else "✓ OK"
+            print(f"🔭 Platesolve {status}: Frame {self.frame_counter:03d}, "
+                  f"RA={offsets['ra_offset_arcsec']:+.2f}\", Dec={offsets['dec_offset_arcsec']:+.2f}\", "
+                  f"Total={total_offset:.2f}\"")
+            
+            # Check if we should switch to science phase
+            if self.acquisition_phase and total_offset < 1.0:  # Your threshold
+                self.acquisition_phase = False
+                print("🎯 Target acquired! Should switch to science phase")
+                
+        except Exception as e:
+            print(f"❌ Error writing platesolve file: {e}")
+            if temp_file.exists():
+                temp_file.unlink()
+        
+        self.correction_cycle += 1
     
-    # Initialize paths and parent class
-    paths_config = config_loader.get_config('paths')
-    spectro_root = Path(paths_config['spectro_images'])
+    def run_test_sequence(self, duration_minutes: float = 5.0, platesolve_interval: float = 8.0):
+        """Run a test sequence with multiple targets and scenarios"""
+        print("🚀 Starting spectroscopy test sequence")
+        print(f"Duration: {duration_minutes:.1f} minutes, Platesolve interval: {platesolve_interval:.1f}s")
+        print(f"Platesolve JSON: {PLATESOLVE_JSON}")
+        print(f"Mirror JSON: {MIRROR_JSON}")
+        print("-" * 60)
+        
+        start_time = time.time()
+        end_time = start_time + (duration_minutes * 60)
+        target_change_interval = 90  # Change target every 90 seconds
+        next_target_change = start_time + target_change_interval
+        last_platesolve = 0
+        
+        # Start with first target
+        self.start_new_target()
+        
+        try:
+            while time.time() < end_time:
+                current_time = time.time()
+                
+                # Check if we should change targets
+                if current_time >= next_target_change:
+                    scenario_name = self.test_scenarios[self.current_scenario % len(self.test_scenarios)]
+                    print(f"\n🔄 Changing target (scenario: {scenario_name})")
+                    self.current_scenario += 1
+                    self.start_new_target()
+                    next_target_change = current_time + target_change_interval
+                    last_platesolve = current_time  # Reset platesolve timer
+                
+                # Generate platesolve data
+                if current_time - last_platesolve >= platesolve_interval:
+                    exposure_time = 10.0
+                    # Simulate adaptive exposure increase for failures
+                    if self.test_scenarios[self.current_scenario % len(self.test_scenarios)] == "platesolve_failures":
+                        if self.correction_cycle >= 2:
+                            exposure_time = min(120.0, 10.0 * (2.0 ** (self.correction_cycle - 1)))
+                    
+                    self.write_platesolve_json(exposure_time)
+                    last_platesolve = current_time
+                
+                time.sleep(1.0)  # Check every second
+                
+        except KeyboardInterrupt:
+            print("\n⏹️ Test sequence interrupted by user")
+        
+        elapsed = (time.time() - start_time) / 60
+        print(f"\n✅ Test sequence completed ({elapsed:.1f} minutes)")
+        print("You can now stop your spectroscopy script")
+
+def main():
+    parser = argparse.ArgumentParser(description="Spectroscopy Test JSON Generator")
+    parser.add_argument("--duration", type=float, default=5.0, help="Test duration in minutes")
+    parser.add_argument("--platesolve-interval", type=float, default=8.0, help="Seconds between platesolve updates")
+    parser.add_argument("--single-target", action="store_true", help="Test with single target (no target changes)")
+    args = parser.parse_args()
     
-    # Initialize parent with 'C' filter (clear) for spectroscopy
-    super().__init__(camera_manager, corrector, config_loader, target_info,
-                     filter_code='C', ignore_twilight=ignore_twilight,
-                     exposure_override=exposure_override, images_base_path=spectro_root,
-                     is_spectroscopy=True)
+    generator = SpectroscopyTestGenerator()
     
-    self.acquisition_config.update(spectro_acq_cfg)
+    # Ensure directories exist
+    PLATESOLVE_JSON.parent.mkdir(parents=True, exist_ok=True)
+    MIRROR_JSON.parent.mkdir(parents=True, exist_ok=True)
     
-    # Setup directory structure
-    full_dir = self.file_manager.create_target_directory(self.target_info.tic_id, base_path=spectro_root)
-    self.science_dir = full_dir
-    self.acquisition_dir = full_dir.parent / (full_dir.name + "_acq")
-    self.current_target_dir = self.acquisition_dir if self.acquisition_enabled else self.science_dir
-    
-    # Configure acquisition settings
-    if self.acquisition_enabled and hasattr(self, 'acquisition_config'):
-        self.acquisition_config['exposure'] = self.exposure_override
-        self.logger.debug(f"Acquisition exposure set to {self.exposure_override}")
-    
-    # Update acquisition settings for tighter spectroscopy requirements
-    if hasattr(self, 'acquisition_config'):
-        # Tighten acquisition threshold for spectroscopy (fiber alignment critical)
-        self.acquisition_config['max_total_offset_arcsec'] = 1.0
-        self.logger.debug("Tightened acquisition threshold to 1.0\" for spectroscopy")
-    
-    # Initialize session state
-    self._running = False
-    self._stop_event = threading.Event()
-    
-    if dry_run:
-        self.main_camera = None
-        self.logger.info("DRY RUN MODE - No camera operations will be performed")
-    
-    # Set target in corrector for stale data detection
-    self._set_target_in_corrector()
-    logger.debug(f"SpectroscopyImagingSession initialized with immediate correction checking")
+    if args.single_target:
+        print("🎯 Single target test mode")
+        generator.start_new_target()
+        
+        try:
+            start_time = time.time()
+            end_time = start_time + (args.duration * 60)
+            last_platesolve = 0
+            
+            while time.time() < end_time:
+                if time.time() - last_platesolve >= args.platesolve_interval:
+                    generator.write_platesolve_json()
+                    last_platesolve = time.time()
+                time.sleep(1.0)
+                
+        except KeyboardInterrupt:
+            print("\n⏹️ Single target test interrupted")
+    else:
+        generator.run_test_sequence(args.duration, args.platesolve_interval)
+
+if __name__ == "__main__":
+    main()
