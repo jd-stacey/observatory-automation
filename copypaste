@@ -1,65 +1,19 @@
 def capture_single_exposure(self, telescope_driver=None) -> Optional[str]:
-    """Override to handle adaptive exposure retries when platesolve fails"""
-    # Get spectro config from the platesolve config
-    platesolve_config = self.config_loader.get_config('platesolving')
-    spectro_config = platesolve_config.get('spectro_acquisition', {})
-    max_retries = spectro_config.get('max_zero_attempts', 4)
-    solver_wait_time = spectro_config.get('solver_wait_time', 3.0)
+    """Override to check platesolve results after each exposure"""
+    # Just call parent method - no retry loop
+    image_filepath = super().capture_single_exposure(telescope_driver=telescope_driver)
     
-    for attempt in range(max_retries):
+    if image_filepath and self.corrector:
+        # Give solver time to process
+        time.sleep(3.0)
+        # Check for immediate correction
         try:
-            # Take the exposure (parent class will automatically get adaptive time from corrector)
-            image_filepath = super().capture_single_exposure(telescope_driver=telescope_driver)
-            
-            if not image_filepath:
-                logger.warning(f"No image captured on attempt {attempt + 1}/{max_retries}")
-                continue
-                
-            logger.debug(f"Image captured, waiting {solver_wait_time}s for solver to process...")
-            time.sleep(solver_wait_time)  # Give solver time to process the new image
-            
-            # Check the immediate correction result
-            if self.corrector:
-                try:
-                    result = self.corrector.apply_immediate_correction_if_available()
-                    
-                    # If we got a successful platesolve (not zero offsets), we're done
-                    if result.applied:
-                        logger.info(f"✓ Platesolve successful on attempt {attempt + 1}: {result.total_offset_arcsec:.2f}\" total offset")
-                        return image_filepath
-                    elif "threshold" in result.reason.lower():
-                        logger.info(f"✓ Platesolve successful on attempt {attempt + 1}: offset below threshold")
-                        return image_filepath
-                        
-                    # If it's a platesolve failure with adaptive exposure recommendation
-                    elif "exposure" in result.reason.lower():
-                        logger.warning(f"✗ Platesolve failed on attempt {attempt + 1}/{max_retries}: {result.reason}")
-                        if attempt < max_retries - 1:  # Don't log "trying again" on the last attempt
-                            logger.info(f"Taking another exposure with increased time...")
-                        continue  # Try again with new exposure time
-                    else:
-                        # Other reasons (stale data, etc.) - return the image anyway
-                        logger.debug(f"Platesolve unavailable: {result.reason}")
-                        return image_filepath
-                        
-                except PlatesolveCorrectorError as e:
-                    if "exposure" in str(e).lower():
-                        logger.warning(f"✗ Platesolve failed on attempt {attempt + 1}/{max_retries}: {e}")
-                        if attempt < max_retries - 1:
-                            logger.info(f"Taking another exposure with increased time...")
-                        continue
-                    else:
-                        # Other corrector error, return the image anyway
-                        logger.debug(f"Corrector error: {e}")
-                        return image_filepath
-            else:
-                # No corrector available, return the image
-                return image_filepath
-            
+            result = self.corrector.apply_immediate_correction_if_available()
+            if result.applied:
+                logger.info(f"✓ Correction applied: {result.total_offset_arcsec:.2f}\" offset")
+            elif "exposure" in result.reason.lower():
+                logger.debug(f"Adaptive exposure triggered: {result.reason}")
         except Exception as e:
-            logger.error(f"Error in capture attempt {attempt + 1}/{max_retries}: {e}")
-            continue
+            logger.debug(f"Correction check: {e}")
     
-    # All retries exhausted
-    logger.error(f"All {max_retries} adaptive exposure attempts failed - giving up on this target")
-    return None
+    return image_filepath
