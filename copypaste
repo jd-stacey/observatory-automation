@@ -1,19 +1,16 @@
-def capture_single_exposure(self, telescope_driver=None) -> Optional[str]:
-    """Override to check platesolve results after each exposure"""
-    # Just call parent method - no retry loop
-    image_filepath = super().capture_single_exposure(telescope_driver=telescope_driver)
-    
-    if image_filepath and self.corrector:
-        # Give solver time to process
-        time.sleep(3.0)
-        # Check for immediate correction
-        try:
-            result = self.corrector.apply_immediate_correction_if_available()
-            if result.applied:
-                logger.info(f"✓ Correction applied: {result.total_offset_arcsec:.2f}\" offset")
-            elif "exposure" in result.reason.lower():
-                logger.debug(f"Adaptive exposure triggered: {result.reason}")
-        except Exception as e:
-            logger.debug(f"Correction check: {e}")
-    
-    return image_filepath
+def set_current_target(self, target_id: str, base_exposure_time: Optional[float] = None):
+    """Set the current target ID to help detect stale platesolve data"""
+    if self.current_target_id != target_id:
+        self.current_target_id = target_id
+        self.target_start_time = time.time()
+        # Reset adaptive exposure for new target - THIS IS THE CRITICAL PART
+        self.base_exposure_time = base_exposure_time if base_exposure_time is not None else self.spectro_config.get("exposure_time", 30.0)
+        self.current_exposure_time = self.base_exposure_time  # Reset to base exposure
+        logger.info(f"New spectroscopy target: {target_id}")
+        logger.info(f"Reset adaptive exposure time to {self.current_exposure_time:.1f}s for new target")  # Change this from DEBUG to INFO so you can see it
+    else:
+        # Same target, but update base exposure if provided
+        if base_exposure_time is not None and base_exposure_time != self.base_exposure_time:
+            self.base_exposure_time = base_exposure_time
+            self.current_exposure_time = base_exposure_time
+            logger.info(f"Updated base exposure time to {base_exposure_time:.1f}s for target {target_id}")
