@@ -37,9 +37,14 @@ class SpectroscopyTestGenerator:
         
     def generate_target_coordinates(self) -> Dict[str, float]:
         """Generate realistic target coordinates"""
-        # Generate coordinates for objects currently visible
-        ra_hours = random.uniform(18, 24)  # Evening sky
-        dec_deg = random.uniform(20, 60)   # Northern hemisphere
+        # Generate coordinates around the observable area you specified
+        # Base coordinates: 12h 23m, -58° 35'
+        base_ra = 12.383  # 12h 23m in decimal hours
+        base_dec = -58.583  # -58° 35' in decimal degrees
+        
+        # Add small random variations around the base coordinates
+        ra_hours = base_ra + random.uniform(-0.5, 0.5)  # ±30 minutes
+        dec_deg = base_dec + random.uniform(-2, 2)      # ±2 degrees
         
         return {
             "ra_hours": ra_hours,
