@@ -36,7 +36,7 @@ focuser:
   focus_positions:
     L: 15200
     B: null
-    V: null
+    G: null
     R: null
     C: 15155  #?
     I: null
@@ -52,6 +52,14 @@ filter_wheel:
   settle_time: 0.1        # time to wait after filter change
 
 cameras:
+  # main:                         
+  #   type: alpaca
+  #   address: "127.0.0.1:11113"  
+  #   name_pattern: "294MM"
+  #   role: 'guide'                
+  #   default_binning: 4
+  #   default_gain: 100
+  #   target_temperature: -10.0
   main:                          
     type: alpaca
     address: "127.0.0.1:11113"  

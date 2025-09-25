@@ -9,14 +9,14 @@ settle_time:
 
 correction_thresholds:
   min_arcsec: 1.0     # dont correct below this
-  small_offset: 1.0   # use scale factor 0
-  large_offset: 5.0   # use scale factor 0.5
+  small_offset: 1.0   
+  large_offset: 5.0   
 
-
+# New: Spectroscopy-specific thresholds for much tighter control
 spectro_thresholds:
-  min_arcsec: 0.5
-  small_offset: 1.5
-  large_offset: 3.0
+  min_arcsec: 0.1    # Extremely tight threshold - correct almost any offset
+  small_offset: 0.5  # Not used in spectro (always full correction)
+  large_offset: 3.0   # Not used in spectro (always full correction)
 
 acquisition:
   enabled: true
@@ -28,10 +28,21 @@ acquisition:
 
 spectro_acquisition:
   enabled: true
-  exposure_time: 10.0                   # default exposure time (can be overridden using --exposure-time CLI)
-  correction_interval: 5                # checks for correction required between N frames during acquisition
-  max_total_offset_arcsec: 2.0          # once total offset <= this number, switch to science frames/folder
+  exposure_time: 10.0                   # default initial exposure time (can be overridden using --exposure-time CLI)
+  correction_interval: 1                # checks for correction after EVERY frame during acquisition
+  max_total_offset_arcsec: 1.0          # tighter threshold for spectroscopy fiber alignment
   max_attempts: 45                      # max num of acq frames to take - change this to 1 to bypass acq phase
   default_session_duration_hours: 1.0   # Default hours per imaging session (can be overridden using --duration CLI)
   folder_suffix: "_acq"
-
+  
+  # New: Adaptive exposure settings for handling platesolve failures
+  max_exposure_time: 120.0              # Maximum exposure time (2 minutes)
+  exposure_increase_factor: 2.0         # Multiply exposure by this when platesolve fails
+  max_zero_attempts: 6                  # Total retry attempts across all exposure levels
+  retries_per_exposure_level: 2         # How many times to try each exposure time
+  solver_wait_time: 5.0                 # Seconds to wait for solver to process new image
+  
+  # New: Faster settle times for spectroscopy
+  settle_time:
+    min: 1                              # Minimal settle time
+    max: 5                              # Much shorter max settle for quick spectro corrections
