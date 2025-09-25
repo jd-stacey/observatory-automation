@@ -36,7 +36,7 @@ class ImagingSession:
         self.session_start_time = None
         self.last_correction_exposure = 0
         self.consecutive_failures = 0
-        self.correction_interval = 5            # Apply correction every N exposures (science phase)
+        
         self.max_consecutive_failures = 3
         self.main_camera = None
         self.file_manager = None
@@ -54,6 +54,11 @@ class ImagingSession:
         self.platesolve_config = config_loader.get_config('platesolving')
         self.acquisition_config = self.platesolve_config.get('acquisition', {})
         self.acquisition_enabled = self.acquisition_config.get('enabled', True)
+        
+        if self.is_spectroscopy:
+            self.correction_interval = self.platesolve_config["spectro_acquisition"]["correction_interval"]            # Apply correction every N exposures (science phase)
+        else:
+            self.correction_interval = self.acquisition_config.get("correction_interval", 2.0)
         
         self._initialize_components()
         
@@ -235,6 +240,21 @@ class ImagingSession:
         logger.info("="*60)
         
         self.current_phase = SessionPhase.SCIENCE
+        
+        # --- NEW: carry forward adaptive exposure into science for spectroscopy ---
+        if (self.is_spectroscopy and self.corrector
+                and hasattr(self.corrector, 'get_current_exposure_time')):
+            carried = self.corrector.get_current_exposure_time()
+            if carried:  # defensive
+                self.exposure_override = carried
+                # keep the corrector in sync so logs/base match the science exposure
+                try:
+                    self.corrector.set_current_target(self.target_info.tic_id, carried)
+                except Exception:
+                    pass
+                logger.info(f"Science exposure set to {carried:.1f} s (carried from acquisition)")
+        # -------------------------------------------------------------------------
+        
         self.current_target_dir = self.science_dir
         
         # Update target JSON to point to science directory
@@ -262,6 +282,16 @@ class ImagingSession:
     
     def _get_current_exposure_time(self) -> float:
         """Get exposure time based on current phase"""
+        # Check for adaptive exposure from corrector first (spectroscopy only)
+        if (self.is_spectroscopy and self.corrector and 
+            hasattr(self.corrector, 'get_current_exposure_time') and
+            self.current_phase == SessionPhase.ACQUISITION):
+            adaptive_time = self.corrector.get_current_exposure_time()
+            if adaptive_time != (self.exposure_override or 0):
+                logger.debug(f"Using adaptive exposure time from corrector: {adaptive_time:.1f}s")
+                return adaptive_time
+        
+        # Fall back to original logic
         if self.exposure_override is not None:
             return self.exposure_override
             
@@ -270,7 +300,6 @@ class ImagingSession:
                 self.target_info.gaia_g_mag,
                 self.filter_code
             ) / 2           # set acquisition exposure time to half that of science phase
-            # return self.acquisition_config.get('exposure_time', 3.0)
         else:
             return self.config_loader.get_exposure_time(
                 self.target_info.gaia_g_mag,
