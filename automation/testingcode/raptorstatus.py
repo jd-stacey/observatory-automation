@@ -249,15 +249,15 @@ def main():
             # except Exception as e:
                 # print(f"Pier Side: Unable to retrieve ({e})")
             
-            
-            print("\n--- SUPPORTED ACTIONS (how do i find out what these do?) ---")
-            try:
-                actions = T.SupportedActions
-                for i, action in enumerate(actions):
-                    print(f"{i+1:2d}. {action}")
+            ##### TO PRINT SupportedActions() ##### 
+            # print("\n--- SUPPORTED ACTIONS (how do i find out what these do?) ---")
+            # try:
+            #     actions = T.SupportedActions
+            #     for i, action in enumerate(actions):
+            #         print(f"{i+1:2d}. {action}")
                     
-            except:
-                print("Supported Actions: Unable to retrieve")
+            # except:
+            #     print("Supported Actions: Unable to retrieve")
             
             
         else:
