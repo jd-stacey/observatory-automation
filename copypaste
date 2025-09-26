@@ -1,105 +1,96 @@
-def start_monitoring(self, poll_interval: float = 10.0):
-    self.logger.info("="*60)
-    self.logger.info(" "*15+"STARTING SPECTROSCOPY MONITORING")
-    self.logger.info("="*60)
-    if self.mirror:
-        self.logger.info(f"Monitoring mirror file: {self.mirror.mirror_file}")
-    if self.dry_run:
-        self.logger.info("DRY RUN MODE - No telescope movement")
+# Add this function after the setup_logging function:
 
-    if self.ignore_twilight:
-        self.logger.info("Automatic twilight checks DISABLED due to --ignore-twilight flag")
-    else:
-        self.logger.info("Automatic shutdown enabled when sun rises")
-        # === WAIT FOR ASTRONOMICAL TWILIGHT BEFORE STARTING ===
-        while True:
-            try:
-                # Check sun altitude using dummy RA/Dec
-                obs_status = self.obs_checker.check_target_observability(12.0, 0.0, ignore_twilight=False)
-                twilight_limit = self.config_loader.get_config("observatory").get("twilight_altitude", -18.0)
-                if obs_status.sun_altitude <= twilight_limit:
-                    self.logger.info(
-                        f"Sun below twilight limit ({obs_status.sun_altitude:.1f}° <= {twilight_limit}°). Proceeding..."
-                    )
-                    break
+def wait_for_observing_conditions(target_info, obs_checker, ignore_twilight=False, poll_interval=60.0):
+    """Simple waiting function for observing conditions"""
+    logger = logging.getLogger(__name__)
+    
+    if ignore_twilight:
+        logger.info("Twilight checks disabled - proceeding immediately")
+        return True
+    
+    logger.info("="*60)
+    logger.info("WAITING FOR OBSERVING CONDITIONS")
+    logger.info("="*60)
+    logger.info(f"Target: {target_info.tic_id}")
+    logger.info(f"Coordinates: RA={target_info.ra_j2000_hours:.6f}h, Dec={target_info.dec_j2000_deg:.6f}°")
+    
+    start_time = datetime.now(timezone.utc)
+    max_wait_hours = 16  # Don't wait more than 16 hours
+    
+    while (datetime.now(timezone.utc) - start_time).total_seconds() < (max_wait_hours * 3600):
+        try:
+            obs_status = obs_checker.check_target_observability(
+                target_info.ra_j2000_hours,
+                target_info.dec_j2000_deg,
+                ignore_twilight=False
+            )
+            
+            if obs_status.observable:
+                logger.info("="*60)
+                logger.info("OBSERVING CONDITIONS MET - PROCEEDING")
+                logger.info("="*60)
+                return True
+            
+            # Show current status
+            logger.info(f"Sun: {obs_status.sun_altitude:.1f}°, Target: {obs_status.target_altitude:.1f}°")
+            logger.info(f"Waiting reasons: {'; '.join(obs_status.reasons)}")
+            
+            # Check if we're in a hopeless situation
+            if (obs_status.sun_altitude < -10 and obs_status.target_altitude < 0):
+                elapsed_hours = (datetime.now(timezone.utc) - start_time).total_seconds() / 3600
+                if elapsed_hours > 2:
+                    logger.warning("Target remains below horizon well into night")
+                    logger.warning("Target likely not observable tonight - consider different target")
+                    return False
+            
+            logger.info(f"Next check in {poll_interval/60:.1f} minutes...")
+            
+        except Exception as e:
+            logger.warning(f"Error checking observing conditions: {e}")
+            logger.info(f"Retrying in {poll_interval} seconds...")
+        
+        time.sleep(poll_interval)
+    
+    logger.error(f"Timeout after {max_wait_hours} hours - giving up")
+    return False
+
+
+# Then REPLACE the existing observability check section (around lines 200-250) with:
+
+        logger.info("Checking target observability...")
+        try:
+            observatory_config = config_loader.get_config('observatory')
+            checker = ObservabilityChecker(observatory_config)
+            obs_status = checker.check_target_observability(
+                target_info.ra_j2000_hours,
+                target_info.dec_j2000_deg,
+                ignore_twilight=args.ignore_twilight
+            )
+        
+            logger.info(f"Current target altitude: {obs_status.target_altitude:.1f}°")
+            logger.info(f"Current sun altitude: {obs_status.sun_altitude:.1f}°")
+            if obs_status.airmass:
+                logger.debug(f"Airmass: {obs_status.airmass:.2f}")
+                
+            # If immediately observable, great
+            if obs_status.observable:
+                logger.info("Target is immediately observable")
+            else:
+                # Show what conditions are not met
+                logger.info("Current observability status:")
+                for reason in obs_status.reasons:
+                    logger.info(f"  {reason}")
+                
+                # If dry run, continue regardless
+                if args.dry_run:
+                    logger.warning("Target not currently observable, but continuing with dry run")
                 else:
-                    self.logger.info(
-                        f"Waiting for astronomical twilight... Sun alt={obs_status.sun_altitude:.1f}° (limit={twilight_limit}°)"
-                    )
-            except Exception as e:
-                self.logger.warning(f"Twilight wait check failed: {e}")
-            time.sleep(poll_interval)
-
-    try:
-        while True:
-            # Check for shutdown conditions (sunrise, etc.)
-            if self.check_should_shutdown():
-                self.logger.info("="*60)
-                self.logger.info("SHUTDOWN CONDITION DETECTED")
-                self.logger.info(f"Reason: {self.shutdown_reason}")
-                self.logger.info("="*60)
-                break
-
-            self.logger.debug(f"Polling for new targets... (poll interval: {poll_interval}s)")
-
-            if self.mirror:
-                new_target = self.mirror.check_for_new_target()
-                if new_target:
-                    self.logger.info("NEW TARGET DETECTED")
-                    self.logger.info(f"RA={new_target['ra_hours']:.6f} h, Dec={new_target['dec_deg']:.6f}°")
-
-                    # Check observability before attempting to use target
-                    if not self._validate_target_observability(new_target):
-                        self.logger.warning("Target not observable, marking as failed")
-                        self.mirror.mark_target_failed(new_target['target_key'])
-                        continue
-
-                    # Stop current session if running
-                    if self.current_session and self.current_session.is_running():
-                        self.logger.info("Stopping current session...")
-                        try:
-                            self.current_session.stop_session()
-                            time.sleep(2.0)
-                        except Exception as e:
-                            self.logger.warning(f"Error stopping session: {e}")
-                        finally:
-                            self.current_session = None
-                            self.current_target = None
-
-                    # Start new session
-                    if not self._start_new_session(new_target):
-                        self.mirror.mark_target_failed(new_target['target_key'])
-                else:
-                    self.logger.debug("No new targets found")
-
-            # Clean up finished sessions
-            if self.current_session and not self.current_session.is_running():
-                self.logger.info("Current session finished")
-                self.current_session = None
-                self.current_target = None
-
-            time.sleep(poll_interval)
-
-    except KeyboardInterrupt:
-        self.logger.info("Monitoring interrupted by user")
-        self.shutdown_reason = "User interruption"
-    except Exception as e:
-        self.logger.error(f"Critical error in monitoring loop: {e}")
-        self.shutdown_reason = f"Critical error: {e}"
-    finally:
-        self.logger.info("="*60)
-        self.logger.info("BEGINNING SHUTDOWN SEQUENCE")
-        if self.shutdown_reason:
-            self.logger.info(f"Shutdown reason: {self.shutdown_reason}")
-        self.logger.info("="*60)
-
-        if self.current_session:
-            try:
-                self.logger.info("Stopping active imaging session...")
-                self.current_session.stop_session()
-            except Exception as e:
-                self.logger.warning(f"Error during session cleanup: {e}")
-            finally:
-                self.current_session = None
-
-        self.logger.info("Spectroscopy monitoring ended - hardware cleanup will follow")
+                    # Wait for conditions
+                    logger.info("Waiting for observing conditions...")
+                    if not wait_for_observing_conditions(target_info, checker, args.ignore_twilight):
+                        logger.error("Target will not be observable - aborting")
+                        return 1
+                
+        except ObservabilityError as e:
+            logger.error(f"Observability check error: {e}")
+            return 1
