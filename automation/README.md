@@ -3,9 +3,10 @@ In the terminal/powershell window:
 ```powershell
 conda activate drivescope
 ```
-Followed by:
+Followed by either (depending where you start):
 ```powershell
 cd automation
+cd Documents\JS\automation
 ```
 
 # Configuration files (`*.yaml`)
@@ -46,26 +47,26 @@ Three main operating modes:
 ## Basic Usage
 ### Basic Command Structure
 ```powershell
-python spectro_main_7.py [MODE] [TARGET] [OPTIONS]
+python spectro_main_9.py [MODE] [TARGET] [OPTIONS]
 ```
 For CLI help:
 ```powershell
-python spectro_main_7.py -h
-python spectro_main_7.py --help
+python spectro_main_9.py -h
+python spectro_main_9.py --help
 ```
 ### Operating Modes
 #### 1. To Observe a specific TIC catalog target
 ```powershell
-python spectro_main_7.py tic 123456789
+python spectro_main_9.py tic 123456789
 ```
 #### 2. Manual Coordinates
 ```powershell
-python spectro_main_7.py coords "44.5 -30.2"
+python spectro_main_9.py coords "44.5 -30.2"
 ```
 *Note: Coordinates are in degrees (RA DEC)°
 #### 2. Mirror Mode (Continuous Monitoring)
 ```powershell
-python spectro_main_7.py mirror [OPTIONAL FILEPATH TO JSON FILE]
+python spectro_main_9.py mirror [OPTIONAL FILEPATH TO JSON FILE]
 ```
 *Note: default mirror json filepath is `spectro_mirror_file` in `paths.yaml`
 ### Command Line Options
@@ -73,9 +74,9 @@ python spectro_main_7.py mirror [OPTIONAL FILEPATH TO JSON FILE]
 |--------|-------------|---------|
 |`--config-dir` | Configuration directory | `config` |
 |`--log-level` | Terminal display logging level (DEBUG/INFO/WARNING/ERROR) | `INFO` |
-|`--dry-run` | Simulate without hardware movement or imaging| `False` |
-|`--ignore-twilight` | Bypass twilight (Sun Altitude) checks| `False` |
-|`--poll-interval` | Mirror file check interval (seconds) | `10.0` |
+|`--dry-run` | Simulate without hardware movement or imaging | `False` |
+|`--ignore-twilight` | Bypass twilight (Sun Altitude) checks for daytime testing (will also prevent shutdown) | `False` |
+|`--poll-interval` | How often to check mirror file for new targets (seconds) | `10.0` |
 |`--duration` | Session duration (hours) | *From `platesolving.yaml` config* |
 |`--exposure-time` | Override exposure time (seconds) | *From `platesolving.yaml` config* (see below) |
 
@@ -88,7 +89,7 @@ The system determines exposure time using this priority order:
 
 ### Example Command: Observe a single TIC target for 2 hours with 30s exposures showing DEBUG level on-screen logging:
 ```powershell
-python spectro_main_7.py tic 123456789 --duration 2.0 --exposure-time 30.0 --log-level DEBUG
+python spectro_main_9.py tic 123456789 --duration 2.0 --exposure-time 30.0 --log-level DEBUG
 ```
 
 

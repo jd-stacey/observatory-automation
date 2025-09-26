@@ -314,24 +314,25 @@ class SpectroscopyImagingSession(ImagingSession):
             
     
     def capture_single_exposure(self, telescope_driver=None) -> Optional[str]:
-        """Override to check platesolve results after each exposure"""
-        # Just call parent method - no retry loop
+        """Override to use synchronous corrections for spectroscopy"""
+        # Capture image using parent method
         image_filepath = super().capture_single_exposure(telescope_driver=telescope_driver)
         
         if image_filepath and self.corrector:
-            # Give solver time to process
-            time.sleep(3.0)
-            # Check for immediate correction, passing current phase
+            # For spectroscopy: ALWAYS wait for correction synchronously (both ACQ and SCI)
+            solver_wait_time = self.acquisition_config.get('solver_wait_time', 30.0)
+            logger.debug(f"Spectroscopy mode - waiting up to {solver_wait_time:.1f}s for platesolve correction...")
+            
             try:
-                result = self.corrector.apply_immediate_correction_if_available(current_phase=self.current_phase.value)
-                if result.applied:
-                    logger.info(f"✓ Correction applied: {result.total_offset_arcsec:.2f}\" offset")
-                elif "exposure" in result.reason.lower() and self.current_phase.value == "acquisition":
-                    logger.debug(f"Adaptive exposure triggered during acquisition: {result.reason}")
-                elif "exposure" in result.reason.lower() and self.current_phase.value == "science":
-                    logger.debug(f"Platesolve failed during science phase - continuing with current exposure")
+                correction_applied = self.corrector.wait_for_correction_with_timeout(solver_wait_time)
+                
+                if not correction_applied:
+                    logger.warning("No correction applied within timeout - proceeding")
+                else:
+                    logger.debug("Synchronous correction completed successfully")
+                    
             except Exception as e:
-                logger.debug(f"Correction check: {e}")
+                logger.warning(f"Error during synchronous correction: {e}")
         
         return image_filepath
 
@@ -345,7 +346,7 @@ class SpectroscopyImagingSession(ImagingSession):
         
         # Switch if total offset is within threshold
         if correction_result.total_offset_arcsec <= max_offset:
-            logger.debug(f"Offset {correction_result.total_offset_arcsec:.2f}\" ≤ {max_offset}\" threshold")
+            logger.debug(f"Offset {correction_result.total_offset_arcsec:.2f}\" = {max_offset}\" threshold")
             return True
         
         return False
@@ -572,7 +573,6 @@ class SpectroscopyCorrector(PlatesolveCorrector):
         self.max_exposure_time = self.spectro_config.get('max_exposure_time', 120.0)  # 2 minutes
         self.exposure_increase_factor = self.spectro_config.get('exposure_increase_factor', 2.0)
         self.max_zero_attempts = self.spectro_config.get('max_zero_attempts', 4)  # 2 attempts at max exposure
-        self.solver_wait_time = self.spectro_config.get('solver_wait_time', 30.0)
         
         logger.info("SpectroscopyCorrector initialized with immediate corrections and adaptive exposure")
     
@@ -584,8 +584,11 @@ class SpectroscopyCorrector(PlatesolveCorrector):
             self.base_exposure_time = base_exposure_time if base_exposure_time is not None else self.spectro_config.get("exposure_time", 30.0)
             self.current_exposure_time = self.base_exposure_time  # Reset to base exposure
             self.last_failed_filename = None
+            # Reset retry tracking for new target
+            if hasattr(self, 'current_exposure_retries'):
+                delattr(self, 'current_exposure_retries')
             logger.info(f"New spectroscopy target: {target_id}")
-            logger.info(f"Reset adaptive exposure time to {self.current_exposure_time:.1f}s for new target")  # Change this from DEBUG to INFO so you can see it
+            logger.info(f"Reset adaptive exposure time to {self.current_exposure_time:.1f}s for new target")
         else:
             # Same target, but update base exposure if provided
             if base_exposure_time is not None and base_exposure_time != self.base_exposure_time:
@@ -650,11 +653,6 @@ class SpectroscopyCorrector(PlatesolveCorrector):
             ra_offset_deg = float(data['ra_offset']["0"])
             dec_offset_deg = float(data['dec_offset']["0"])
             
-            if current_phase == "science" and ra_offset_deg == 0.0 and dec_offset_deg == 0.0:
-                logger.debug("Platesolve failed during science phase - ignoring (no adaptive exposure)")
-                return None
-            
-            
             # Check if we've already processed this exact platesolve data
             current_filename = data.get('fitsname', {}).get("0", "")
             if current_filename and current_filename == getattr(self, 'last_failed_filename', None):
@@ -668,31 +666,40 @@ class SpectroscopyCorrector(PlatesolveCorrector):
                 # Remember this failed filename to prevent re-processing
                 self.last_failed_filename = current_filename
                 
-                # Calculate new exposure time
-                if self.current_exposure_time < self.max_exposure_time:
-                    new_exposure = min(
-                        self.current_exposure_time * self.exposure_increase_factor,
-                        self.max_exposure_time
-                    )
-                    self.current_exposure_time = new_exposure
-                    logger.debug(f"Increased exposure time to {new_exposure:.1f}s")
-                    return new_exposure
+                # Initialize retry tracking if needed
+                if not hasattr(self, 'current_exposure_retries'):
+                    self.current_exposure_retries = 1
                 else:
-                    logger.debug(f"Already at maximum exposure time ({self.max_exposure_time}s)")
+                    self.current_exposure_retries += 1
+                
+                max_retries = self.spectro_config.get('retries_per_exposure_level', 2)
+                
+                if self.current_exposure_retries < max_retries:
+                    # Stay at current exposure, just retry
+                    logger.info(f"Platesolve failed - retry {self.current_exposure_retries}/{max_retries} at {self.current_exposure_time:.1f}s")
                     return self.current_exposure_time
+                else:
+                    # Move to next exposure level
+                    if self.current_exposure_time < self.max_exposure_time:
+                        new_exposure = min(
+                            self.current_exposure_time * self.exposure_increase_factor,
+                            self.max_exposure_time
+                        )
+                        self.current_exposure_time = new_exposure
+                        self.current_exposure_retries = 1  # Reset retry counter for new exposure level
+                        logger.info(f"Increased exposure to {new_exposure:.1f}s after {max_retries} failures at previous level")
+                        return new_exposure
+                    else:
+                        logger.warning(f"Already at maximum exposure time ({self.max_exposure_time}s), retry {self.current_exposure_retries}/{max_retries}")
+                        return self.current_exposure_time
             
-            # Successful platesolve - keep exposure time going forward
+            # Successful platesolve - clear failure tracking
             if ra_offset_deg != 0.0 or dec_offset_deg != 0.0:
-                #Clear failed filename tracking
                 self.last_failed_filename = None
-                logger.debug(f"Platesolve successful - maintaining exposure time at {self.current_exposure_time:.1f} s")
+                if hasattr(self, 'current_exposure_retries'):
+                    delattr(self, 'current_exposure_retries')  # Reset retry tracking on success
+                logger.debug(f"Platesolve successful - maintaining exposure time at {self.current_exposure_time:.1f}s")
                 return None
-            
-            # Successful platesolve - reset exposure time and clear failed filename
-            # if self.current_exposure_time != self.base_exposure_time:
-            #     self.current_exposure_time = self.base_exposure_time
-            #     logger.info(f"Platesolve successful - reset exposure time to {self.base_exposure_time:.1f}s")
-            # self.last_failed_filename = None  # Clear on success
             
             return None  # No failure detected
             
@@ -715,7 +722,7 @@ class SpectroscopyCorrector(PlatesolveCorrector):
             # Check for platesolve failure and handle adaptive exposure
             new_exposure = self.detect_platesolve_failure(data)
             if new_exposure is not None:
-                raise PlatesolveCorrectorError(f"Platesolve failed, try exposure time {new_exposure:.1f} s (ignored in SCI mode)")
+                raise PlatesolveCorrectorError(f"Platesolve failed, try exposure time {new_exposure:.1f} s")
             
             ra_offset_deg = float(data['ra_offset']["0"])
             dec_offset_deg = float(data['dec_offset']["0"])
@@ -806,7 +813,7 @@ class SpectroscopyCorrector(PlatesolveCorrector):
         """Apply correction from platesolve data"""
         new_exposure = self.detect_platesolve_failure(data, current_phase)
         if new_exposure is not None:
-            raise PlatesolveCorrectorError(f"Platesolve failed, try exposure time {new_exposure:.1f} s (ignored in SCI mode)")
+            raise PlatesolveCorrectorError(f"Platesolve failed, try exposure time {new_exposure:.1f} s")
         
         ra_offset_deg, dec_offset_deg, rot_offset_deg, settle_time = self.process_platesolve_data(data)
         
@@ -879,6 +886,40 @@ class SpectroscopyCorrector(PlatesolveCorrector):
                 reason="Coordinate correction failed",
                 rotation_applied=False
             )
+    
+    def wait_for_correction_with_timeout(self, timeout_seconds: float) -> bool:
+        """Wait for platesolve correction with active polling"""
+        start_time = time.time()
+        check_interval = 1.0  # Check every second
+        
+        logger.debug(f"Waiting up to {timeout_seconds:.1f}s for platesolve correction...")
+        
+        while (time.time() - start_time) < timeout_seconds:
+            try:
+                result = self.apply_immediate_correction_if_available(current_phase="spectro_sync")
+                if result.applied:
+                    logger.info(f"Correction applied during wait: {result.total_offset_arcsec:.2f}\" offset")
+                    time.sleep(result.settle_time)  # Respect settle time
+                    return True
+                elif "already processed" in result.reason.lower():
+                    logger.debug("No new platesolve data yet...")
+                elif "below threshold" in result.reason.lower():
+                    logger.debug("Correction below threshold - target aligned")
+                    return True
+            except PlatesolveCorrectorError as e:
+                if "platesolve failed" in str(e).lower():
+                    logger.warning(f"Platesolve failure detected: {e}")
+                    # Don't return False here - let the adaptive exposure logic handle it
+                    # by continuing to wait for a successful solve
+                else:
+                    logger.debug(f"Correction check during wait: {e}")
+            except Exception as e:
+                logger.debug(f"Unexpected error during correction wait: {e}")
+            
+            time.sleep(check_interval)
+        
+        logger.warning(f"Platesolve timeout after {timeout_seconds:.1f}s - continuing")
+        return False
 
 
 class SpectroscopySession:
@@ -954,80 +995,110 @@ class SpectroscopySession:
             self.logger.info(f"Monitoring mirror file: {self.mirror.mirror_file}")
         if self.dry_run:
             self.logger.info("DRY RUN MODE - No telescope movement")
-        
-        # Add shutdown monitoring info
+
         if self.ignore_twilight:
-            self.logger.info("Automatic shutdown DISABLED due to --ignore-twilight flag")
+            self.logger.info("Automatic twilight checks DISABLED due to --ignore-twilight flag")
         else:
             self.logger.info("Automatic shutdown enabled when sun rises")
+            # === WAIT FOR ASTRONOMICAL TWILIGHT BEFORE STARTING ===
+            while True:
+                try:
+                    # Check sun altitude using dummy RA/Dec
+                    obs_status = self.obs_checker.check_target_observability(12.0, 0.0, ignore_twilight=False)
+                    twilight_limit = self.config_loader.get_config("observatory").get("twilight_altitude", -18.0)
+                    if obs_status.sun_altitude <= twilight_limit:
+                        self.logger.info(
+                            f"Sun below twilight limit ({obs_status.sun_altitude:.1f}° <= {twilight_limit}°). Proceeding..."
+                        )
+                        break
+                    else:
+                        self.logger.info(
+                            f"Waiting for astronomical twilight... Sun alt={obs_status.sun_altitude:.1f}° (limit={twilight_limit}°)"
+                        )
+                except Exception as e:
+                    self.logger.warning(f"Twilight wait check failed: {e}")
+                time.sleep(poll_interval)
 
+        if self.telescope_driver and not self.dry_run:
+            try:
+                cover_driver = AlpacaCoverDriver()
+                if cover_driver.connect(self.config_loader.get_cover_config()):
+                    cover_info = cover_driver.get_cover_info()
+                    if cover_info.get('cover_state') != 'Open':
+                        logger.info("Opening cover...")
+                        if not cover_driver.open_cover():
+                            logger.warning("Failed to open cover - continuing anyway")
+                    else:
+                        logger.info("Cover already open")
+                else:
+                    logger.warning("Failed to connect to cover - continuing without")
+            except Exception as e:
+                logger.warning(f"Cover error: {e} - continuing without")
+        
         try:
             while True:
-                # **NEW: Check for shutdown conditions first**
+                # Check for shutdown conditions (sunrise, etc.)
                 if self.check_should_shutdown():
                     self.logger.info("="*60)
                     self.logger.info("SHUTDOWN CONDITION DETECTED")
                     self.logger.info(f"Reason: {self.shutdown_reason}")
                     self.logger.info("="*60)
                     break
-                
+
                 self.logger.debug(f"Polling for new targets... (poll interval: {poll_interval}s)")
-                
+
                 if self.mirror:
                     new_target = self.mirror.check_for_new_target()
                     if new_target:
                         self.logger.info("NEW TARGET DETECTED")
                         self.logger.info(f"RA={new_target['ra_hours']:.6f} h, Dec={new_target['dec_deg']:.6f}°")
-                        
+
                         # Check observability before attempting to use target
                         if not self._validate_target_observability(new_target):
                             self.logger.warning("Target not observable, marking as failed")
                             self.mirror.mark_target_failed(new_target['target_key'])
                             continue
-                        
-                        # Properly stop current session before starting new one
+
+                        # Stop current session if running
                         if self.current_session and self.current_session.is_running():
                             self.logger.info("Stopping current session...")
                             try:
                                 self.current_session.stop_session()
-                                # Wait a moment for cleanup
                                 time.sleep(2.0)
                             except Exception as e:
                                 self.logger.warning(f"Error stopping session: {e}")
                             finally:
                                 self.current_session = None
                                 self.current_target = None
-                        
-                        # Try to start new session
+
+                        # Start new session
                         if not self._start_new_session(new_target):
-                            # Mark as failed to avoid retry loops
                             self.mirror.mark_target_failed(new_target['target_key'])
                     else:
                         self.logger.debug("No new targets found")
-                
+
                 # Clean up finished sessions
                 if self.current_session and not self.current_session.is_running():
                     self.logger.info("Current session finished")
                     self.current_session = None
                     self.current_target = None
-                            
+
                 time.sleep(poll_interval)
-                
+
         except KeyboardInterrupt:
             self.logger.info("Monitoring interrupted by user")
             self.shutdown_reason = "User interruption"
+            return
         except Exception as e:
             self.logger.error(f"Critical error in monitoring loop: {e}")
             self.shutdown_reason = f"Critical error: {e}"
         finally:
-            # Enhanced cleanup with shutdown info
             self.logger.info("="*60)
             self.logger.info("BEGINNING SHUTDOWN SEQUENCE")
             if self.shutdown_reason:
                 self.logger.info(f"Shutdown reason: {self.shutdown_reason}")
             self.logger.info("="*60)
-            
-            # Cleanup current session
+
             if self.current_session:
                 try:
                     self.logger.info("Stopping active imaging session...")
@@ -1036,7 +1107,7 @@ class SpectroscopySession:
                     self.logger.warning(f"Error during session cleanup: {e}")
                 finally:
                     self.current_session = None
-            
+
             self.logger.info("Spectroscopy monitoring ended - hardware cleanup will follow")
 
     def _validate_target_observability(self, target_data: Dict[str, Any]) -> bool:
@@ -1192,7 +1263,7 @@ def main():
                 logger.error("Failed to turn telescope motor on")
                 return 1
             
-            logger.info(f"Telescope connected: RA={tel_info.get('ra_hours', 0):.6f}h, Dec={tel_info.get('dec_degrees', 0):.6f}°")
+            logger.info(f"Telescope connected: RA={tel_info.get('ra_hours', 0):.6f} h, Dec={tel_info.get('dec_degrees', 0):.6f}°")
 
             
 
@@ -1212,23 +1283,23 @@ def main():
             logger.info(f"Starting mirror mode with file: {mirror_file}")
             
             # Cover handling for mirror mode
-            logger.info("Connecting to cover...")
-            try:
-                cover_driver = AlpacaCoverDriver()
-                if cover_driver.connect(config_loader.get_cover_config()):
-                    cover_info = cover_driver.get_cover_info()
-                    if cover_info.get('cover_state') != 'Open':
-                        logger.info("Opening cover...")
-                        if not cover_driver.open_cover():
-                            logger.warning("Failed to open cover - continuing anyway")
-                    else:
-                        logger.info("Cover already open")
-                else:
-                    logger.warning("Failed to connect to cover - continuing without")
-                    cover_driver = None
-            except Exception as e:
-                logger.warning(f"Cover error: {e} - continuing without")
-                cover_driver = None
+            # logger.info("Connecting to cover...")
+            # try:
+            #     cover_driver = AlpacaCoverDriver()
+            #     if cover_driver.connect(config_loader.get_cover_config()):
+            #         cover_info = cover_driver.get_cover_info()
+            #         if cover_info.get('cover_state') != 'Open':
+            #             logger.info("Opening cover...")
+            #             if not cover_driver.open_cover():
+            #                 logger.warning("Failed to open cover - continuing anyway")
+            #         else:
+            #             logger.info("Cover already open")
+            #     else:
+            #         logger.warning("Failed to connect to cover - continuing without")
+            #         cover_driver = None
+            # except Exception as e:
+            #     logger.warning(f"Cover error: {e} - continuing without")
+            #     cover_driver = None
             
             
             
@@ -1240,7 +1311,12 @@ def main():
                 exposure_override=args.exposure_time,
                 duration_override=args.duration
             )
-            spectro_session.start_monitoring(args.poll_interval)
+            
+            try:
+                spectro_session.start_monitoring(args.poll_interval)
+            except KeyboardInterrupt:
+                logger.info("Keyboard interrupt received - shutting down gracefully")
+                return 0
 
         else:
             # Single target mode

@@ -4,6 +4,7 @@ from rich.logging import RichHandler
 import argparse
 from pathlib import Path
 from datetime import datetime, timezone
+import time
 
 
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
@@ -55,6 +56,60 @@ def setup_logging(log_level: str, log_dir: Path, log_name: str = None):
     )
     
     return logfile
+
+def wait_for_observing_conditions(target_info, obs_checker, ignore_twilight=False, poll_interval=60.0):
+    """Simple waiting function for observing conditions"""
+    logger = logging.getLogger(__name__)
+    
+    if ignore_twilight:
+        logger.info("Twilight checks disabled - proceeding immediately")
+        return True
+    
+    logger.info("="*60)
+    logger.info("WAITING FOR OBSERVING CONDITIONS")
+    logger.info("="*60)
+    logger.info(f"Target: {target_info.tic_id}")
+    logger.info(f"Coordinates: RA={target_info.ra_j2000_hours:.6f}h, Dec={target_info.dec_j2000_deg:.6f}°")
+    
+    start_time = datetime.now(timezone.utc)
+    max_wait_hours = 16  # Don't wait more than 16 hours
+    
+    while (datetime.now(timezone.utc) - start_time).total_seconds() < (max_wait_hours * 3600):
+        try:
+            obs_status = obs_checker.check_target_observability(
+                target_info.ra_j2000_hours,
+                target_info.dec_j2000_deg,
+                ignore_twilight=False
+            )
+            
+            if obs_status.observable:
+                logger.info("="*60)
+                logger.info("OBSERVING CONDITIONS MET - PROCEEDING")
+                logger.info("="*60)
+                return True
+            
+            # Show current status
+            logger.info(f"Sun: {obs_status.sun_altitude:.1f}°, Target: {obs_status.target_altitude:.1f}°")
+            logger.info(f"Waiting reasons: {'; '.join(obs_status.reasons)}")
+            
+            # Check if we're in a hopeless situation
+            if (obs_status.sun_altitude < -10 and obs_status.target_altitude < 0):
+                elapsed_hours = (datetime.now(timezone.utc) - start_time).total_seconds() / 3600
+                if elapsed_hours > 2:
+                    logger.warning("Target remains below horizon well into night")
+                    logger.warning("Target likely not observable tonight - consider different target")
+                    return False
+            
+            logger.info(f"Next check in {poll_interval/60:.1f} minutes...")
+            
+        except Exception as e:
+            logger.warning(f"Error checking observing conditions: {e}")
+            logger.info(f"Retrying in {poll_interval} seconds...")
+        
+        time.sleep(poll_interval)
+    
+    logger.error(f"Timeout after {max_wait_hours} hours - giving up")
+    return False
 
 def main():
     parser = argparse.ArgumentParser(
@@ -238,38 +293,33 @@ def main():
                 ignore_twilight=args.ignore_twilight
             )
         
-            logger.info(f"Target altitude: {obs_status.target_altitude:.1f}°")
-            logger.info(f"Sun altitude: {obs_status.sun_altitude:.1f}°")
+            logger.info(f"Current target altitude: {obs_status.target_altitude:.1f}°")
+            logger.info(f"Current sun altitude: {obs_status.sun_altitude:.1f}°")
             if obs_status.airmass:
                 logger.debug(f"Airmass: {obs_status.airmass:.2f}")
                 
-            logger.info(f"Observability:")
-            for reason in obs_status.reasons:
-                if obs_status.observable:
-                    logger.info(f"  {obs_status.observable}: {reason}")
-                else:
-                    logger.info(f"  {obs_status.observable}: {reason}")
-                    
-            if not obs_status.observable and not args.dry_run:
-                logger.error(f"Target is not currently observable")
+            # If immediately observable, great
+            if obs_status.observable:
+                logger.info("Target is immediately observable")
+            else:
+                # Show what conditions are not met
+                logger.info("Current observability status:")
+                for reason in obs_status.reasons:
+                    logger.info(f"  {reason}")
                 
-                next_time = checker.get_next_observable_time(
-                    target_info.ra_j2000_hours,
-                    target_info.dec_j2000_deg
-                )
-                if next_time:
-                    logger.info(f"Target will be observable at {next_time.isoformat()}")
-                    
-                return 1
-            
-            elif not obs_status.observable and args.dry_run:
-                logger.warning(f"Target not observable, but continuing with dry run")
+                # If dry run, continue regardless
+                if args.dry_run:
+                    logger.warning("Target not currently observable, but continuing with dry run")
+                else:
+                    # Wait for conditions
+                    logger.info("Waiting for observing conditions...")
+                    if not wait_for_observing_conditions(target_info, checker, args.ignore_twilight):
+                        logger.error("Target will not be observable - aborting")
+                        return 1
                 
         except ObservabilityError as e:
             logger.error(f"Observability check error: {e}")
             return 1
-        
-        
         
         
         # if config_loader.write_target_json(target_json_data):
