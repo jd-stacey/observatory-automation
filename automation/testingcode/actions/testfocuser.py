@@ -51,11 +51,11 @@ def test_focuser():
     #     sleep(1)  # optional pause
 
     
-    print("Testing move to spectro focus position...")
-    driver.set_position_from_filter('SpeCtro')
+    # print("Testing move to spectro focus position...")
+    # driver.set_position_from_filter('SpeCtro')
     
-    print("Testing move back to Lum focus position...")
-    driver.set_position_from_filter('l')
+    # print("Testing move back to Lum focus position...")
+    # driver.set_position_from_filter('l')
     
     print("Testing fake filter_code position...")
     driver.set_position_from_filter('QqQ')
@@ -69,6 +69,12 @@ def test_focuser():
     refreshed_info = driver.get_focuser_info(refresh=True)
     print(f"Refreshed info: {refreshed_info}")
 
+    # Test non-int move
+    nonint_vals = [15.250, "15,250", 15250.00, "15250"]
+    for val in nonint_vals:
+        print(f"Attempting move to non-integer value: {val}")
+        driver.move_to_position(val)
+    
     # Test unsafe move
     unsafe_position = limits["max"] + 100
     print(f"Attempting unsafe move to {unsafe_position}")
