@@ -1,14 +1,17 @@
-# Field rotation control for Alt/Az mounts
+
+# Change move_threshold_deg to adjust how often field rotator applies adjustments (lower = more often)
+
 enabled: true
 tracking:
-  update_rate_hz: 10.0           # How often to update rotator during exposures
-  move_threshold_deg: 0.05      # Minimum movement to avoid jitter
-  settle_time_sec: 0          # Brief pause after each move
+  update_rate_hz: 5.0           # How often to update rotator during exposures
+  move_threshold_deg: 0.1       # Minimum rotator movement (degrees)
+  settle_time_sec: 0.01         # Brief pause after each move
 calibration:
   rotator_sign: 1               # +1 or -1, test to determine correct direction
   platesolve_sign: 1            # +1 or -1 for theta_offset feedback direction
-  mechanical_zero_deg: 0      # Sky PA when rotator at mechanical zero
+  mechanical_zero_deg: 0        # Sky PA when rotator at mechanical zero
 wrap_management:
   enabled: true
-  lookahead_minutes: 20.0       # How far ahead to check for limits
-  flip_margin_deg: 3.0         # Margin from limits to trigger 180° flip
+  lookahead_minutes: 5.0       # How far ahead to check for limits
+  flip_margin_deg: 2.0         # Margin from limits to trigger 180° flip
+                              
