@@ -1,22 +1,138 @@
-def ensure_telescope_tracking(telescope_driver, check_interval=30):
-    """Background thread to ensure telescope tracking stays enabled"""
-    def tracking_monitor():
-        logger = logging.getLogger('tracking_monitor')
-        while getattr(tracking_monitor, 'running', True):
-            try:
-                if telescope_driver and telescope_driver.is_connected():
-                    if hasattr(telescope_driver.telescope, 'Tracking'):
-                        if not telescope_driver.telescope.Tracking:
-                            logger.warning("Telescope tracking disabled - re-enabling")
-                            telescope_driver.telescope.Tracking = True
-                            time.sleep(0.5)
-                            if telescope_driver.telescope.Tracking:
-                                logger.info("Telescope tracking successfully re-enabled")
-            except Exception as e:
-                logger.error(f"Tracking monitor error: {e}")
-            time.sleep(check_interval)
-    
-    tracking_thread = threading.Thread(target=tracking_monitor, daemon=True)
-    tracking_thread.start()
-    tracking_monitor.running = True
-    return tracking_thread
+def _tracking_loop(self):
+    """Main tracking loop - runs during exposures only"""
+    update_rate = self.fr_config['tracking']['update_rate_hz']
+    move_threshold = self.fr_config['tracking']['move_threshold_deg']
+    settle_time = self.fr_config['tracking']['settle_time_sec']
+    sleep_interval = 1.0 / update_rate
+
+    import time as _t
+
+    while not self.stop_event.is_set():
+        try:
+            if not self.rotator.is_connected() or not self.target_coord:
+                time.sleep(sleep_interval)
+                continue
+
+            # Skip if we're in cooldown period
+            if _t.time() < getattr(self, "_cooldown_until", 0.0):
+                time.sleep(sleep_interval)
+                continue
+
+            # Skip if rotator is currently moving
+            if self.rotator.is_moving():
+                time.sleep(sleep_interval)
+                continue
+
+            # Calculate required position
+            required_pa = self.calculate_required_pa()
+            if required_pa is None:
+                time.sleep(sleep_interval)
+                continue
+
+            required_position = self.pa_to_rotator_position(required_pa)
+            current_position = self.rotator.get_position()
+
+            # Proper angle difference calculation with wraparound
+            raw_error = required_position - current_position
+            
+            # Normalize to [-180, +180] range
+            if raw_error > 180:
+                error = raw_error - 360
+            elif raw_error < -180:
+                error = raw_error + 360
+            else:
+                error = raw_error
+
+            # Debug logging with stricter threshold to avoid spam
+            if abs(error) > move_threshold and abs(error) < 5.0:
+                logger.debug(f"err={error:.3f}°, thr={move_threshold}°, req_pos={required_position:.3f}°")
+
+            # Check for wrap management
+            if self.check_wrap_needed():
+                if self.in_exposure:
+                    self.pending_flip = True
+                    logger.info("[field-rot] deferring 180° flip until exposure end")
+                else:
+                    # Execute flip with proper safety checks
+                    current_pos = self.rotator.get_position()
+                    margin = self.fr_config['wrap_management']['flip_margin_deg']
+                    
+                    actually_near_limit = (
+                        current_pos < (self.rotator.min_limit + margin) or 
+                        current_pos > (self.rotator.max_limit - margin)
+                    )
+                    
+                    if actually_near_limit:
+                        logger.info(f"[field-rot] executing flip - at {current_pos:.1f}°")
+                        self.reference_pa = (self.reference_pa + 180.0) % 360.0
+                        # Recalculate after flip
+                        required_pa = self.calculate_required_pa()
+                        required_position = self.pa_to_rotator_position(required_pa)
+                        raw_error = required_position - current_position
+                        if raw_error > 180:
+                            error = raw_error - 360
+                        elif raw_error < -180:
+                            error = raw_error + 360
+                        else:
+                            error = raw_error
+
+            # Only move if error exceeds threshold and error is reasonable
+            if abs(error) > move_threshold and abs(error) < 10.0:
+                target_position = current_position + error
+
+                # Safety check
+                is_safe, safety_msg = self.rotator.check_position_safety(target_position)
+                if is_safe:
+                    logger.debug(f"Moving rotator: {current_position:.3f}° → {target_position:.3f}° (Δ={error:+.3f}°)")
+                    
+                    # Use the proper move method that waits for completion
+                    success = self._execute_tracking_move(target_position)
+                    
+                    if success:
+                        # Set cooldown to prevent immediate re-commanding
+                        # Make it longer to account for rotator settling
+                        cooldown_time = max(1.0, settle_time * 2)  # At least 1 second
+                        self._cooldown_until = _t.time() + cooldown_time
+                    else:
+                        logger.warning("Tracking move failed, will retry next cycle")
+                        
+                else:
+                    logger.warning(f"Unsafe rotator move rejected: {safety_msg}")
+
+            elif abs(error) >= 10.0:
+                logger.error(f"[field-rot] Rejecting huge error: {error:.1f}° - possible calculation bug")
+
+        except Exception as e:
+            logger.warning(f"Tracking loop error: {e}")
+
+        time.sleep(sleep_interval)
+
+
+def _execute_tracking_move(self, target_position: float) -> bool:
+    """Execute a tracking move and wait for completion"""
+    try:
+        # Start the move
+        self.rotator.rotator.MoveAbsolute(target_position)
+        
+        # Wait for move to complete with timeout
+        timeout_start = time.time()
+        timeout_duration = 10.0  # 10 second timeout
+        
+        while self.rotator.rotator.IsMoving:
+            if time.time() - timeout_start > timeout_duration:
+                logger.error("Rotator move timeout - halting")
+                self.rotator.halt()
+                return False
+                
+            time.sleep(0.1)  # Check every 100ms
+        
+        # Apply settle time after movement completes
+        settle_time = self.fr_config['tracking']['settle_time_sec']
+        if settle_time > 0:
+            time.sleep(settle_time)
+            
+        return True
+        
+    except Exception as e:
+        logger.error(f"Tracking move execution failed: {e}")
+        return False
