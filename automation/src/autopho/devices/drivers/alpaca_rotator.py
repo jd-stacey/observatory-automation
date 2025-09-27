@@ -64,7 +64,7 @@ class AlpacaRotatorDriver:
                 self.connected = True
                 
                 current_pos = self.get_position()
-                logger.debug(f"Current rotator position: {current_pos:.2f}°")
+                logger.debug(f"Current rotator position: {current_pos:.6f}°")
                 logger.debug(f"Mechanical limits: {self.min_limit:.1f}° to {self.max_limit:.1f}°")
                 
                 return True 
@@ -131,14 +131,14 @@ class AlpacaRotatorDriver:
         
         
         if target_position <= (self.min_limit + emergency_margin):
-            return False, f"Position {target_position:.2f}° within emergency margin ({emergency_margin}°) of min limit {self.min_limit}°"
+            return False, f"Position {target_position:.6f}° within emergency margin ({emergency_margin}°) of min limit {self.min_limit}°"
         if target_position >= (self.max_limit - emergency_margin):
-            return False, f"Position {target_position:.2f}° within emergency margin ({emergency_margin}°) of max limit {self.max_limit}°"
+            return False, f"Position {target_position:.6f}° within emergency margin ({emergency_margin}°) of max limit {self.max_limit}°"
         
         if target_position <= (self.min_limit + warning_margin):
-            return True, f"Warning: {target_position:.2f}° approaching minimum limit {self.min_limit}°"
+            return True, f"Warning: {target_position:.6f}° approaching minimum limit {self.min_limit}°"
         if target_position >= (self.max_limit - warning_margin):
-            return True, f"Warning: {target_position:.2f}° approaching maximum limit {self.max_limit}°"
+            return True, f"Warning: {target_position:.6f}° approaching maximum limit {self.max_limit}°"
         
         return True, "Position is safe"
     
@@ -197,12 +197,12 @@ class AlpacaRotatorDriver:
             elif "Warning" in safety_msg:
                 logger.warning(safety_msg)
                 
-            logger.info(f"Moving rotator to position: {position_deg:.2f}°")
+            logger.info(f"Moving rotator to position: {position_deg:.6f}°")
             
             self.rotator.MoveAbsolute(position_deg)
             
             while self.rotator.IsMoving:
-                logger.debug(f"    Rotating...currently at {self.rotator.Position:.2f}°")
+                logger.debug(f"    Rotating...currently at {self.rotator.Position:.6f}°")
                 time.sleep(0.5)
                 
             settle_time = self.config.get('settle_time', 2.0)
@@ -210,7 +210,7 @@ class AlpacaRotatorDriver:
             time.sleep(settle_time)
             
             final_pos = self.get_position()
-            logger.info(f"Rotator positioned at: {final_pos:.2f}°")
+            logger.info(f"Rotator positioned at: {final_pos:.6f}°")
             
             return True
         except Exception as e:
@@ -250,9 +250,22 @@ class AlpacaRotatorDriver:
                 logger.warning(f"Rotation correction refused: {safety_msg}")
                 return False
 
-            logger.info(f"Applying platesolve de-rotation: sky Δ={rotation_offset_deg:+.2f}°, "
-                        f"mech Δ={mech_delta:+.2f}° (from {current_pos:.2f}° → {target_pos:.2f}°)")
-            self.rotator.MoveAbsolute(target_pos)
+            logger.info(f"Applying platesolve de-rotation: sky Δ={rotation_offset_deg:+.6f}°, "
+                        f"mech Δ={mech_delta:+.6f}° (from {current_pos:.6f}° → {target_pos:.6f}°)")
+            
+            # use new call for rotator position move
+            
+            if hasattr(self, 'field_tracker') and self.field_tracker:
+                success = self.field_tracker._execute_tracking_move(target_pos)
+            else:
+                self.rotator.MoveAbsolute(target_pos)
+                time.sleep(1)
+                success = True
+            if not success:
+                    logger.warning("Platesolve rotation correction failed")
+                    return False
+            # vvvvvv orig call
+            # self.rotator.MoveAbsolute(target_pos)
             self.last_rotation_move_ts = time.time()
 
             # minimal settle (configurable)
@@ -279,7 +292,7 @@ class AlpacaRotatorDriver:
             
             
             final_pos = self.get_position()
-            logger.debug(f"Rotator now at {final_pos:.2f}°")
+            logger.debug(f"Rotator now at {final_pos:.6f}°")
             return True
 
         except Exception as e:
@@ -505,24 +518,56 @@ class FieldRotationTracker:
 
 
     def check_wrap_needed(self):
-
-        """Check if rotator will hit limits soon"""
-
+        """Check if rotator will hit limits soon - with proper logic"""
         if not self.fr_config['wrap_management']['enabled']:
             return False      
 
-        lookahead_min = self.fr_config['wrap_management']['lookahead_minutes']
-        future_time = Time.now() + lookahead_min * u.minute
-
-        future_pa = self.calculate_required_pa(future_time)
-        if future_pa is None:
-            return False
-
-        future_pos = self.pa_to_rotator_position(future_pa)
+        current_pos = self.rotator.get_position()
         margin = self.fr_config['wrap_management']['flip_margin_deg']
-
-        return (future_pos < self.rotator.min_limit + margin or 
-                future_pos > self.rotator.max_limit - margin)
+        
+        # Simple, reliable check: are we actually near a mechanical limit?
+        near_min_limit = current_pos < (self.rotator.min_limit + margin)
+        near_max_limit = current_pos > (self.rotator.max_limit - margin)
+        
+        if near_min_limit or near_max_limit:
+            logger.info(f"[wrap-check] Near limit: pos={current_pos:.1f}°, "
+                    f"limits={self.rotator.min_limit:.1f}°-{self.rotator.max_limit:.1f}°, "
+                    f"margin={margin:.1f}°")
+            return True
+            
+        # Additional check: look ahead only if we're rotating in a problematic direction
+        lookahead_min = self.fr_config['wrap_management']['lookahead_minutes']
+        current_time = Time.now()
+        future_time = current_time + lookahead_min * u.minute
+        
+        current_pa = self.calculate_required_pa(current_time)
+        future_pa = self.calculate_required_pa(future_time)
+        
+        if current_pa is None or future_pa is None:
+            return False
+            
+        current_calc_pos = self.pa_to_rotator_position(current_pa)
+        future_calc_pos = self.pa_to_rotator_position(future_pa)
+        
+        # Calculate rotation direction and rate
+        pa_rate = (future_pa - current_pa) / lookahead_min  # degrees per minute
+        
+        # Only trigger if we're rotating toward a limit AND will hit it soon
+        if pa_rate > 0.1:  # Rotating toward higher angles
+            time_to_max = (self.rotator.max_limit - margin - current_pos) / pa_rate
+            if 0 < time_to_max < lookahead_min * 2:  # Will hit limit soon
+                logger.info(f"[wrap-check] Future limit approach: rate={pa_rate:.2f}°/min, "
+                        f"time_to_limit={time_to_max:.1f}min")
+                return True
+                
+        elif pa_rate < -0.1:  # Rotating toward lower angles
+            time_to_min = (current_pos - self.rotator.min_limit - margin) / (-pa_rate)
+            if 0 < time_to_min < lookahead_min * 2:  # Will hit limit soon
+                logger.info(f"[wrap-check] Future limit approach: rate={pa_rate:.2f}°/min, "
+                        f"time_to_limit={time_to_min:.1f}min")
+                return True
+        
+        return False
 
     
 
@@ -554,19 +599,27 @@ class FieldRotationTracker:
     
 
     def _tracking_loop(self):
-
         """Main tracking loop - runs during exposures only"""
-
         update_rate = self.fr_config['tracking']['update_rate_hz']
         move_threshold = self.fr_config['tracking']['move_threshold_deg']
         settle_time = self.fr_config['tracking']['settle_time_sec']
         sleep_interval = 1.0 / update_rate
 
-        import time as _t  # add once here
+        import time as _t
 
         while not self.stop_event.is_set():
             try:
                 if not self.rotator.is_connected() or not self.target_coord:
+                    time.sleep(sleep_interval)
+                    continue
+
+                # Skip if we're in cooldown period
+                if _t.time() < getattr(self, "_cooldown_until", 0.0):
+                    time.sleep(sleep_interval)
+                    continue
+
+                # Skip if rotator is currently moving
+                if self.rotator.is_moving():
                     time.sleep(sleep_interval)
                     continue
 
@@ -579,47 +632,143 @@ class FieldRotationTracker:
                 required_position = self.pa_to_rotator_position(required_pa)
                 current_position = self.rotator.get_position()
 
-                # Calculate shortest rotation
-                error = (required_position - current_position + 180) % 360 - 180
+                # Proper angle difference calculation with wraparound
+                raw_error = required_position - current_position
+                
+                # Normalize to [-180, +180] range
+                if raw_error > 180:
+                    error = raw_error - 360
+                elif raw_error < -180:
+                    error = raw_error + 360
+                else:
+                    error = raw_error
 
-####            ################## TEMP 
-                if abs(error) > move_threshold:
-                    logger.debug(f"err={error:.3f}°, thr={move_threshold}°, move={abs(error) > move_threshold}")
+                # Debug logging with stricter threshold to avoid spam
+                if abs(error) > move_threshold and abs(error) < 15.0:
+                    logger.debug(f"err={error:.6f}°, thr={move_threshold}°, req_pos={required_position:.6f}°")
 
-                # Defer or perform a 180° reference flip if we’re about to hit limits
+                # Check for wrap management
                 if self.check_wrap_needed():
                     if self.in_exposure:
-                        self.pending_flip = True       # defer to after exposure
+                        self.pending_flip = True
                         logger.info("[field-rot] deferring 180° flip until exposure end")
                     else:
-                        self.reference_pa = (self.reference_pa + 180.0) % 360.0
-                        logger.info("[field-rot] immediate 180° flip to avoid limits")
-                        # Optional: recompute required position immediately after flip
-                        required_pa = self.calculate_required_pa()
-                        required_position = self.pa_to_rotator_position(required_pa)
-                        current_position = self.rotator.get_position()
-                        error = (required_position - current_position + 180) % 360 - 180
+                        # Execute flip with proper safety checks
+                        current_pos = self.rotator.get_position()
+                        margin = self.fr_config['wrap_management']['flip_margin_deg']
+                        
+                        actually_near_limit = (
+                            current_pos < (self.rotator.min_limit + margin) or 
+                            current_pos > (self.rotator.max_limit - margin)
+                        )
+                        
+                        if actually_near_limit:
+                            logger.info(f"[field-rot] executing flip - at {current_pos:.6f}°")
+                            self.reference_pa = (self.reference_pa + 180.0) % 360.0
+                            # Recalculate after flip
+                            required_pa = self.calculate_required_pa()
+                            required_position = self.pa_to_rotator_position(required_pa)
+                            raw_error = required_position - current_position
+                            if raw_error > 180:
+                                error = raw_error - 360
+                            elif raw_error < -180:
+                                error = raw_error + 360
+                            else:
+                                error = raw_error
 
-                # Only move if error exceeds threshold AND cooldown has expired
-                if _t.time() >= getattr(self, "_cooldown_until", 0.0):
-                    if abs(error) > move_threshold:
-                        target_position = current_position + error
+                # Only move if error exceeds threshold and error is reasonable
+                if abs(error) > move_threshold and abs(error) < 20.0:
+                    target_position = current_position + error
 
-                        # Safety check
-                        is_safe, _ = self.rotator.check_position_safety(target_position)
-                        if is_safe:
-                            logger.debug(f"Moving rotator to {target_position}°")
-                            self.rotator.rotator.MoveAbsolute(target_position)
-                            if settle_time > 0:
-                                time.sleep(settle_time)
+                    # Safety check
+                    is_safe, safety_msg = self.rotator.check_position_safety(target_position)
+                    if is_safe:
+                        logger.debug(f"Moving rotator: {current_position:.6f}° → {target_position:.6f}° (Δ={error:+.6f}°)")
+                        
+                        # Use the proper move method that waits for completion
+                        success = self._execute_tracking_move(target_position)
+                        
+                        if success:
+                            # Set cooldown to prevent immediate re-commanding
+                            # Make it longer to account for rotator settling
+                            cooldown_time = max(1.0, settle_time * 2)  # At least 1 second
+                            self._cooldown_until = _t.time() + cooldown_time
+                        else:
+                            logger.warning("Tracking move failed, will retry next cycle")
+                            
+                    else:
+                        logger.warning(f"Unsafe rotator move rejected: {safety_msg}")
 
-                            # set a short cooldown (e.g., 0.3 s) to avoid spamming near-identical MoveAbsolute
-                            self._cooldown_until = _t.time() + 0.3
+                elif abs(error) >= 30.0:
+                    logger.error(f"[field-rot] Rejecting huge error: {error:.6f}° - possible calculation bug")
 
             except Exception as e:
                 logger.warning(f"Tracking loop error: {e}")
 
             time.sleep(sleep_interval)
+
+
+    def _execute_tracking_move(self, target_position: float) -> bool:
+        """Execute a tracking move with position-based completion"""
+        try:
+            current_pos_start = self.rotator.get_position()
+            move_distance = abs(target_position - current_pos_start)
+            
+            # Start the move
+            self.rotator.rotator.MoveAbsolute(target_position)
+            
+            # Calculate reasonable timeout based on move distance
+            # Assume conservative 1°/s + overhead
+            min_timeout = 5.0
+            estimated_time = move_distance / 1.0  # Conservative 1°/s estimate
+            timeout_duration = max(min_timeout, estimated_time + 3.0)
+            
+            logger.debug(f"Move distance: {move_distance:.3f}°, timeout: {timeout_duration:.1f}s")
+            
+            # Wait for position to stabilize near target
+            timeout_start = time.time()
+            position_tolerance = 0.1  # Must be larger than the rotator's positioning error
+            last_pos = current_pos_start
+            stall_count = 0
+            
+            while time.time() - timeout_start < timeout_duration:
+                current_pos = self.rotator.get_position()
+                
+                # Check if we've reached target
+                if abs(current_pos - target_position) <= position_tolerance:
+                    # Position reached, wait a bit more for stabilization
+                    time.sleep(0.1)
+                    
+                    # Apply settle time after movement completes
+                    settle_time = self.fr_config['tracking']['settle_time_sec']
+                    if settle_time > 0:
+                        time.sleep(settle_time)
+                        
+                    logger.debug(f"Move successful: {current_pos_start:.6f}° → {current_pos:.6f}°")
+                    return True
+                
+                # Check for stalled movement
+                if abs(current_pos - last_pos) < 0.001:  # Less than 0.001° change
+                    stall_count += 1
+                    if stall_count > 20:  # 1 second of no movement (20 * 50ms)
+                        logger.warning(f"Rotator appears stalled at {current_pos:.6f}°, target was {target_position:.6f}°")
+                        return False
+                else:
+                    stall_count = 0
+                    
+                last_pos = current_pos
+                time.sleep(0.05)  # Check every 50ms
+            
+            # Timeout - log the failure with more detail
+            final_pos = self.rotator.get_position()
+            actual_moved = abs(final_pos - current_pos_start)
+            logger.warning(f"Move timeout: target={target_position:.6f}°, start={current_pos_start:.6f}°, "
+                        f"final={final_pos:.6f}°, moved={actual_moved:.6f}° in {timeout_duration:.1f} s")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Tracking move execution failed: {e}")
+            return False
 
     
     
