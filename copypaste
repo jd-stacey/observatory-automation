@@ -1,16 +1,30 @@
 def _execute_tracking_move(self, target_position: float) -> bool:
     """Execute a tracking move with position-based completion"""
     try:
+        current_pos_start = self.rotator.get_position()
+        move_distance = abs(target_position - current_pos_start)
+        
         # Start the move
         self.rotator.rotator.MoveAbsolute(target_position)
         
+        # Calculate reasonable timeout based on move distance
+        # Assume conservative 1°/s + overhead
+        min_timeout = 5.0
+        estimated_time = move_distance / 1.0  # Conservative 1°/s estimate
+        timeout_duration = max(min_timeout, estimated_time + 3.0)
+        
+        logger.debug(f"Move distance: {move_distance:.3f}°, timeout: {timeout_duration:.1f}s")
+        
         # Wait for position to stabilize near target
         timeout_start = time.time()
-        timeout_duration = 10.0
-        position_tolerance = 0.01  # 0.01° tolerance
+        position_tolerance = 0.15  # Must be larger than the rotator's positioning error
+        last_pos = current_pos_start
+        stall_count = 0
         
         while time.time() - timeout_start < timeout_duration:
             current_pos = self.rotator.get_position()
+            
+            # Check if we've reached target
             if abs(current_pos - target_position) <= position_tolerance:
                 # Position reached, wait a bit more for stabilization
                 time.sleep(0.1)
@@ -20,12 +34,26 @@ def _execute_tracking_move(self, target_position: float) -> bool:
                 if settle_time > 0:
                     time.sleep(settle_time)
                     
+                logger.debug(f"Move successful: {current_pos_start:.3f}° → {current_pos:.3f}°")
                 return True
+            
+            # Check for stalled movement
+            if abs(current_pos - last_pos) < 0.001:  # Less than 0.001° change
+                stall_count += 1
+                if stall_count > 20:  # 1 second of no movement (20 * 50ms)
+                    logger.warning(f"Rotator appears stalled at {current_pos:.3f}°, target was {target_position:.3f}°")
+                    return False
+            else:
+                stall_count = 0
+                
+            last_pos = current_pos
             time.sleep(0.05)  # Check every 50ms
         
-        # Timeout - log the failure
+        # Timeout - log the failure with more detail
         final_pos = self.rotator.get_position()
-        logger.warning(f"Move timeout: target={target_position:.3f}°, achieved={final_pos:.3f}°")
+        actual_moved = abs(final_pos - current_pos_start)
+        logger.warning(f"Move timeout: target={target_position:.3f}°, start={current_pos_start:.3f}°, "
+                      f"final={final_pos:.3f}°, moved={actual_moved:.3f}° in {timeout_duration:.1f}s")
         return False
         
     except Exception as e:
