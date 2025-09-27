@@ -1,38 +1,33 @@
-def ensure_telescope_tracking(telescope_driver, check_interval=0.5):
-    import threading
-    import time
-    
-    # Use a threading.Event for clean shutdown signaling
-    stop_event = threading.Event()
-    
-    def tracking_monitor():
-        logger = logging.getLogger('tracking_monitor')
-        while not stop_event.is_set():
-            try:
-                if telescope_driver and telescope_driver.is_connected():
-                    if hasattr(telescope_driver.telescope, 'Tracking'):
-                        if not telescope_driver.telescope.Tracking:
-                            logger.warning("Telescope tracking disabled - re-enabling")
-                            telescope_driver.telescope.Tracking = True
-                            time.sleep(0.5)
-                            if telescope_driver.telescope.Tracking:
-                                logger.info("Telescope tracking successfully re-enabled")
-                            else:
-                                logger.error("Failed to re-enable telescope tracking")
-                        # else:
-                        #     logger.debug("Telescope tracking OK")
+def _execute_tracking_move(self, target_position: float) -> bool:
+    """Execute a tracking move with position-based completion"""
+    try:
+        # Start the move
+        self.rotator.rotator.MoveAbsolute(target_position)
+        
+        # Wait for position to stabilize near target
+        timeout_start = time.time()
+        timeout_duration = 10.0
+        position_tolerance = 0.01  # 0.01° tolerance
+        
+        while time.time() - timeout_start < timeout_duration:
+            current_pos = self.rotator.get_position()
+            if abs(current_pos - target_position) <= position_tolerance:
+                # Position reached, wait a bit more for stabilization
+                time.sleep(0.1)
                 
-                # Use stop_event.wait() instead of time.sleep() for responsive shutdown
-                if stop_event.wait(timeout=check_interval):
-                    break  # stop_event was set, exit cleanly
+                # Apply settle time after movement completes
+                settle_time = self.fr_config['tracking']['settle_time_sec']
+                if settle_time > 0:
+                    time.sleep(settle_time)
                     
-            except Exception as e:
-                logger.error(f"Tracking monitor error: {e}")
-                if stop_event.wait(timeout=check_interval):
-                    break
-    
-    tracking_thread = threading.Thread(target=tracking_monitor, daemon=True)
-    tracking_thread.start()
-    
-    # Return both thread and stop_event so caller can shut it down properly
-    return tracking_thread, stop_event
+                return True
+            time.sleep(0.05)  # Check every 50ms
+        
+        # Timeout - log the failure
+        final_pos = self.rotator.get_position()
+        logger.warning(f"Move timeout: target={target_position:.3f}°, achieved={final_pos:.3f}°")
+        return False
+        
+    except Exception as e:
+        logger.error(f"Tracking move execution failed: {e}")
+        return False
