@@ -1,96 +1,26 @@
-# Add this function after the setup_logging function:
-
-def wait_for_observing_conditions(target_info, obs_checker, ignore_twilight=False, poll_interval=60.0):
-    """Simple waiting function for observing conditions"""
-    logger = logging.getLogger(__name__)
+def tracking_monitor():
+        logger = logging.getLogger('tracking_monitor')
+        while getattr(tracking_monitor, 'running', True):
+            try:
+                if telescope_driver and telescope_driver.is_connected():
+                    if hasattr(telescope_driver.telescope, 'Tracking'):
+                        if not telescope_driver.telescope.Tracking:
+                            logger.warning("Telescope tracking disabled - re-enabling")
+                            telescope_driver.telescope.Tracking = True
+                            time.sleep(0.5)
+                            if telescope_driver.telescope.Tracking:
+                                logger.info("Telescope tracking successfully re-enabled")
+                            else:
+                                logger.error("Failed to re-enable telescope tracking")
+                        # else:
+                        #     logger.debug("Telescope tracking OK")
+                time.sleep(check_interval)
+            except Exception as e:
+                logger.error(f"Tracking monitor error: {e}")
+                time.sleep(check_interval)
     
-    if ignore_twilight:
-        logger.info("Twilight checks disabled - proceeding immediately")
-        return True
+    tracking_thread = threading.Thread(target=tracking_monitor, daemon=True)
+    tracking_thread.start()
+    tracking_monitor.running = True
     
-    logger.info("="*60)
-    logger.info("WAITING FOR OBSERVING CONDITIONS")
-    logger.info("="*60)
-    logger.info(f"Target: {target_info.tic_id}")
-    logger.info(f"Coordinates: RA={target_info.ra_j2000_hours:.6f}h, Dec={target_info.dec_j2000_deg:.6f}°")
-    
-    start_time = datetime.now(timezone.utc)
-    max_wait_hours = 16  # Don't wait more than 16 hours
-    
-    while (datetime.now(timezone.utc) - start_time).total_seconds() < (max_wait_hours * 3600):
-        try:
-            obs_status = obs_checker.check_target_observability(
-                target_info.ra_j2000_hours,
-                target_info.dec_j2000_deg,
-                ignore_twilight=False
-            )
-            
-            if obs_status.observable:
-                logger.info("="*60)
-                logger.info("OBSERVING CONDITIONS MET - PROCEEDING")
-                logger.info("="*60)
-                return True
-            
-            # Show current status
-            logger.info(f"Sun: {obs_status.sun_altitude:.1f}°, Target: {obs_status.target_altitude:.1f}°")
-            logger.info(f"Waiting reasons: {'; '.join(obs_status.reasons)}")
-            
-            # Check if we're in a hopeless situation
-            if (obs_status.sun_altitude < -10 and obs_status.target_altitude < 0):
-                elapsed_hours = (datetime.now(timezone.utc) - start_time).total_seconds() / 3600
-                if elapsed_hours > 2:
-                    logger.warning("Target remains below horizon well into night")
-                    logger.warning("Target likely not observable tonight - consider different target")
-                    return False
-            
-            logger.info(f"Next check in {poll_interval/60:.1f} minutes...")
-            
-        except Exception as e:
-            logger.warning(f"Error checking observing conditions: {e}")
-            logger.info(f"Retrying in {poll_interval} seconds...")
-        
-        time.sleep(poll_interval)
-    
-    logger.error(f"Timeout after {max_wait_hours} hours - giving up")
-    return False
-
-
-# Then REPLACE the existing observability check section (around lines 200-250) with:
-
-        logger.info("Checking target observability...")
-        try:
-            observatory_config = config_loader.get_config('observatory')
-            checker = ObservabilityChecker(observatory_config)
-            obs_status = checker.check_target_observability(
-                target_info.ra_j2000_hours,
-                target_info.dec_j2000_deg,
-                ignore_twilight=args.ignore_twilight
-            )
-        
-            logger.info(f"Current target altitude: {obs_status.target_altitude:.1f}°")
-            logger.info(f"Current sun altitude: {obs_status.sun_altitude:.1f}°")
-            if obs_status.airmass:
-                logger.debug(f"Airmass: {obs_status.airmass:.2f}")
-                
-            # If immediately observable, great
-            if obs_status.observable:
-                logger.info("Target is immediately observable")
-            else:
-                # Show what conditions are not met
-                logger.info("Current observability status:")
-                for reason in obs_status.reasons:
-                    logger.info(f"  {reason}")
-                
-                # If dry run, continue regardless
-                if args.dry_run:
-                    logger.warning("Target not currently observable, but continuing with dry run")
-                else:
-                    # Wait for conditions
-                    logger.info("Waiting for observing conditions...")
-                    if not wait_for_observing_conditions(target_info, checker, args.ignore_twilight):
-                        logger.error("Target will not be observable - aborting")
-                        return 1
-                
-        except ObservabilityError as e:
-            logger.error(f"Observability check error: {e}")
-            return 1
+    return tracking_thread
