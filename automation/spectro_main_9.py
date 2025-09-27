@@ -23,6 +23,44 @@ from autopho.imaging.session import ImagingSession, ImagingSessionError, Session
 
 logger = logging.getLogger(__name__)
 
+def ensure_telescope_tracking(telescope_driver, check_interval=0.5):
+    import threading
+    import time
+    
+    # Use a threading.Event for clean shutdown signaling
+    stop_event = threading.Event()
+    
+    def tracking_monitor():
+        logger = logging.getLogger('tracking_monitor')
+        while not stop_event.is_set():
+            try:
+                if telescope_driver and telescope_driver.is_connected():
+                    if hasattr(telescope_driver.telescope, 'Tracking'):
+                        if not telescope_driver.telescope.Tracking:
+                            logger.warning("Telescope tracking disabled - re-enabling")
+                            telescope_driver.telescope.Tracking = True
+                            time.sleep(0.5)
+                            if telescope_driver.telescope.Tracking:
+                                logger.info("Telescope tracking successfully re-enabled")
+                            else:
+                                logger.error("Failed to re-enable telescope tracking")
+                        # else:
+                        #     logger.debug("Telescope tracking OK")
+                
+                # Use stop_event.wait() instead of time.sleep() for responsive shutdown
+                if stop_event.wait(timeout=check_interval):
+                    break  # stop_event was set, exit cleanly
+                    
+            except Exception as e:
+                logger.error(f"Tracking monitor error: {e}")
+                if stop_event.wait(timeout=check_interval):
+                    break
+    
+    tracking_thread = threading.Thread(target=tracking_monitor, daemon=True)
+    tracking_thread.start()
+    
+    # Return both thread and stop_event so caller can shut it down properly
+    return tracking_thread, stop_event
 
 def setup_logging(log_level: str, log_dir: Path, log_name: str = None):
     numeric_level = getattr(logging, log_level.upper(), None)
@@ -1265,7 +1303,8 @@ def main():
             
             logger.info(f"Telescope connected: RA={tel_info.get('ra_hours', 0):.6f} h, Dec={tel_info.get('dec_degrees', 0):.6f}°")
 
-            
+            logger.info("Starting telescope tracking monitor...")
+            tracking_thread, tracking_stop_event = ensure_telescope_tracking(telescope_driver, check_interval=0.5)
 
             # Initialize spectroscopy platesolve corrector (no rotator)
             logger.info("Initializing platesolve corrector for spectroscopy...")
@@ -1430,7 +1469,14 @@ def main():
         except Exception as e:
             logger.error(f"Cover cleanup error: {e}")
         
+        
         try:
+            if 'tracking_thread' in locals():
+                logger.info("Stopping telescope tracking monitor...")
+                tracking_stop_event.set()
+                tracking_thread.join(timeout=2.0)
+                if tracking_thread.is_alive():
+                    logger.warning("Tracking monitor did not shut down cleanly")
             if telescope_driver:
                 logger.info("Parking telescope...")
                 telescope_driver.park()
