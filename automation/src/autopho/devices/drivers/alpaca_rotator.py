@@ -407,32 +407,26 @@ class AlpacaRotatorDriver:
             return self.field_tracker.check_wrap_needed()
         return False
     
-    def tracking_notify_exposure_start(self):
-        if hasattr(self, 'field_tracker'):
-            self.field_tracker.notify_exposure_start()
+    # def tracking_notify_exposure_start(self):
+    #     if hasattr(self, 'field_tracker'):
+    #         self.field_tracker.notify_exposure_start()
 
-    def tracking_notify_exposure_end(self):
-        if hasattr(self, 'field_tracker'):
-            self.field_tracker.notify_exposure_end()
+    # def tracking_notify_exposure_end(self):
+    #     if hasattr(self, 'field_tracker'):
+    #         self.field_tracker.notify_exposure_end()
     
         
 
 class FieldRotationTracker:
-
-    """Continuous field rotation tracking during exposures"""
-
-    
+    """Continuous field rotation tracking with immediate 180° flip capability"""
 
     def __init__(self, rotator_driver, observatory_config, field_rotation_config):
-
         self.rotator = rotator_driver
         self.obs_config = observatory_config
         self.fr_config = field_rotation_config
         self._cooldown_until = 0.0
 
-
         # Observatory location
-
         self.location = EarthLocation(
             lat=observatory_config['latitude'] * u.deg,
             lon=observatory_config['longitude'] * u.deg,
@@ -443,7 +437,6 @@ class FieldRotationTracker:
         self.observer = Observer(location=self.location)
         
         # Tracking state
-
         self.target_coord = None  # J2000 SkyCoord
         self.reference_pa = None  # Fixed detector PA
         self.is_tracking = False
@@ -451,15 +444,10 @@ class FieldRotationTracker:
         self.stop_event = threading.Event()
 
         # Calibration parameters
-
         self.rotator_sign = field_rotation_config['calibration']['rotator_sign']
         self.mechanical_zero = field_rotation_config['calibration']['mechanical_zero_deg']
-        
-        self.in_exposure = False
-        self.pending_flip = False
 
         logger.debug("FieldRotationTracker initialized")
-
 
     def set_target(self, ra_hours, dec_deg, reference_pa_deg=None):
         """Set target coordinates and (if not supplied) freeze the current view as reference PA."""
@@ -484,9 +472,6 @@ class FieldRotationTracker:
 
         logger.debug(f"Tracking target set: RA={ra_hours:.4f} h Dec={dec_deg:.4f}°")
 
-
-    
-
     def calculate_required_pa(self, obs_time=None):
         """Calculate sky PA that keeps detector fixed to the frozen reference."""
         if not self.target_coord:
@@ -508,73 +493,37 @@ class FieldRotationTracker:
         # Hold frozen ref forever: desired sky PA = ref - q(now)
         return self.reference_pa - q
 
-
-
     def pa_to_rotator_position(self, sky_pa_deg):
-
         """Convert sky PA to rotator mechanical position"""
-
         return self.rotator_sign * (sky_pa_deg + self.mechanical_zero)
 
-
     def check_wrap_needed(self):
-        """Check if rotator will hit limits soon - with proper logic"""
+        """Check if immediate 180° flip is needed"""
         if not self.fr_config['wrap_management']['enabled']:
-            return False      
+            return False
+            
+        # Don't trigger flip if we're in cooldown (already flipping or just finished)
+        import time as _t
+        if _t.time() < getattr(self, "_cooldown_until", 0.0):
+            return False
 
         current_pos = self.rotator.get_position()
         margin = self.fr_config['wrap_management']['flip_margin_deg']
         
-        # Simple, reliable check: are we actually near a mechanical limit?
+        # Simple proximity check - flip if we're within margin of either limit
         near_min_limit = current_pos < (self.rotator.min_limit + margin)
         near_max_limit = current_pos > (self.rotator.max_limit - margin)
         
         if near_min_limit or near_max_limit:
-            logger.info(f"[wrap-check] Near limit: pos={current_pos:.1f}°, "
-                    f"limits={self.rotator.min_limit:.1f}°-{self.rotator.max_limit:.1f}°, "
-                    f"margin={margin:.1f}°")
+            logger.info(f"[wrap-check] Immediate flip needed: pos={current_pos:.1f}°, "
+                       f"limits=[{self.rotator.min_limit:.1f}°, {self.rotator.max_limit:.1f}°], "
+                       f"margin={margin:.1f}°")
             return True
             
-        # Additional check: look ahead only if we're rotating in a problematic direction
-        lookahead_min = self.fr_config['wrap_management']['lookahead_minutes']
-        current_time = Time.now()
-        future_time = current_time + lookahead_min * u.minute
-        
-        current_pa = self.calculate_required_pa(current_time)
-        future_pa = self.calculate_required_pa(future_time)
-        
-        if current_pa is None or future_pa is None:
-            return False
-            
-        current_calc_pos = self.pa_to_rotator_position(current_pa)
-        future_calc_pos = self.pa_to_rotator_position(future_pa)
-        
-        # Calculate rotation direction and rate
-        pa_rate = (future_pa - current_pa) / lookahead_min  # degrees per minute
-        
-        # Only trigger if we're rotating toward a limit AND will hit it soon
-        if pa_rate > 0.1:  # Rotating toward higher angles
-            time_to_max = (self.rotator.max_limit - margin - current_pos) / pa_rate
-            if 0 < time_to_max < lookahead_min * 2:  # Will hit limit soon
-                logger.info(f"[wrap-check] Future limit approach: rate={pa_rate:.2f}°/min, "
-                        f"time_to_limit={time_to_max:.1f}min")
-                return True
-                
-        elif pa_rate < -0.1:  # Rotating toward lower angles
-            time_to_min = (current_pos - self.rotator.min_limit - margin) / (-pa_rate)
-            if 0 < time_to_min < lookahead_min * 2:  # Will hit limit soon
-                logger.info(f"[wrap-check] Future limit approach: rate={pa_rate:.2f}°/min, "
-                        f"time_to_limit={time_to_min:.1f}min")
-                return True
-        
         return False
 
-    
-
     def start_tracking(self):
-
         """Start continuous tracking thread"""
-
         if self.is_tracking:
             return
 
@@ -584,25 +533,18 @@ class FieldRotationTracker:
         self.tracking_thread.start()
         logger.info("Field rotation tracking started")
 
-    
-
     def stop_tracking(self):
-
         """Stop tracking thread"""
-
         self.stop_event.set()
         if self.tracking_thread:
             self.tracking_thread.join(timeout=2.0)
         self.is_tracking = False
         logger.info("Field rotation tracking stopped")
 
-    
-
     def _tracking_loop(self):
-        """Main tracking loop - runs during exposures only"""
+        """Main tracking loop with immediate flip capability"""
         update_rate = self.fr_config['tracking']['update_rate_hz']
         move_threshold = self.fr_config['tracking']['move_threshold_deg']
-        settle_time = self.fr_config['tracking']['settle_time_sec']
         sleep_interval = 1.0 / update_rate
 
         import time as _t
@@ -613,7 +555,7 @@ class FieldRotationTracker:
                     time.sleep(sleep_interval)
                     continue
 
-                # Skip if we're in cooldown period
+                # Skip if we're in cooldown period (after flip or regular move)
                 if _t.time() < getattr(self, "_cooldown_until", 0.0):
                     time.sleep(sleep_interval)
                     continue
@@ -623,7 +565,17 @@ class FieldRotationTracker:
                     time.sleep(sleep_interval)
                     continue
 
-                # Calculate required position
+                # Check for immediate flip need FIRST
+                if self.check_wrap_needed():
+                    logger.info("[field-rot] Executing immediate 180° flip")
+                    success = self._execute_180_flip()
+                    if success:
+                        logger.info("[field-rot] Flip completed, resuming normal tracking")
+                    else:
+                        logger.error("[field-rot] Flip failed, will retry next cycle")
+                    continue  # Skip normal tracking this cycle
+
+                # Normal tracking logic
                 required_pa = self.calculate_required_pa()
                 if required_pa is None:
                     time.sleep(sleep_interval)
@@ -647,35 +599,6 @@ class FieldRotationTracker:
                 if abs(error) > move_threshold and abs(error) < 15.0:
                     logger.debug(f"err={error:.6f}°, thr={move_threshold}°, req_pos={required_position:.6f}°")
 
-                # Check for wrap management
-                if self.check_wrap_needed():
-                    if self.in_exposure:
-                        self.pending_flip = True
-                        logger.info("[field-rot] deferring 180° flip until exposure end")
-                    else:
-                        # Execute flip with proper safety checks
-                        current_pos = self.rotator.get_position()
-                        margin = self.fr_config['wrap_management']['flip_margin_deg']
-                        
-                        actually_near_limit = (
-                            current_pos < (self.rotator.min_limit + margin) or 
-                            current_pos > (self.rotator.max_limit - margin)
-                        )
-                        
-                        if actually_near_limit:
-                            logger.info(f"[field-rot] executing flip - at {current_pos:.6f}°")
-                            self.reference_pa = (self.reference_pa + 180.0) % 360.0
-                            # Recalculate after flip
-                            required_pa = self.calculate_required_pa()
-                            required_position = self.pa_to_rotator_position(required_pa)
-                            raw_error = required_position - current_position
-                            if raw_error > 180:
-                                error = raw_error - 360
-                            elif raw_error < -180:
-                                error = raw_error + 360
-                            else:
-                                error = raw_error
-
                 # Only move if error exceeds threshold and error is reasonable
                 if abs(error) > move_threshold and abs(error) < 20.0:
                     target_position = current_position + error
@@ -685,13 +608,12 @@ class FieldRotationTracker:
                     if is_safe:
                         logger.debug(f"Moving rotator: {current_position:.6f}° → {target_position:.6f}° (Δ={error:+.6f}°)")
                         
-                        # Use the proper move method that waits for completion
+                        # Use the existing position-based move method
                         success = self._execute_tracking_move(target_position)
                         
                         if success:
-                            # Set cooldown to prevent immediate re-commanding
-                            # Make it longer to account for rotator settling
-                            cooldown_time = max(1.0, settle_time * 2)  # At least 1 second
+                            # Set minimal cooldown to prevent immediate re-commanding
+                            cooldown_time = 0.5  # Short cooldown for normal moves
                             self._cooldown_until = _t.time() + cooldown_time
                         else:
                             logger.warning("Tracking move failed, will retry next cycle")
@@ -707,23 +629,132 @@ class FieldRotationTracker:
 
             time.sleep(sleep_interval)
 
+    def _execute_180_flip(self) -> bool:
+        """Execute an immediate 180° flip with atomic PA update and position move"""
+        try:
+            import time as _t
+            
+            # 1. Set extended cooldown to pause normal tracking during flip
+            flip_duration_estimate = 60.0  # Conservative estimate for 180° move + settling
+            self._cooldown_until = _t.time() + flip_duration_estimate
+            
+            # 2. Get current state
+            current_pos = self.rotator.get_position()
+            current_pa = self.calculate_required_pa()
+            
+            if current_pa is None:
+                logger.error("[field-rot] Cannot calculate PA for flip")
+                return False
+            
+            logger.info(f"[field-rot] Starting 180° flip from pos={current_pos:.3f}°, pa={current_pa:.3f}°")
+            
+            # 3. Update reference PA (this changes all future calculations)
+            old_reference_pa = self.reference_pa
+            self.reference_pa = (self.reference_pa + 180.0) % 360.0
+            
+            # 4. Calculate new target position based on updated reference
+            new_target_pa = self.calculate_required_pa()
+            new_target_pos = self.pa_to_rotator_position(new_target_pa)
+            
+            logger.info(f"[field-rot] Flip: ref_pa {old_reference_pa:.3f}° → {self.reference_pa:.3f}°")
+            logger.info(f"[field-rot] Moving to pos={new_target_pos:.3f}° (pa={new_target_pa:.3f}°)")
+            
+            # 5. Execute the physical move
+            success = self._execute_flip_move(new_target_pos)
+            
+            if success:
+                final_pos = self.rotator.get_position()
+                logger.info(f"[field-rot] 180° flip complete: {current_pos:.3f}° → {final_pos:.3f}°")
+                
+                # Set shorter cooldown for normal tracking to resume
+                self._cooldown_until = _t.time() + 2.0  # Brief settle period
+            else:
+                # Revert reference_pa on failure to prevent system getting stuck
+                self.reference_pa = old_reference_pa
+                logger.error("[field-rot] Flip failed, reverted reference PA")
+                
+            return success
+            
+        except Exception as e:
+            logger.error(f"[field-rot] Flip execution error: {e}")
+            return False
 
-    def _execute_tracking_move(self, target_position: float) -> bool:
-        """Execute a tracking move with position-based completion"""
+    def _execute_flip_move(self, target_position: float) -> bool:
+        """Execute 180° flip move with position-based completion checking"""
         try:
             current_pos_start = self.rotator.get_position()
             move_distance = abs(target_position - current_pos_start)
             
+            # Use extended timeout for large moves (180° flips)
+            if move_distance > 120.0:  # Definitely a flip move
+                timeout_duration = self.fr_config['wrap_management'].get('flip_timeout_duration', 45.0)  # timeout for 180° move
+                position_tolerance = 1.0  # Looser tolerance for big moves
+            else:
+                # Fallback for smaller moves
+                timeout_duration = max(15.0, move_distance / 2.0 + 5.0)
+                position_tolerance = 0.2
+            
+            logger.info(f"[field-rot] Flip move: {move_distance:.1f}° in max {timeout_duration:.0f}s")
+            
             # Start the move
             self.rotator.rotator.MoveAbsolute(target_position)
             
+            # Wait for completion using position-based checking
+            timeout_start = time.time()
+            last_progress_log = timeout_start
+            
+            while time.time() - timeout_start < timeout_duration:
+                current_pos = self.rotator.get_position()
+                
+                # Check if we've reached target within tolerance
+                if abs(current_pos - target_position) <= position_tolerance:
+                    logger.debug(f"[field-rot] Flip move reached target: {current_pos:.3f}°")
+                    
+                    # Brief settling period for large moves
+                    time.sleep(1.0)
+                    
+                    final_pos = self.rotator.get_position()
+                    logger.debug(f"[field-rot] Flip move complete: {current_pos_start:.3f}° → {final_pos:.3f}°")
+                    return True
+                
+                # Progress logging every 10 seconds to avoid spam
+                current_time = time.time()
+                if current_time - last_progress_log > 10.0:
+                    remaining_distance = abs(target_position - current_pos)
+                    logger.debug(f"[field-rot] Flip progress: at {current_pos:.3f}°, {remaining_distance:.1f}° to go")
+                    last_progress_log = current_time
+                
+                time.sleep(0.5)  # Check every 500ms
+            
+            # Timeout occurred
+            final_pos = self.rotator.get_position()
+            distance_moved = abs(final_pos - current_pos_start)
+            remaining_distance = abs(target_position - final_pos)
+            
+            logger.error(f"[field-rot] Flip timeout after {timeout_duration:.0f}s: "
+                        f"moved {distance_moved:.1f}°, {remaining_distance:.1f}° remaining")
+            return False
+            
+        except Exception as e:
+            logger.error(f"[field-rot] Flip move execution failed: {e}")
+            return False
+
+    def _execute_tracking_move(self, target_position: float) -> bool:
+        """Execute a tracking move with position-based completion (unchanged from original)"""
+        try:
+            current_pos_start = self.rotator.get_position()
+            move_distance = abs(target_position - current_pos_start)
+            
             # Calculate reasonable timeout based on move distance
-            # Assume conservative 1°/s + overhead
+            # Assume conservative 2.5°/s + overhead
             min_timeout = 5.0
-            estimated_time = move_distance / 1.0  # Conservative 1°/s estimate
+            estimated_time = move_distance / 2.5  # Conservative 1°/s estimate
             timeout_duration = max(min_timeout, estimated_time + 3.0)
             
             logger.debug(f"Move distance: {move_distance:.3f}°, timeout: {timeout_duration:.1f}s")
+            
+            # Start the move
+            self.rotator.rotator.MoveAbsolute(target_position)
             
             # Wait for position to stabilize near target
             timeout_start = time.time()
@@ -769,18 +800,6 @@ class FieldRotationTracker:
         except Exception as e:
             logger.error(f"Tracking move execution failed: {e}")
             return False
-
-    
-    
-    def notify_exposure_start(self):
-        self.in_exposure = True
-
-    def notify_exposure_end(self):
-        self.in_exposure = False
-        if self.pending_flip:
-            self.reference_pa = (self.reference_pa + 180.0) % 360.0
-            self.pending_flip = False
-            logger.info("[field-rot] executed deferred 180° flip after exposure")
     
     
             
