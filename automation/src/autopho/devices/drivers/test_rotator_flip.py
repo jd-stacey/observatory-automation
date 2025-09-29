@@ -17,7 +17,7 @@ from alpaca_rotator import AlpacaRotatorDriver
 # Setup logging
 logging.basicConfig(
     level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s:%(lineno)d - %(message)s'
+    format='%(asctime)s - %(name)s:%(lineno)d - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 

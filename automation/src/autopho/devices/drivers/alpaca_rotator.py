@@ -694,7 +694,7 @@ class FieldRotationTracker:
                 timeout_duration = max(15.0, move_distance / 2.0 + 5.0)
                 position_tolerance = 0.2
             
-            logger.info(f"[field-rot] Flip move: {move_distance:.1f}° in max {timeout_duration:.0f}s")
+            logger.debug(f"[field-rot] Flip move: {move_distance:.1f}° in max {timeout_duration:.0f}s")
             
             # Start the move
             self.rotator.rotator.MoveAbsolute(target_position)
