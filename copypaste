@@ -1,67 +1,67 @@
-def process_platesolve_data(self, data: Dict[str, Any]) -> Tuple[float, float, float, float]:
-    
+def _check_acquisition_complete(self) -> bool:
+    """Check if acquisition phase should end"""
+    if self.current_phase != SessionPhase.ACQUISITION:
+        return True
+        
+    if not self.corrector:
+        logger.warning("No corrector available, skipping acquisition")
+        return True
+        
+    # Check maximum attempts
+    max_attempts = self.acquisition_config.get('max_attempts', 20)
+    if self.acquisition_count >= max_attempts:
+        logger.warning(f"Maximum acquisition attempts reached ({max_attempts})")
+        return True
+        
+    # Check if we have recent or last known correction data
     try:
-        ra_offset_deg = float(data['ra_offset']["0"])
-        dec_offset_deg = float(data['dec_offset']["0"])
-        rot_offset_deg = float(data['theta_offset']["0"])
-        base_settle_time = float(data['exptime']["0"])
+        correction_status = self.corrector.get_correction_status()
+        threshold = self.acquisition_config.get('max_total_offset_arcsec', 3.0)
         
-        # Check for platesolve failure (exact zeros indicate failed solve)
-        if ra_offset_deg == 0.0 and dec_offset_deg == 0.0:
-            logger.debug("Platesolve failure detected: exact zero offsets - skipping this solve")
-            raise PlatesolveCorrectorError("Platesolve returned zero offsets - solve failed, waiting for next")
+        # Try to get the most recent offset measurement
+        total_offset = None
+        data_source = None
         
-        ra_offset_arcsec = ra_offset_deg * 3600.0
-        dec_offset_arcsec = dec_offset_deg * 3600.0
-        total_offset_arcsec = math.sqrt(ra_offset_arcsec**2 + dec_offset_arcsec**2)
-        
-        logger.debug(f"Raw offsets: RA={ra_offset_arcsec:.2f}\", Dec={dec_offset_arcsec:.2f}\","
-                     f"Rot={rot_offset_deg:.2f}° , Total={total_offset_arcsec:.2f}\"")
-        
-        thresholds = self.platesolve_config.get('correction_thresholds', {})
-        min_threshold = thresholds.get('min_arcsec', 1.0)
-        small_threshold = thresholds.get('small_offset', 1.0)
-        large_threshold = thresholds.get('large_offset', 5.0)
-        
-        if total_offset_arcsec < min_threshold:
-            scale_factor = 0.0
-            settle_time = 2.0
-            logger.debug("Offset below minimum threshold, no correction")
-        elif total_offset_arcsec < small_threshold:
-            scale_factor = 0.0
-            settle_time = base_settle_time * 5.0
-            logger.debug("Small offset, no correction applied")
-        elif total_offset_arcsec > large_threshold:
-            scale_factor = 1.0  # CHANGED from 0.9 - apply full correction
-            settle_time = base_settle_time * 5.0
-            logger.debug("Large offset, full correction applied")
-        else:
-            scale_factor = self.platesolve_config.get('correction_scale_factor', 1.0)
-            settle_time = base_settle_time * 7.0
-            logger.debug("Normal offset, full correction applied")
+        # First priority: fresh platesolve data
+        if correction_status.get('json_file_ready', False):
+            pending_offset = correction_status.get('pending_total_offset_arcsec')
+            pending_ra = correction_status.get('pending_ra_offset_arcsec', 0.0)
+            pending_dec = correction_status.get('pending_dec_offset_arcsec', 0.0)
             
-        ra_offset_deg *= scale_factor
-        dec_offset_deg *= scale_factor
+            # Skip if this is a failed solve (exact zeros)
+            if pending_ra == 0.0 and pending_dec == 0.0:
+                logger.debug("Skipping 0,0 platesolve result (failed solve)")
+                total_offset = None  # Ignore this result
+            else:
+                total_offset = pending_offset
+                data_source = "fresh platesolve"
         
-        if abs(rot_offset_deg) > 5.0:
-            logger.debug(f"Large rotation offset ({rot_offset_deg:.2f}°), setting to 0°")
-            rot_offset_deg = 0.0
+        # Second priority: last known measurement (if recent enough)
+        if total_offset is None and correction_status.get('last_total_offset_arcsec') is not None:
+            measurement_age = correction_status.get('last_measurement_age_seconds')
+            last_ra = correction_status.get('last_ra_offset_arcsec', 0.0)
+            last_dec = correction_status.get('last_dec_offset_arcsec', 0.0)
+            
+            # Skip if cached measurement was also a failed solve
+            if last_ra == 0.0 and last_dec == 0.0:
+                logger.debug("Skipping cached 0,0 measurement (was a failed solve)")
+            elif measurement_age is not None and measurement_age < 300:  # 5 minutes
+                total_offset = correction_status.get('last_total_offset_arcsec')
+                data_source = f"cached ({measurement_age:.0f}s ago)"
+            
+        if total_offset is not None:
+            if total_offset <= threshold:
+                logger.info(f"Target acquired! Total offset: {total_offset:.2f}\" <= {threshold}\" ({data_source})")
+                return True
+            else:
+                logger.debug(f"Still acquiring - offset: {total_offset:.2f}\" > {threshold}\" ({data_source})")
         else:
-            rot_offset_deg *= 0.5       # Scale Factor
-        
-        settle_limits = self.platesolve_config.get('settle_time', {})
-        min_settle = settle_limits.get('min', 10)
-        max_settle = settle_limits.get('max', 140)
-        settle_time = max(min_settle, min(max_settle, settle_time))
-        
-        return ra_offset_deg, dec_offset_deg, rot_offset_deg, settle_time
-    
-    except KeyError as e:
-        logger.error(f"Missing key in platesolve data: {e}")
-        raise PlatesolveCorrectorError(f"Invalid platesolve data format: missing {e}")
-    except (ValueError, TypeError) as e:
-        logger.error(f"Invalid data type in platesolve data: {e}")
-        raise PlatesolveCorrectorError(f"Invalid platesolve data values: {e}")
+            if self.acquisition_count >= 2:
+                logger.debug("No valid platesolve data available, continuing acquisition")
+            else:
+                logger.debug("Waiting for initial platesolve data...")
+                
     except Exception as e:
-        logger.error(f"Error processing platesolve data: {e}")
-        raise PlatesolveCorrectorError(f"Failed to process platesolve data: {e}")
+        logger.warning(f"Could not check acquisition status: {e}")
+        
+    return False
