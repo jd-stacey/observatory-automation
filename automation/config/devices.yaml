@@ -17,7 +17,7 @@ rotator:
     strategy: "midpoint"      # "midpoint" will use (min_deg + max_deg)/2, use "safe_position" to utilize safe_position_deg
     safe_position_deg: 220 #0.0
   limits:
-    warning_margin_deg: 10.0    # when to warn within limits
+    warning_margin_deg: 3.0    # when to warn within limits
     emergency_margin_deg: 1.0   # when to reject within limits
   
 

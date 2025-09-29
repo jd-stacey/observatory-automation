@@ -12,6 +12,11 @@ calibration:
   mechanical_zero_deg: 0        # Sky PA when rotator at mechanical zero
 wrap_management:
   enabled: true
-  lookahead_minutes: 5.0       # How far ahead to check for limits
-  flip_margin_deg: 2.0         # Margin from limits to trigger 180° flip
+  lookahead_minutes: 5.0        # How far ahead to check for limits
+  flip_margin_deg: 1.0          # Margin from limits to trigger 180° flip
+  flip_timeout_duration: 45.0   # Timeout duration in seconds for rotator during 180° flip
                               
+
+
+
+# rotator takes ~45s to move 180° at max speed
