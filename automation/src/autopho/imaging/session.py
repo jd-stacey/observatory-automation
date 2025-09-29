@@ -512,8 +512,8 @@ class ImagingSession:
             phase_prefix = "ACQ" if self.current_phase == SessionPhase.ACQUISITION else "SCI"
             logger.debug(f"{phase_prefix} exposure: {exposure_time} s, binning={binning}, gain={gain}")
             
-            if self.rotator_driver and hasattr(self.rotator_driver, "tracking_notify_exposure_start"):
-                self.rotator_driver.tracking_notify_exposure_start()
+            # if self.rotator_driver and hasattr(self.rotator_driver, "tracking_notify_exposure_start"):
+            #     self.rotator_driver.tracking_notify_exposure_start()
 
             
             image_array = self.main_camera.capture_image(
@@ -523,8 +523,8 @@ class ImagingSession:
                 light=True
             )
             
-            if self.rotator_driver and hasattr(self.rotator_driver, "tracking_notify_exposure_end"):
-                self.rotator_driver.tracking_notify_exposure_end()
+            # if self.rotator_driver and hasattr(self.rotator_driver, "tracking_notify_exposure_end"):
+            #     self.rotator_driver.tracking_notify_exposure_end()
 
             if image_array is None:
                 logger.error("Camera returned no image data")
