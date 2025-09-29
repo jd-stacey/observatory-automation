@@ -2,6 +2,7 @@ import time
 import logging
 from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
+from collections import deque
 
 try:
     from alpaca.camera import Camera
@@ -23,6 +24,7 @@ class CameraDevice:
         self.config = config
         self.role = config.get('role', 'unknown')
         self.connected = False
+        self._stat_history = deque(maxlen=25) # keep last 25 frames data
         
     def connect(self):
         try:
@@ -106,6 +108,24 @@ class CameraDevice:
         except Exception as e:
             logger.error(f"Failed to set ROI and binning: {e}")
             
+    def _rolling_baseline(self):
+        if not self._stat_history:
+            return None
+        return np.mean(self._stat_history)
+    
+    def image_array_stats(self, image_array: np.ndarray) -> dict:
+        """Return summary stats for a captured image array"""
+        stats =  {
+            "min": int(np.min(image_array)),
+            "max": int(np.max(image_array)),
+            "mean": float(np.mean(image_array)),
+            "median": float(np.median(image_array)),
+            "p95": float(np.percentile(image_array, 95)),
+            "std": float(np.std(image_array))
+        }
+        self._stat_history.append(stats["p95"])
+        return stats
+    
     def capture_image(self, exposure_time: float, binning: int = None, gain: int = None, light: bool = True) -> Optional[np.ndarray]:
         if not self.connected:
             raise ConnectionError(f"Camera {self.name} not connected")
@@ -151,9 +171,26 @@ class CameraDevice:
                 
             logger.debug('Exposure complete, reading image...')
             image_array = np.array(cam.ImageArray).transpose()
+            baseline = self._rolling_baseline()
+            stats = self.image_array_stats(image_array)
+            # Print image ADU stats to log/console
+            drop_info = ""
+            if baseline:
+                drop_ratio = stats["p95"] / baseline
+                drop_info = f", drop vs baseline: {drop_ratio:.2f} x"
             
-            logger.info(f"Image captured: {image_array.shape[1]}x{image_array.shape[0]}, "
-                        f"range: {np.min(image_array)}-{np.max(image_array)}")
+            logger.info(
+                f"Image captured: {image_array.shape[1]}x{image_array.shape[0]}, "
+                f"    range: {stats['min']}-{stats['max']}, "
+                f"    mean: {stats['mean']:.1f}, median: {stats['median']:.1f}, "
+                f"    p95: {stats['p95']:.1f}, std: {stats['std']:.1f}{drop_info}"
+            )
+            
+            if baseline and drop_ratio < 0.4:
+                logger.warning(f"    Significant drop detected - possible dome closure or heavy clouds")
+            
+            # logger.info(f"Image captured: {image_array.shape[1]}x{image_array.shape[0]}, "
+            #             f"range: {np.min(image_array)}-{np.max(image_array)}")
             
             return image_array
         except Exception as e:
