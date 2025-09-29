@@ -6,3 +6,5 @@ timezone: "Australia/Brisbane"
 min_altitude: 30.0
 twilight_altitude: -12.0
 
+#dome_closure_statuses: ['weather_danger_closing', 'closing_both_panels', 'close_requested_left',
+# 'close_requested_right', 'close_requested', 'closed']
