@@ -178,14 +178,12 @@ class CameraDevice:
             if baseline:
                 drop_ratio = stats["p95"] / baseline
                 drop_info = f", drop vs baseline: {drop_ratio:.2f} x"
-            
             logger.info(
                 f"Image captured: {image_array.shape[1]}x{image_array.shape[0]}, "
                 f"    range: {stats['min']}-{stats['max']}, "
                 f"    mean: {stats['mean']:.1f}, median: {stats['median']:.1f}, "
                 f"    p95: {stats['p95']:.1f}, std: {stats['std']:.1f}{drop_info}"
             )
-            
             if baseline and drop_ratio < 0.4:
                 logger.warning(f"    Significant drop detected - possible dome closure or heavy clouds")
             
