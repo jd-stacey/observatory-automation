@@ -85,7 +85,7 @@ def setup_logging(log_level: str, log_dir: Path, log_name: str = None):
     
     file_handler = logging.FileHandler(logfile, encoding="utf-8")
     file_handler.setFormatter(logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        "%(asctime)s - %(name)s - %(levelname)s:%(lineno)d - %(message)s",
         datefmt="[%Y-%m-%d %H:%M:%S]"
     ))
     file_handler.setLevel(logging.DEBUG)
@@ -109,7 +109,7 @@ def wait_for_observing_conditions(target_info, obs_checker, ignore_twilight=Fals
     logger.info("WAITING FOR OBSERVING CONDITIONS")
     logger.info("="*60)
     logger.info(f"Target: {target_info.tic_id}")
-    logger.info(f"Coordinates: RA={target_info.ra_j2000_hours:.6f}h, Dec={target_info.dec_j2000_deg:.6f}°")
+    logger.info(f"Coordinates: RA={target_info.ra_j2000_hours:.6f} h, Dec={target_info.dec_j2000_deg:.6f}°")
     
     start_time = datetime.now(timezone.utc)
     max_wait_hours = 16  # Don't wait more than 16 hours
