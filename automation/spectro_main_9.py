@@ -107,15 +107,79 @@ class TelescopeMirror:
         self.last_timestamp = None
         self.last_coordinates = None
         self.failed_targets = set()  # Track targets that failed to avoid retry loops
+        self.script_start_time = time.time()    # Track when script starts
         self.logger = logging.getLogger(__name__)
+        
+        # Define dome closure statuses that should trigger telescope shutdown
+        self.dome_closure_statuses = [
+            'weather_danger_closing', 
+            'closing_both_panels', 
+            'close_requested_left',  
+            'close_requested_right', 
+            'close_requested', 
+            'closed'
+        ]
 
-    def check_for_dome_closure(self) -> bool:
-        # TO DO
-        # Check parsed mirror_json for latest dome instruction
-        # if close or weather or warning or smth - shut up shop
-        # care: timing - old messages - what are all the possible dome messages??
-        # if we are only checking json every 10s - can we miss the closure/status message?
-        pass
+    def check_for_dome_closure(self) -> Tuple[bool, Optional[str]]:
+        """Check if dome closure has been requested/executed on the mirrored telescope"""
+        self.logger.debug(f"=== check_for_dome_closure() called, checking file: {self.mirror_file} ===")
+        
+        try:
+            if not self.mirror_file.exists():
+                self.logger.debug("Mirror file does not exist - no dome closure detected")
+                return False, None
+                
+            # Read the mirror file
+            self.logger.debug("Reading mirror file for dome status...")
+            with open(self.mirror_file, 'r') as f:
+                data = json.load(f)
+            
+            latest_dome = data.get('latest_dome')
+            if not latest_dome:
+                self.logger.debug("No latest_dome found in mirror file")
+                return False, None
+                
+            timestamp_str = latest_dome.get('timestamp')
+            status = latest_dome.get('status')
+            message = latest_dome.get('message', '')
+            
+            if not timestamp_str or not status:
+                self.logger.debug("Missing timestamp or status in latest_dome")
+                return False, None
+            
+            self.logger.debug(f"Found dome status: {status} at {timestamp_str}")
+            
+            # Parse timestamp
+            try:
+                timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                dome_timestamp = timestamp.timestamp()
+            except Exception as e:
+                self.logger.warning(f"Could not parse dome timestamp '{timestamp_str}': {e}")
+                return False, None
+            
+            # Check if dome message is after script start (avoid acting on old messages)
+            if dome_timestamp <= self.script_start_time:
+                self.logger.debug(f"Dome message is older than script start - ignoring")
+                return False, None
+            
+            # Check if status indicates dome closure
+            if status in self.dome_closure_statuses:
+                reason = f"Dome closure detected on mirrored telescope: {status} - {message}"
+                self.logger.warning(reason)
+                return True, reason
+            else:
+                self.logger.debug(f"Dome status '{status}' does not indicate closure")
+                return False, None
+                
+        except json.JSONDecodeError as e:
+            self.logger.debug(f"Invalid JSON in mirror file during dome check: {e}")
+        except FileNotFoundError:
+            self.logger.debug("Mirror file disappeared during dome check")
+        except Exception as e:
+            self.logger.debug(f"Error checking dome status: {e}")
+        
+        # Default to no closure detected on any parsing errors
+        return False, None
     
     def check_for_new_target(self) -> Optional[Dict[str, Any]]:
         """Check for new target - relies on atomic writes from writer"""
@@ -990,7 +1054,19 @@ class SpectroscopySession:
         self.shutdown_reason = None
 
     def check_should_shutdown(self) -> bool:
-        """Check if we should shutdown due to sun rise or other conditions"""
+        """Check if we should shutdown due to sun rise or dome closure conditions"""
+        # First check dome closure if we have mirror monitoring
+        if self.mirror:
+            try:
+                dome_closure, dome_reason = self.mirror.check_for_dome_closure()
+                if dome_closure:
+                    self.shutdown_reason = dome_reason
+                    self.should_shutdown = True
+                    return True
+            except Exception as e:
+                self.logger.warning(f"Error checking dome closure status: {e}")
+                # Continue to other checks on dome check failure
+        
         # If ignore_twilight is set, don't shutdown based on sun altitude
         if self.ignore_twilight:
             return False
@@ -1031,6 +1107,7 @@ class SpectroscopySession:
         self.logger.info("="*60)
         if self.mirror:
             self.logger.info(f"Monitoring mirror file: {self.mirror.mirror_file}")
+            self.logger.info("Dome closure monitoring: ENABLED")
         if self.dry_run:
             self.logger.info("DRY RUN MODE - No telescope movement")
 
@@ -1075,12 +1152,22 @@ class SpectroscopySession:
         
         try:
             while True:
-                # Check for shutdown conditions (sunrise, etc.)
+                # Check for shutdown conditions (dome closure, sunrise, etc.)
                 if self.check_should_shutdown():
                     self.logger.info("="*60)
                     self.logger.info("SHUTDOWN CONDITION DETECTED")
                     self.logger.info(f"Reason: {self.shutdown_reason}")
                     self.logger.info("="*60)
+                    
+                    # If dome closure was detected, immediately abort current exposure
+                    if "dome closure" in self.shutdown_reason.lower():
+                        if self.current_session and self.current_session.is_running():
+                            self.logger.info("Dome closure detected - aborting current exposure immediately")
+                            try:
+                                self.current_session._abort_current_exposure()
+                            except Exception as e:
+                                self.logger.warning(f"Error aborting exposure: {e}")
+                    
                     break
 
                 self.logger.debug(f"Polling for new targets... (poll interval: {poll_interval}s)")
