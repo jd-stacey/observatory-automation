@@ -1,178 +1,283 @@
-#!/usr/bin/env python3
-"""
-Simple test script for rotator flip mechanism
-Run this in the same folder as alpaca_rotator.py
+class TelescopeMirror:
+    """Handles mirroring coordinates from another telescope via JSON file"""
 
-Test procedure:
-1. Run this script
-2. Manually move rotator to ~96° (close to but not triggering flip)
-3. Then move to ~94° or lower to trigger flip mechanism
-4. Observe if 180° flip executes correctly
-"""
-
-import time
-import logging
-from alpaca_rotator import AlpacaRotatorDriver
-
-# Setup logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-def create_test_config():
-    """Create minimal config for testing"""
-    return {
-        'address': '127.0.0.1:11112',
-        'device_number': 0,
-        'mechanical_limits': {
-            'min_deg': 94.0,
-            'max_deg': 320.0
-        },
-        'limits': {
-            'warning_margin_deg': 30.0,
-            'emergency_margin_deg': 10.0
-        },
-        'settle_time': 1.0
-    }
-
-def create_field_rotation_config():
-    """Create minimal field rotation config for testing"""
-    return {
-        'enabled': True,
-        'tracking': {
-            'update_rate_hz': 2.0,
-            'move_threshold_deg': 0.1,
-            'settle_time_sec': 0.1
-        },
-        'calibration': {
-            'rotator_sign': 1,
-            'mechanical_zero_deg': 0.0
-        },
-        'wrap_management': {
-            'enabled': True,
-            'flip_margin_deg': 5.0,  # Trigger flip when within 5° of limits
-            'flip_timeout_duration': 90.0
-        }
-    }
-
-def create_observatory_config():
-    """Create minimal observatory config for testing"""
-    return {
-        'latitude': -31.2733,    # Approximate - adjust for your location
-        'longitude': 149.0417,
-        'altitude': 1000
-    }
-
-def main():
-    logger.info("="*60)
-    logger.info("ROTATOR FLIP MECHANISM TEST")
-    logger.info("="*60)
-    
-    rotator = None
-    try:
-        # Initialize rotator
-        logger.info("Initializing rotator driver...")
-        rotator = AlpacaRotatorDriver()
+    def __init__(self, mirror_file: str):
+        self.mirror_file = Path(mirror_file)
+        self.last_timestamp = None
+        self.last_coordinates = None
+        self.failed_targets = set()  # Track targets that failed to avoid retry loops
+        self.script_start_time = time.time()  # Track when script started
+        self.logger = logging.getLogger(__name__)
         
-        # Connect
-        config = create_test_config()
-        if not rotator.connect(config):
-            logger.error("Failed to connect to rotator")
-            return 1
+        # Define dome closure statuses that should trigger shutdown
+        self.dome_closure_statuses = [
+            'weather_danger_closing', 
+            'closing_both_panels', 
+            'close_requested_left',  
+            'close_requested_right', 
+            'close_requested', 
+            'closed'
+        ]
+
+    def check_for_dome_closure(self) -> Tuple[bool, Optional[str]]:
+        """Check if dome closure has been requested/executed on the mirrored telescope"""
+        self.logger.debug(f"=== check_for_dome_closure() called, checking file: {self.mirror_file} ===")
         
-        # Get initial status
-        info = rotator.get_rotator_info()
-        logger.info(f"Connected: {info['name']}")
-        logger.info(f"Current position: {info['position_deg']:.3f}°")
-        logger.info(f"Limits: {config['mechanical_limits']['min_deg']}° to {config['mechanical_limits']['max_deg']}°")
-        logger.info(f"Flip margin: {create_field_rotation_config()['wrap_management']['flip_margin_deg']}°")
-        
-        # Initialize field rotation for flip testing
-        logger.info("\nInitializing field rotation tracking...")
-        obs_config = create_observatory_config()
-        fr_config = create_field_rotation_config()
-        
-        if rotator.initialize_field_rotation(obs_config, fr_config):
-            logger.info("Field rotation initialized successfully")
+        try:
+            if not self.mirror_file.exists():
+                self.logger.debug("Mirror file does not exist - no dome closure detected")
+                return False, None
+                
+            # Read the mirror file
+            self.logger.debug("Reading mirror file for dome status...")
+            with open(self.mirror_file, 'r') as f:
+                data = json.load(f)
             
-            # Set a dummy target (needed for field rotation calculations)
-            logger.info("Setting dummy target coordinates...")
-            rotator.set_tracking_target(12.0, -30.0)  # 12h RA, -30° Dec
+            latest_dome = data.get('latest_dome')
+            if not latest_dome:
+                self.logger.debug("No latest_dome found in mirror file")
+                return False, None
+                
+            timestamp_str = latest_dome.get('timestamp')
+            status = latest_dome.get('status')
+            message = latest_dome.get('message', '')
             
-            # Start tracking (this will monitor for flip conditions)
-            logger.info("Starting field rotation tracking...")
-            if rotator.start_field_tracking():
-                logger.info("Tracking started - flip monitoring is now active")
+            if not timestamp_str or not status:
+                self.logger.debug("Missing timestamp or status in latest_dome")
+                return False, None
+            
+            self.logger.debug(f"Found dome status: {status} at {timestamp_str}")
+            
+            # Parse timestamp
+            try:
+                timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                dome_timestamp = timestamp.timestamp()
+            except Exception as e:
+                self.logger.warning(f"Could not parse dome timestamp '{timestamp_str}': {e}")
+                return False, None
+            
+            # Check if dome message is after script start (avoid acting on old messages)
+            if dome_timestamp <= self.script_start_time:
+                self.logger.debug(f"Dome message is older than script start - ignoring")
+                return False, None
+            
+            # Check if status indicates dome closure
+            if status in self.dome_closure_statuses:
+                reason = f"Dome closure detected on mirrored telescope: {status} - {message}"
+                self.logger.warning(reason)
+                return True, reason
             else:
-                logger.error("Failed to start tracking")
-                return 1
+                self.logger.debug(f"Dome status '{status}' does not indicate closure")
+                return False, None
+                
+        except json.JSONDecodeError as e:
+            self.logger.debug(f"Invalid JSON in mirror file during dome check: {e}")
+        except FileNotFoundError:
+            self.logger.debug("Mirror file disappeared during dome check")
+        except Exception as e:
+            self.logger.debug(f"Error checking dome status: {e}")
+        
+        # Default to no closure detected on any parsing errors
+        return False, None
+
+    # ... rest of existing methods remain unchanged ...
+
+
+class SpectroscopySession:
+    """Manages spectroscopy sessions with optional mirror support and automatic shutdown"""
+
+    def __init__(self, camera_manager, corrector, config_loader, telescope_driver,
+                 mirror_file: str = None, ignore_twilight: bool = False,
+                 dry_run: bool = False, exposure_override: Optional[float] = None,
+                 duration_override: Optional[float] = None):
+        self.camera_manager = camera_manager
+        self.corrector = corrector
+        self.config_loader = config_loader
+        self.telescope_driver = telescope_driver
+        self.ignore_twilight = ignore_twilight
+        self.dry_run = dry_run
+        self.exposure_override = exposure_override
+        self.duration_override = duration_override
+
+        self.mirror = TelescopeMirror(mirror_file) if mirror_file else None
+        self.current_session = None
+        self.current_target = None
+        self.logger = logging.getLogger(__name__)
+        
+        # Initialize observability checker for target validation AND shutdown checks
+        observatory_config = config_loader.get_config('observatory')
+        self.obs_checker = ObservabilityChecker(observatory_config)
+        
+        # Add shutdown tracking
+        self.should_shutdown = False
+        self.shutdown_reason = None
+
+    def check_should_shutdown(self) -> bool:
+        """Check if we should shutdown due to sun rise or dome closure conditions"""
+        # First check dome closure if we have mirror monitoring
+        if self.mirror:
+            try:
+                dome_closure, dome_reason = self.mirror.check_for_dome_closure()
+                if dome_closure:
+                    self.shutdown_reason = dome_reason
+                    self.should_shutdown = True
+                    return True
+            except Exception as e:
+                self.logger.warning(f"Error checking dome closure status: {e}")
+                # Continue to other checks on dome check failure
+        
+        # If ignore_twilight is set, don't shutdown based on sun altitude
+        if self.ignore_twilight:
+            return False
+            
+        try:
+            # Create a dummy target to check sun conditions - we just need sun altitude
+            # Use current telescope position if available, otherwise use a reference point
+            if self.current_target:
+                ra_hours = self.current_target['ra_hours']
+                dec_deg = self.current_target['dec_deg']
+            else:
+                # Use a reference point (doesn't matter for sun altitude check)
+                ra_hours, dec_deg = 12.0, 0.0
+            
+            obs_status = self.obs_checker.check_target_observability(
+                ra_hours, dec_deg, ignore_twilight=False
+            )
+            
+            # Check if sun is too high (above twilight limit)
+            observatory_config = self.config_loader.get_config('observatory')
+            twilight_limit = observatory_config.get('twilight_altitude', -18.0)
+            
+            if obs_status.sun_altitude > twilight_limit:
+                sun_condition = "daylight" if obs_status.sun_altitude > 0 else "twilight"
+                self.shutdown_reason = f"Sun too high for observations: {obs_status.sun_altitude:.1f}° > {twilight_limit}° ({sun_condition})"
+                self.should_shutdown = True
+                return True
+                
+            return False
+            
+        except Exception as e:
+            self.logger.warning(f"Error checking shutdown conditions: {e}")
+            return False
+
+    def start_monitoring(self, poll_interval: float = 10.0):
+        self.logger.info("="*60)
+        self.logger.info(" "*15+"STARTING SPECTROSCOPY MONITORING")
+        self.logger.info("="*60)
+        if self.mirror:
+            self.logger.info(f"Monitoring mirror file: {self.mirror.mirror_file}")
+            self.logger.info("Dome closure monitoring: ENABLED")
+        if self.dry_run:
+            self.logger.info("DRY RUN MODE - No telescope movement")
+
+        if self.ignore_twilight:
+            self.logger.info("Automatic twilight checks DISABLED due to --ignore-twilight flag")
         else:
-            logger.error("Failed to initialize field rotation")
-            return 1
-        
-        logger.info("\n" + "="*60)
-        logger.info("TEST READY - MANUAL CONTROL PHASE")
-        logger.info("="*60)
-        logger.info("Now manually move the rotator using your usual interface:")
-        logger.info("1. Move to ~96° (should be safe, no flip)")
-        logger.info("2. Then move to ~94° or lower (should trigger flip)")
-        logger.info("3. Watch the logs for flip detection and execution")
-        logger.info("4. Press Ctrl+C when done testing")
-        logger.info("\nCurrent flip trigger zones:")
-        logger.info(f"  Min trigger: < {94 + 5}° = {94 + 5}°")
-        logger.info(f"  Max trigger: > {320 - 5}° = {320 - 5}°")
-        
-        # Monitor loop
-        last_position = None
-        check_interval = 2.0
+            self.logger.info("Automatic shutdown enabled when sun rises")
+            # === WAIT FOR ASTRONOMICAL TWILIGHT BEFORE STARTING ===
+            while True:
+                try:
+                    # Check sun altitude using dummy RA/Dec
+                    obs_status = self.obs_checker.check_target_observability(12.0, 0.0, ignore_twilight=False)
+                    twilight_limit = self.config_loader.get_config("observatory").get("twilight_altitude", -18.0)
+                    if obs_status.sun_altitude <= twilight_limit:
+                        self.logger.info(
+                            f"Sun below twilight limit ({obs_status.sun_altitude:.1f}° <= {twilight_limit}°). Proceeding..."
+                        )
+                        break
+                    else:
+                        self.logger.info(
+                            f"Waiting for astronomical twilight... Sun alt={obs_status.sun_altitude:.1f}° (limit={twilight_limit}°)"
+                        )
+                except Exception as e:
+                    self.logger.warning(f"Twilight wait check failed: {e}")
+                time.sleep(poll_interval)
+
+        # ... rest of start_monitoring method remains unchanged until the main monitoring loop ...
         
         try:
             while True:
-                current_pos = rotator.get_position()
-                
-                # Only log position changes to reduce spam
-                if last_position is None or abs(current_pos - last_position) > 0.5:
-                    status_info = rotator.get_rotator_info()
-                    is_safe, safety_msg = rotator.check_position_safety(current_pos)
+                # Check for shutdown conditions (dome closure, sunrise, etc.)
+                if self.check_should_shutdown():
+                    self.logger.info("="*60)
+                    self.logger.info("SHUTDOWN CONDITION DETECTED")
+                    self.logger.info(f"Reason: {self.shutdown_reason}")
+                    self.logger.info("="*60)
                     
-                    logger.info(f"\nCurrent position: {current_pos:.3f}°")
-                    logger.info(f"Safety status: {safety_msg}")
-                    logger.info(f"Moving: {status_info.get('is_moving', 'unknown')}")
+                    # If dome closure was detected, immediately abort current exposure
+                    if "dome closure" in self.shutdown_reason.lower():
+                        if self.current_session and self.current_session.is_running():
+                            self.logger.info("Dome closure detected - aborting current exposure immediately")
+                            try:
+                                self.current_session._abort_current_exposure()
+                            except Exception as e:
+                                self.logger.warning(f"Error aborting exposure: {e}")
                     
-                    # Check if we're in flip trigger zone
-                    if hasattr(rotator, 'field_tracker'):
-                        wrap_needed = rotator.field_tracker.check_wrap_needed()
-                        logger.info(f"Flip needed: {wrap_needed}")
-                    
-                    last_position = current_pos
-                
-                time.sleep(check_interval)
-                
-        except KeyboardInterrupt:
-            logger.info("\nTest interrupted by user")
-            
-    except Exception as e:
-        logger.error(f"Test failed: {e}")
-        logger.debug("Full traceback:", exc_info=True)
-        return 1
-        
-    finally:
-        if rotator:
-            try:
-                logger.info("Stopping field rotation tracking...")
-                if hasattr(rotator, 'field_tracker'):
-                    rotator.stop_field_tracking()
-                
-                logger.info("Disconnecting rotator...")
-                rotator.disconnect()
-                logger.info("Test cleanup complete")
-            except Exception as e:
-                logger.error(f"Cleanup error: {e}")
-    
-    logger.info("Test completed")
-    return 0
+                    break
 
-if __name__ == '__main__':
-    exit(main())
+                self.logger.debug(f"Polling for new targets... (poll interval: {poll_interval}s)")
+
+                if self.mirror:
+                    new_target = self.mirror.check_for_new_target()
+                    if new_target:
+                        self.logger.info("NEW TARGET DETECTED")
+                        self.logger.info(f"RA={new_target['ra_hours']:.6f} h, Dec={new_target['dec_deg']:.6f}°")
+
+                        # Check observability before attempting to use target
+                        if not self._validate_target_observability(new_target):
+                            self.logger.warning("Target not observable, marking as failed")
+                            self.mirror.mark_target_failed(new_target['target_key'])
+                            continue
+
+                        # Stop current session if running
+                        if self.current_session and self.current_session.is_running():
+                            self.logger.info("Stopping current session...")
+                            try:
+                                self.current_session.stop_session()
+                                time.sleep(2.0)
+                            except Exception as e:
+                                self.logger.warning(f"Error stopping session: {e}")
+                            finally:
+                                self.current_session = None
+                                self.current_target = None
+
+                        # Start new session
+                        if not self._start_new_session(new_target):
+                            self.mirror.mark_target_failed(new_target['target_key'])
+                    else:
+                        self.logger.debug("No new targets found")
+
+                # Clean up finished sessions
+                if self.current_session and not self.current_session.is_running():
+                    self.logger.info("Current session finished")
+                    self.current_session = None
+                    self.current_target = None
+
+                time.sleep(poll_interval)
+
+        except KeyboardInterrupt:
+            self.logger.info("Monitoring interrupted by user")
+            self.shutdown_reason = "User interruption"
+            return
+        except Exception as e:
+            self.logger.error(f"Critical error in monitoring loop: {e}")
+            self.shutdown_reason = f"Critical error: {e}"
+        finally:
+            self.logger.info("="*60)
+            self.logger.info("BEGINNING SHUTDOWN SEQUENCE")
+            if self.shutdown_reason:
+                self.logger.info(f"Shutdown reason: {self.shutdown_reason}")
+            self.logger.info("="*60)
+
+            if self.current_session:
+                try:
+                    self.logger.info("Stopping active imaging session...")
+                    self.current_session.stop_session()
+                except Exception as e:
+                    self.logger.warning(f"Error during session cleanup: {e}")
+                finally:
+                    self.current_session = None
+
+            self.logger.info("Spectroscopy monitoring ended - hardware cleanup will follow")
+
+    # ... rest of existing methods remain unchanged ...
