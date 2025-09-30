@@ -1,7 +1,17 @@
-# Validate frame currency if provided
-if current_frame_path and not self.is_platesolve_current_for_frame(data, current_frame_path):
+current_filename = data.get('fitsname', {}).get("0", "")
+
+# Check sequence to prevent applying old corrections
+current_seq = extract_sequence_from_filename(current_filename)
+if current_seq <= self.last_applied_sequence:
     return CorrectionResult(
         applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
         rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
-        reason="Platesolve is for older frame"
+        reason=f"Already applied correction for sequence {self.last_applied_sequence}"
+    )
+
+if current_filename == self.last_processed_file:
+    return CorrectionResult(
+        applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
+        rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
+        reason="Already processed this solution"
     )
