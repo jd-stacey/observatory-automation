@@ -1,10 +1,7 @@
-if image_filepath and self.corrector:
-    solver_wait_time = self.acquisition_config.get('solver_wait_time', 30.0)
-    logger.debug(f"Spectroscopy mode - waiting up to {solver_wait_time:.1f}s for platesolve correction...")
-    
-    try:
-        # Pass current frame path for validation
-        correction_applied = self.corrector.wait_for_correction_with_timeout(
-            solver_wait_time, 
-            current_frame_path=image_filepath
-        )
+# Validate frame currency if provided
+if current_frame_path and not self.is_platesolve_current_for_frame(data, current_frame_path):
+    return CorrectionResult(
+        applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
+        rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
+        reason="Platesolve is for older frame"
+    )
