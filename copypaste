@@ -1,17 +1,3 @@
-current_filename = data.get('fitsname', {}).get("0", "")
-
-# Check sequence to prevent applying old corrections
-current_seq = extract_sequence_from_filename(current_filename)
-if current_seq <= self.last_applied_sequence:
-    return CorrectionResult(
-        applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
-        rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
-        reason=f"Already applied correction for sequence {self.last_applied_sequence}"
-    )
-
-if current_filename == self.last_processed_file:
-    return CorrectionResult(
-        applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
-        rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
-        reason="Already processed this solution"
-    )
+self.last_processed_file = current_filename
+self.last_applied_sequence = extract_sequence_from_filename(current_filename)
+logger.info(f"Applied correction for sequence {self.last_applied_sequence}")
