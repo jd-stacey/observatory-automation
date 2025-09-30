@@ -1,25 +1,17 @@
-def is_platesolve_current_for_frame(self, data: Dict[str, Any], current_frame_path: str) -> bool:
-    """Check if platesolve is for current frame or later"""
-    try:
-        solved_filename = data.get('fitsname', {}).get("0", "")
-        if not solved_filename:
-            return False
-        
-        current_seq = extract_sequence_from_filename(current_frame_path)
-        solved_seq = extract_sequence_from_filename(solved_filename)
-        
-        if current_seq < 0 or solved_seq < 0:
-            logger.debug("Could not extract sequence numbers")
-            return False
-        
-        # Accept current frame or later
-        if solved_seq >= current_seq:
-            logger.debug(f"Platesolve is current: solved frame {solved_seq} >= current {current_seq}")
-            return True
-        else:
-            logger.debug(f"Platesolve is stale: solved frame {solved_seq} < current {current_seq}")
-            return False
-            
-    except Exception as e:
-        logger.warning(f"Error checking frame currency: {e}")
-        return False
+# Check if we already processed this exact file
+solved_filename = data.get('fitsname', {}).get("0", "")
+if solved_filename == self.last_processed_filename:
+    return CorrectionResult(
+        applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
+        rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
+        reason="Already processed this exact solution"
+    )
+
+# Check sequence number
+solved_seq = extract_sequence_from_filename(solved_filename)
+if solved_seq <= self.last_applied_sequence:
+    return CorrectionResult(
+        applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
+        rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
+        reason=f"Already applied correction for sequence {self.last_applied_sequence}"
+    )
