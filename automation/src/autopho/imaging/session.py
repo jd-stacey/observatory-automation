@@ -339,13 +339,28 @@ class ImagingSession:
             
             # First priority: fresh platesolve data
             if correction_status.get('json_file_ready', False):
-                total_offset = correction_status.get('pending_total_offset_arcsec')
-                data_source = "fresh platesolve"
+                pending_offset = correction_status.get('pending_total_offset_arcsec')
+                pending_ra = correction_status.get('pending_ra_offset_arcsec', 0.0)
+                pending_dec = correction_status.get('pending_dec_offset_arcsec', 0.0)
+                
+                # Skip if this is a failed solve (exact zeros)
+                if pending_ra == 0.0 and pending_dec == 0.0:
+                    logger.debug("Skipping 0,0 platesolve result (failed solve)")
+                    total_offset = None  # Ignore this result
+                else:
+                    total_offset = pending_offset
+                    data_source = "fresh platesolve"
             
             # Second priority: last known measurement (if recent enough)
-            elif correction_status.get('last_total_offset_arcsec') is not None:
+            if total_offset is None and correction_status.get('last_total_offset_arcsec') is not None:
                 measurement_age = correction_status.get('last_measurement_age_seconds')
-                if measurement_age is not None and measurement_age < 300:  # 5 minutes
+                last_ra = correction_status.get('last_ra_offset_arcsec', 0.0)
+                last_dec = correction_status.get('last_dec_offset_arcsec', 0.0)
+                
+                # Skip if cached measurement was also a failed solve
+                if last_ra == 0.0 and last_dec == 0.0:
+                    logger.debug("Skipping cached 0,0 measurement (was a failed solve)")
+                elif measurement_age is not None and measurement_age < 300:  # 5 minutes
                     total_offset = correction_status.get('last_total_offset_arcsec')
                     data_source = f"cached ({measurement_age:.0f}s ago)"
                 
@@ -357,7 +372,7 @@ class ImagingSession:
                     logger.debug(f"Still acquiring - offset: {total_offset:.2f}\" > {threshold}\" ({data_source})")
             else:
                 if self.acquisition_count >= 2:
-                    logger.debug("No recent platesolve data available, continuing acquisition")
+                    logger.debug("No valid platesolve data available, continuing acquisition")
                 else:
                     logger.debug("Waiting for initial platesolve data...")
                     
@@ -621,16 +636,16 @@ class ImagingSession:
                 
         return False
     
-    def _apply_periodic_correction(self) -> bool:
+    def _apply_periodic_correction(self, last_frame_path: str = None) -> bool:
         if not self.corrector:
             return False
         try:
             phase_prefix = "ACQ" if self.current_phase == SessionPhase.ACQUISITION else "SCI"
             logger.debug(f"{phase_prefix} correction check...")
             
-            # During acquisition, use shorter timeout
-            # timeout = 30 if self.current_phase == SessionPhase.ACQUISITION else 60
-            result = self.corrector.apply_single_correction()   #timeout_seconds=timeout
+            # For photometry, we can pass the last frame path for validation
+            # (though less critical than spectroscopy)
+            result = self.corrector.apply_single_correction()
             
             if result.applied:
                 logger.info(f"{phase_prefix} correction applied: {result.reason} "
