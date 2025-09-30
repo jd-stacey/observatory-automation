@@ -1,22 +1,49 @@
-def _apply_periodic_correction(self, last_frame_path: str = None) -> bool:
-    if not self.corrector:
-        return False
-    try:
-        phase_prefix = "ACQ" if self.current_phase == SessionPhase.ACQUISITION else "SCI"
-        logger.debug(f"{phase_prefix} correction check...")
+# Exact zeros indicate platesolve failure
+if ra_offset_deg == 0.0 and dec_offset_deg == 0.0:
+    logger.debug("Detected platesolve failure: exact zero offsets")
+    
+    # Remember this failed filename to prevent re-processing
+    self.last_failed_filename = current_filename
+    
+    # Different handling for science vs acquisition mode
+    if current_phase == "science":
+        # Track consecutive science failures
+        if not hasattr(self, 'science_failure_count'):
+            self.science_failure_count = 0
+        self.science_failure_count += 1
         
-        # For photometry, we can pass the last frame path for validation
-        # (though less critical than spectroscopy)
-        result = self.corrector.apply_single_correction()
-        
-        if result.applied:
-            logger.info(f"{phase_prefix} correction applied: {result.reason} "
-                        f"(Total offset: {result.total_offset_arcsec:.2f}\")")
-            self.last_correction_exposure = self.exposure_count
-            return True
+        threshold = self.spectro_config.get('science_consecutive_failures_before_adaptive', 3)
+        if self.science_failure_count < threshold:
+            logger.info(f"Science platesolve failed ({self.science_failure_count}/{threshold}) - continuing without adaptive exposure")
+            return self.current_exposure_time  # Keep current exposure
         else:
-            logger.debug(f"{phase_prefix} no correction needed: {result.reason}")
-            return False
-    except Exception as e:
-        logger.warning(f"Correction check failed: {e}")
-        return False
+            logger.info(f"Science platesolve failed {self.science_failure_count} times - enabling adaptive exposure")
+            # Fall through to adaptive logic below
+    
+    # Adaptive exposure logic for acquisition or threshold-exceeded science
+    # Initialize retry tracking if needed
+    if not hasattr(self, 'current_exposure_retries'):
+        self.current_exposure_retries = 1
+    else:
+        self.current_exposure_retries += 1
+    
+    max_retries = self.spectro_config.get('retries_per_exposure_level', 2)
+    
+    if self.current_exposure_retries < max_retries:
+        # Stay at current exposure, just retry
+        logger.info(f"Platesolve failed - retry {self.current_exposure_retries}/{max_retries} at {self.current_exposure_time:.1f}s")
+        return self.current_exposure_time
+    else:
+        # Move to next exposure level
+        if self.current_exposure_time < self.max_exposure_time:
+            new_exposure = min(
+                self.current_exposure_time * self.exposure_increase_factor,
+                self.max_exposure_time
+            )
+            self.current_exposure_time = new_exposure
+            self.current_exposure_retries = 1  # Reset retry counter for new exposure level
+            logger.info(f"Increased exposure to {new_exposure:.1f}s after {max_retries} failures at previous level")
+            return new_exposure
+        else:
+            logger.warning(f"Already at maximum exposure time ({self.max_exposure_time}s), retry {self.current_exposure_retries}/{max_retries}")
+            return self.current_exposure_time
