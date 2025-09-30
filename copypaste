@@ -1,3 +1,10 @@
-self.last_processed_filename = data.get('fitsname', {}).get("0", "")
-self.last_applied_sequence = extract_sequence_from_filename(self.last_processed_filename)
-logger.info(f"Applied correction for sequence {self.last_applied_sequence}")
+if image_filepath and self.corrector:
+    solver_wait_time = self.acquisition_config.get('solver_wait_time', 30.0)
+    logger.debug(f"Spectroscopy mode - waiting up to {solver_wait_time:.1f}s for platesolve correction...")
+    
+    try:
+        # Pass current frame path for validation
+        correction_applied = self.corrector.wait_for_correction_with_timeout(
+            solver_wait_time, 
+            current_frame_path=image_filepath
+        )
