@@ -73,7 +73,7 @@ class TICTargetResolver:
             tic_data = self._query_tic_catalog(clean_tic)
             target_info = self._build_target_info(clean_tic, tic_data)
             
-            logger.info(f"Successfully resolved {tic_id}: RA={target_info.ra_j2000_hours:.6f} h, "
+            logger.info(f"Successfully resolved {tic_id}: RA={target_info.ra_j2000_hours:.6f} h ({target_info.ra_j2000_hours*15.0:.6f}°), "
                        f"Dec={target_info.dec_j2000_deg:.6f}°, G={target_info.gaia_g_mag:.2f} "
                        f"(from {target_info.magnitude_source})")
             return target_info
