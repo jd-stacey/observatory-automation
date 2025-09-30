@@ -9,6 +9,13 @@ from datetime import datetime
 
 logger=logging.getLogger(__name__)
 
+def extract_sequence_from_filename(filename: str) -> int:
+    '''Extract sequence number from filename like _00123.fits'''
+    import re
+    match = re.search(r'_(\d+)\.fits', filename)
+    return int(match.group(1)) if match else -1
+
+
 @dataclass
 class CorrectionResult:
     applied: bool
@@ -29,6 +36,7 @@ class PlatesolveCorrector:
         self.telescope_driver = telescope_driver
         self.config_loader = config_loader
         self.last_processed_file = ""
+        self.last_applied_sequence = -1
         self.cumulative_zero_time = 0
         self.rotator_driver = rotator_driver
         
@@ -69,7 +77,7 @@ class PlatesolveCorrector:
             max_age = self.platesolve_config.get('file_max_age_seconds', 200)
             
             if age_seconds > max_age:
-                logger.warning(f"Platesolve JSON file is {age_seconds}s old! (max {max_age} s)")
+                logger.debug(f"Platesolve JSON file is {age_seconds}s old! (max {max_age} s)")
                 return False, None
             
             with open(self.json_file_path, 'r') as f:
@@ -86,19 +94,24 @@ class PlatesolveCorrector:
             return False, None
         
     def process_platesolve_data(self, data: Dict[str, Any]) -> Tuple[float, float, float, float]:
-        
+    
         try:
             ra_offset_deg = float(data['ra_offset']["0"])
             dec_offset_deg = float(data['dec_offset']["0"])
             rot_offset_deg = float(data['theta_offset']["0"])
             base_settle_time = float(data['exptime']["0"])
             
+            # Check for platesolve failure (exact zeros indicate failed solve)
+            if ra_offset_deg == 0.0 and dec_offset_deg == 0.0:
+                logger.debug("Platesolve failure detected: exact zero offsets - skipping this solve")
+                raise PlatesolveCorrectorError("Platesolve returned zero offsets - solve failed, waiting for next")
+            
             ra_offset_arcsec = ra_offset_deg * 3600.0
             dec_offset_arcsec = dec_offset_deg * 3600.0
             total_offset_arcsec = math.sqrt(ra_offset_arcsec**2 + dec_offset_arcsec**2)
             
             logger.debug(f"Raw offsets: RA={ra_offset_arcsec:.2f}\", Dec={dec_offset_arcsec:.2f}\","
-                         f"Rot={rot_offset_deg:.2f}° , Total={total_offset_arcsec:.2f}\"")
+                        f"Rot={rot_offset_deg:.2f}° , Total={total_offset_arcsec:.2f}\"")
             
             thresholds = self.platesolve_config.get('correction_thresholds', {})
             min_threshold = thresholds.get('min_arcsec', 1.0)
@@ -114,9 +127,9 @@ class PlatesolveCorrector:
                 settle_time = base_settle_time * 5.0
                 logger.debug("Small offset, no correction applied")
             elif total_offset_arcsec > large_threshold:
-                scale_factor = 0.9
+                scale_factor = 1.0  # CHANGED from 0.9 - apply full correction
                 settle_time = base_settle_time * 5.0
-                logger.debug("Large offset, reduced correction applied")
+                logger.debug("Large offset, full correction applied")
             else:
                 scale_factor = self.platesolve_config.get('correction_scale_factor', 1.0)
                 settle_time = base_settle_time * 7.0
@@ -200,15 +213,20 @@ class PlatesolveCorrector:
                 )
             
             current_filename = data.get('fitsname', {}).get("0", "")
-            
+
+            # Check sequence to prevent applying old corrections
+            current_seq = extract_sequence_from_filename(current_filename)
+            if current_seq <= self.last_applied_sequence:
+                return CorrectionResult(
+                    applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
+                    rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
+                    reason=f"Already applied correction for sequence {self.last_applied_sequence}"
+                )
+
             if current_filename == self.last_processed_file:
                 return CorrectionResult(
-                    applied=False,
-                    ra_offset_arcsec=0.0,
-                    dec_offset_arcsec=0.0, 
-                    rotation_offset_deg=0.0,
-                    total_offset_arcsec=0.0, 
-                    settle_time=0.0, 
+                    applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
+                    rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
                     reason="Already processed this solution"
                 )
                 
@@ -285,9 +303,8 @@ class PlatesolveCorrector:
             
             if overall_success and corrections_applied:
                 self.last_processed_file = current_filename
-                corrections_text = " and".join(corrections_applied)
-                logger.info(f"Applied {corrections_text} corrections successfully") #, settling for {settle_time} s
-                # time.sleep(settle_time)
+                self.last_applied_sequence = extract_sequence_from_filename(current_filename)
+                logger.info(f"Applied correction for sequence {self.last_applied_sequence}")
                 
                 return CorrectionResult(
                     applied=True, 
