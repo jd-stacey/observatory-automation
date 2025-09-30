@@ -1,17 +1,3 @@
-# Check if we already processed this exact file
-solved_filename = data.get('fitsname', {}).get("0", "")
-if solved_filename == self.last_processed_filename:
-    return CorrectionResult(
-        applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
-        rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
-        reason="Already processed this exact solution"
-    )
-
-# Check sequence number
-solved_seq = extract_sequence_from_filename(solved_filename)
-if solved_seq <= self.last_applied_sequence:
-    return CorrectionResult(
-        applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
-        rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
-        reason=f"Already applied correction for sequence {self.last_applied_sequence}"
-    )
+self.last_processed_filename = data.get('fitsname', {}).get("0", "")
+self.last_applied_sequence = extract_sequence_from_filename(self.last_processed_filename)
+logger.info(f"Applied correction for sequence {self.last_applied_sequence}")
