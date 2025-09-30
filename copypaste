@@ -1,3 +1,22 @@
-self.last_processed_file = current_filename
-self.last_applied_sequence = extract_sequence_from_filename(current_filename)
-logger.info(f"Applied correction for sequence {self.last_applied_sequence}")
+def _apply_periodic_correction(self, last_frame_path: str = None) -> bool:
+    if not self.corrector:
+        return False
+    try:
+        phase_prefix = "ACQ" if self.current_phase == SessionPhase.ACQUISITION else "SCI"
+        logger.debug(f"{phase_prefix} correction check...")
+        
+        # For photometry, we can pass the last frame path for validation
+        # (though less critical than spectroscopy)
+        result = self.corrector.apply_single_correction()
+        
+        if result.applied:
+            logger.info(f"{phase_prefix} correction applied: {result.reason} "
+                        f"(Total offset: {result.total_offset_arcsec:.2f}\")")
+            self.last_correction_exposure = self.exposure_count
+            return True
+        else:
+            logger.debug(f"{phase_prefix} no correction needed: {result.reason}")
+            return False
+    except Exception as e:
+        logger.warning(f"Correction check failed: {e}")
+        return False
