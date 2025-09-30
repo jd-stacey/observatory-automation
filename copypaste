@@ -1,67 +1,25 @@
-def _check_acquisition_complete(self) -> bool:
-    """Check if acquisition phase should end"""
-    if self.current_phase != SessionPhase.ACQUISITION:
-        return True
-        
-    if not self.corrector:
-        logger.warning("No corrector available, skipping acquisition")
-        return True
-        
-    # Check maximum attempts
-    max_attempts = self.acquisition_config.get('max_attempts', 20)
-    if self.acquisition_count >= max_attempts:
-        logger.warning(f"Maximum acquisition attempts reached ({max_attempts})")
-        return True
-        
-    # Check if we have recent or last known correction data
+def is_platesolve_current_for_frame(self, data: Dict[str, Any], current_frame_path: str) -> bool:
+    """Check if platesolve is for current frame or later"""
     try:
-        correction_status = self.corrector.get_correction_status()
-        threshold = self.acquisition_config.get('max_total_offset_arcsec', 3.0)
+        solved_filename = data.get('fitsname', {}).get("0", "")
+        if not solved_filename:
+            return False
         
-        # Try to get the most recent offset measurement
-        total_offset = None
-        data_source = None
+        current_seq = extract_sequence_from_filename(current_frame_path)
+        solved_seq = extract_sequence_from_filename(solved_filename)
         
-        # First priority: fresh platesolve data
-        if correction_status.get('json_file_ready', False):
-            pending_offset = correction_status.get('pending_total_offset_arcsec')
-            pending_ra = correction_status.get('pending_ra_offset_arcsec', 0.0)
-            pending_dec = correction_status.get('pending_dec_offset_arcsec', 0.0)
-            
-            # Skip if this is a failed solve (exact zeros)
-            if pending_ra == 0.0 and pending_dec == 0.0:
-                logger.debug("Skipping 0,0 platesolve result (failed solve)")
-                total_offset = None  # Ignore this result
-            else:
-                total_offset = pending_offset
-                data_source = "fresh platesolve"
+        if current_seq < 0 or solved_seq < 0:
+            logger.debug("Could not extract sequence numbers")
+            return False
         
-        # Second priority: last known measurement (if recent enough)
-        if total_offset is None and correction_status.get('last_total_offset_arcsec') is not None:
-            measurement_age = correction_status.get('last_measurement_age_seconds')
-            last_ra = correction_status.get('last_ra_offset_arcsec', 0.0)
-            last_dec = correction_status.get('last_dec_offset_arcsec', 0.0)
-            
-            # Skip if cached measurement was also a failed solve
-            if last_ra == 0.0 and last_dec == 0.0:
-                logger.debug("Skipping cached 0,0 measurement (was a failed solve)")
-            elif measurement_age is not None and measurement_age < 300:  # 5 minutes
-                total_offset = correction_status.get('last_total_offset_arcsec')
-                data_source = f"cached ({measurement_age:.0f}s ago)"
-            
-        if total_offset is not None:
-            if total_offset <= threshold:
-                logger.info(f"Target acquired! Total offset: {total_offset:.2f}\" <= {threshold}\" ({data_source})")
-                return True
-            else:
-                logger.debug(f"Still acquiring - offset: {total_offset:.2f}\" > {threshold}\" ({data_source})")
+        # Accept current frame or later
+        if solved_seq >= current_seq:
+            logger.debug(f"Platesolve is current: solved frame {solved_seq} >= current {current_seq}")
+            return True
         else:
-            if self.acquisition_count >= 2:
-                logger.debug("No valid platesolve data available, continuing acquisition")
-            else:
-                logger.debug("Waiting for initial platesolve data...")
-                
+            logger.debug(f"Platesolve is stale: solved frame {solved_seq} < current {current_seq}")
+            return False
+            
     except Exception as e:
-        logger.warning(f"Could not check acquisition status: {e}")
-        
-    return False
+        logger.warning(f"Error checking frame currency: {e}")
+        return False
