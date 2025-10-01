@@ -1,3 +1,8 @@
+# In SpectroscopyCorrector.__init__
+def __init__(self, telescope_driver, config_loader):
+    # ... existing init code ...
+    self.last_wait_failed_filename = None  # Track across wait calls
+
 def wait_for_correction_with_timeout(self, timeout_seconds: float, current_frame_path: str = None) -> bool:
     """Wait for platesolve correction with active polling"""
     start_time = time.time()
@@ -7,7 +12,6 @@ def wait_for_correction_with_timeout(self, timeout_seconds: float, current_frame
     
     last_reason = None
     reason_count = 0
-    last_failed_filename = None  # Track which failed solve we've seen
     
     def normalize_reason(reason: str) -> str:
         """Normalize reasons with varying numbers for deduplication"""
@@ -44,9 +48,9 @@ def wait_for_correction_with_timeout(self, timeout_seconds: float, current_frame
             file_ready, data = self.check_json_file_ready()
             current_failed_file = data.get('fitsname', {}).get("0", "") if file_ready else None
             
-            if current_failed_file and current_failed_file != last_failed_filename:
+            if current_failed_file and current_failed_file != self.last_wait_failed_filename:
                 # NEW failed solve - exit early
-                last_failed_filename = current_failed_file
+                self.last_wait_failed_filename = current_failed_file
                 error_msg = str(e)
                 normalized = normalize_reason(error_msg)
                 
@@ -58,7 +62,7 @@ def wait_for_correction_with_timeout(self, timeout_seconds: float, current_frame
                 logger.debug("New platesolve completed (failed) - ending wait early")
                 return False
             else:
-                # Same failed solve, keep waiting
+                # Same failed solve we've already seen, keep waiting
                 normalized = normalize_reason(str(e))
                 if normalized != last_reason:
                     if reason_count > 1:
