@@ -1,44 +1,166 @@
-def is_platesolve_current_for_frame(self, data: Dict[str, Any], current_frame_path: str) -> bool:
-    """Check if platesolve is valid and not yet processed (ignores current frame number)"""
+# Update apply_single_correction() method
+def apply_single_correction(self, timeout_seconds: Optional[float] = None) -> CorrectionResult:
     try:
-        solved_filename = data.get('fitsname', {}).get("0", "")
-        if not solved_filename:
-            return False
-        
-        # Extract basenames for proper comparison
-        solved_basename = Path(solved_filename).name
-        current_basename = Path(current_frame_path).name
-        
-        # Extract target IDs from both filenames
-        import re
-        def extract_target_id(filename):
-            match = re.match(r'^(.+?)_\d{8}_', filename)
-            return match.group(1) if match else None
-        
-        solved_target = extract_target_id(solved_basename)
-        current_target = extract_target_id(current_basename)
-        
-        # Different targets = not current
-        if solved_target != current_target:
-            logger.debug(f"Platesolve is for different target: {solved_target} vs {current_target}")
-            return False
-        
-        # Extract solved sequence number
-        solved_seq = extract_sequence_from_filename(solved_basename)
-        
-        if solved_seq < 0:
-            logger.debug("Could not extract sequence number from platesolve")
-            return False
-        
-        # Check if we've already processed this sequence
-        if solved_seq <= self.last_applied_sequence:
-            logger.debug(f"Platesolve already processed: solved seq {solved_seq} <= last applied {self.last_applied_sequence}")
-            return False
-        
-        # Accept any NEW sequence for the current target (even if older than current frame)
-        logger.debug(f"Platesolve is valid: solved frame {solved_seq} (new, not yet applied)")
-        return True
+        if not self.telescope_driver.is_connected():
+            return CorrectionResult(
+                applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0, 
+                rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0, 
+                reason="Telescope not connected"
+            )
             
+        file_ready, data = self.check_json_file_ready()
+        
+        if not file_ready:
+            if timeout_seconds and timeout_seconds > 0:
+                logger.info(f"Waiting up to {timeout_seconds} s for platesolve data...")
+                start_time = time.time()
+                check_interval = self.platesolve_config.get('check_interval_seconds', 5)
+                
+                while True:
+                    file_ready, data = self.check_json_file_ready()
+                    if file_ready:
+                        break
+                    elapsed = time.time() - start_time
+                    remaining = timeout_seconds - elapsed
+                    if remaining <= 0:
+                        break
+                    logger.debug(f"Waiting for platesolve file... {elapsed:.1f} / {timeout_seconds} s elapsed")
+                    time.sleep(min(check_interval, remaining))
+                    
+            if not file_ready:
+                return CorrectionResult(
+                    applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0, 
+                    rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0, 
+                    reason="No recent platesolve data available"
+                )
+        
+        current_filename = data.get('fitsname', {}).get("0", "")
+        
+        # Check 1: Exact filename match (prevents duplicate processing)
+        if current_filename == self.last_processed_file:
+            return CorrectionResult(
+                applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
+                rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
+                reason="Already processed this solution"
+            )
+        
+        # Check 2: Target ID tracking (reset sequence on target change)
+        current_basename = Path(current_filename).name
+        target_match = re.match(r'^(.+?)_\d{8}_', current_basename)
+        current_target_id = target_match.group(1) if target_match else None
+        
+        # Extract sequence from basename
+        current_seq = extract_sequence_from_filename(current_basename)
+        
+        # If target changed, reset sequence tracking
+        if current_target_id and current_target_id != self.last_target_id:
+            self.last_target_id = current_target_id
+            self.last_applied_sequence = -1
+            logger.info(f"New target detected in platesolve: {current_target_id}")
+        
+        # Check 3: Sequence number (only if same target)
+        if current_target_id and current_target_id == self.last_target_id:
+            if current_seq <= self.last_applied_sequence:
+                return CorrectionResult(
+                    applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
+                    rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
+                    reason=f"Already applied correction for sequence {self.last_applied_sequence}"
+                )
+            
+        ra_offset_deg, dec_offset_deg, rot_offset_deg, settle_time = self.process_platesolve_data(data)
+        
+        ra_offset_arcsec = ra_offset_deg * 3600.0
+        dec_offset_arcsec = dec_offset_deg * 3600.0
+        total_offset_arcsec = math.sqrt(ra_offset_arcsec**2 + dec_offset_arcsec**2)
+        
+        # Store last known values if enabled
+        if self.store_last_measurements:
+            self.last_total_offset_arcsec = total_offset_arcsec
+            self.last_ra_offset_arcsec = ra_offset_arcsec
+            self.last_dec_offset_arcsec = dec_offset_arcsec
+            self.last_rotation_offset_deg = rot_offset_deg
+            self.last_measurement_time = time.time()
+        
+        min_correction = self.platesolve_config.get('correction_thresholds', {}).get('min_arcsec', 1.0)
+        min_rotation = 0.1
+        
+        coordinate_correction_needed = total_offset_arcsec >= min_correction
+        rotation_correction_needed = self.rotator_driver and abs(rot_offset_deg) >= min_rotation
+        
+        # Suppress coord correction briefly after rotator move
+        try:
+            last_rot = getattr(self.rotator_driver, "last_rotation_move_ts", 0.0)
+            if (time.time() - last_rot) < 0.8:
+                coordinate_correction_needed = False
+                logger.debug("Skipping RA/Dec correction (recent rotator move).")
+        except Exception:
+            pass
+        
+        if not coordinate_correction_needed and not rotation_correction_needed:
+            return CorrectionResult(
+                applied=False, ra_offset_arcsec=ra_offset_arcsec,
+                dec_offset_arcsec=dec_offset_arcsec, rotation_offset_deg=rot_offset_deg,
+                total_offset_arcsec=total_offset_arcsec, settle_time=settle_time, 
+                reason=f"Offsets below thresholds: coord={total_offset_arcsec:.2f}\", rot={abs(rot_offset_deg):.2f}°"
+            )
+        
+        corrections_applied = []
+        coordinate_success = True
+        rotation_success = True
+        
+        if coordinate_correction_needed:
+            logger.info(f"Applying correction: RA={ra_offset_arcsec:.2f}\", Dec={dec_offset_arcsec:.2f}\", Total={total_offset_arcsec:.2f}\"")
+            coordinate_success = self.telescope_driver.apply_coordinate_correction(ra_offset_deg, dec_offset_deg)
+            if coordinate_success:
+                corrections_applied.append("coordinates")
+            else:
+                logger.error("Coordinate correction failed")
+                
+        if rotation_correction_needed:
+            logger.info(f"Applying platesolve de-rotation: {rot_offset_deg:+.2f}°")
+            try:
+                rotation_success = self.rotator_driver.apply_rotation_correction(rot_offset_deg)
+            except Exception as e:
+                logger.error(f"Rotation correction call failed: {e}")
+                rotation_success = False
+
+            if rotation_success:
+                corrections_applied.append("rotation")
+            else:
+                logger.error("Rotation correction failed")
+                
+        overall_success = coordinate_success and rotation_success
+        
+        if overall_success and corrections_applied:
+            self.last_processed_file = current_filename
+            self.last_applied_sequence = current_seq  # Use extracted sequence
+            self.last_target_id = current_target_id   # Update target tracking
+            logger.info(f"Applied correction for target={current_target_id}, seq={current_seq}")
+            
+            return CorrectionResult(
+                applied=True, ra_offset_arcsec=ra_offset_arcsec, 
+                dec_offset_arcsec=dec_offset_arcsec, rotation_offset_deg=rot_offset_deg,
+                total_offset_arcsec=total_offset_arcsec, settle_time=settle_time, 
+                reason="Correction applied successfully",
+                rotation_applied=rotation_correction_needed and rotation_success
+            )
+            
+        else:
+            failure_reasons = []
+            if not coordinate_success:
+                failure_reasons.append("coordinate correction failed")
+            if not rotation_success:
+                failure_reasons.append("rotation correction failed")
+                
+            return CorrectionResult(
+                applied=False, ra_offset_arcsec=ra_offset_arcsec, 
+                dec_offset_arcsec=dec_offset_arcsec, rotation_offset_deg=rot_offset_deg,
+                total_offset_arcsec=total_offset_arcsec, settle_time=settle_time, 
+                reason="; ".join(failure_reasons), rotation_applied=False
+            )
+    
+    except PlatesolveCorrectorError:
+        raise
     except Exception as e:
-        logger.warning(f"Error checking frame currency: {e}")
-        return False
+        logger.error(f"Unexpected error in correction: {e}")    
+        raise PlatesolveCorrectorError(f"Correction failed: {e}")
