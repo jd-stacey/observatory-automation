@@ -1,43 +1,56 @@
-def is_platesolve_current_for_frame(self, data: Dict[str, Any], current_frame_path: str) -> bool:
-    """Check if platesolve is for current frame or later AND same target"""
-    try:
-        solved_filename = data.get('fitsname', {}).get("0", "")
-        if not solved_filename:
-            return False
-        
-        # Extract just the filename from full path if needed
-        solved_basename = Path(solved_filename).name
-        current_basename = Path(current_frame_path).name
-        
-        # Extract target IDs from both filenames
-        import re
-        def extract_target_id(filename):
-            match = re.match(r'^(.+?)_\d{8}_', filename)
-            return match.group(1) if match else None
-        
-        solved_target = extract_target_id(solved_basename)
-        current_target = extract_target_id(current_basename)
-        
-        # Different targets = not current
-        if solved_target != current_target:
-            logger.debug(f"Platesolve is for different target: {solved_target} vs {current_target}")
-            return False
-        
-        current_seq = extract_sequence_from_filename(current_basename)
-        solved_seq = extract_sequence_from_filename(solved_basename)
-        
-        if current_seq < 0 or solved_seq < 0:
-            logger.debug("Could not extract sequence numbers")
-            return False
-        
-        # Accept current frame or later (same target)
-        if solved_seq >= current_seq:
-            logger.debug(f"Platesolve is current: solved frame {solved_seq} >= current {current_seq}")
-            return True
-        else:
-            logger.debug(f"Platesolve is stale: solved frame {solved_seq} < current {current_seq}")
-            return False
+def wait_for_correction_with_timeout(self, timeout_seconds: float, current_frame_path: str = None) -> bool:
+    """Wait for platesolve correction with active polling"""
+    start_time = time.time()
+    check_interval = 1.0
+    
+    logger.debug(f"Waiting up to {timeout_seconds:.1f}s for platesolve correction...")
+    
+    last_reason = None
+    reason_count = 0
+    
+    while (time.time() - start_time) < timeout_seconds:
+        try:
+            result = self.apply_immediate_correction_if_available(current_phase="spectro_sync", current_frame_path=current_frame_path)
+            if result.applied:
+                # Print summary before success message
+                if reason_count > 1:
+                    logger.debug(f"  (previous message repeated {reason_count} times)")
+                logger.info(f"Correction applied during wait: {result.total_offset_arcsec:.2f}\" offset")
+                time.sleep(result.settle_time)
+                return True
             
-    except Exception as e:
-        logger.warning(f"Error checking frame currency: {e}")
-        return False
+            # Deduplicate logging - only print on CHANGE
+            if result.reason != last_reason:
+                if reason_count > 1:
+                    logger.debug(f"  (previous message repeated {reason_count} times)")
+                logger.debug(result.reason)
+                last_reason = result.reason
+                reason_count = 1
+            else:
+                reason_count += 1
+                # DON'T print anything here - just count
+                    
+        except PlatesolveCorrectorError as e:
+            error_msg = str(e)
+            if error_msg != last_reason:
+                if reason_count > 1:
+                    logger.debug(f"  (previous message repeated {reason_count} times)")
+                logger.debug(f"Platesolve failure detected: {error_msg}")
+                last_reason = error_msg
+                reason_count = 1
+            else:
+                reason_count += 1
+                # DON'T print anything here
+                    
+        except Exception as e:
+            # Unexpected errors always print
+            logger.debug(f"Unexpected error during correction wait: {e}")
+        
+        time.sleep(check_interval)
+    
+    # Print final summary
+    if reason_count > 1:
+        logger.debug(f"  (previous message repeated {reason_count} times)")
+    
+    logger.warning(f"Platesolve timeout after {timeout_seconds:.1f}s - continuing")
+    return False
