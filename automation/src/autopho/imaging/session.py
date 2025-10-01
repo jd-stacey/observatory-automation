@@ -288,7 +288,7 @@ class ImagingSession:
             self.current_phase == SessionPhase.ACQUISITION):
             adaptive_time = self.corrector.get_current_exposure_time()
             if adaptive_time != (self.exposure_override or 0):
-                logger.debug(f"Using adaptive exposure time from corrector: {adaptive_time:.1f}s")
+                logger.debug(f"Using adaptive exposure time from corrector: {adaptive_time:.1f} s")
                 return adaptive_time
         
         # Fall back to original logic
