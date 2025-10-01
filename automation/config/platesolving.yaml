@@ -40,7 +40,7 @@ spectro_acquisition:
   exposure_increase_factor: 2.0         # Multiply exposure by this when platesolve fails
   max_zero_attempts: 8                  # Total retry attempts across all exposure levels
   retries_per_exposure_level: 1         # How many times to try each exposure time
-  solver_wait_time: 45.0                # Seconds to wait for solver to process new image #THIS
+  solver_wait_time: 30.0                # Seconds to wait for solver to process new image #THIS
   
 
   # In science mode, allow N failures before adaptive exp. time (in case solver is only failing coz clouds or other error not related to brightness)
