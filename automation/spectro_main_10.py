@@ -686,6 +686,7 @@ class SpectroscopyCorrector(PlatesolveCorrector):
         self.last_applied_sequence = -1
         self.last_processed_filename = None
         self.last_target_id = None
+        self.last_wait_failed_filename = None
         
         logger.info("SpectroscopyCorrector initialized with immediate corrections and adaptive exposure")
     
@@ -1070,7 +1071,7 @@ class SpectroscopyCorrector(PlatesolveCorrector):
         start_time = time.time()
         check_interval = 1.0
         
-        logger.debug(f"Waiting up to {timeout_seconds:.1f}s for platesolve correction...")
+        logger.debug(f"Waiting up to {timeout_seconds:.1f} s for platesolve correction...")
         
         last_reason = None
         reason_count = 0
@@ -1078,11 +1079,8 @@ class SpectroscopyCorrector(PlatesolveCorrector):
         def normalize_reason(reason: str) -> str:
             """Normalize reasons with varying numbers for deduplication"""
             import re
-            # Replace file ages like "562.01s old" with generic pattern
             reason = re.sub(r'\d+\.\d+s old', 'X.Xs old', reason)
-            # Replace "age: 65 s" with generic pattern
             reason = re.sub(r'age: \d+ s', 'age: X s', reason)
-            # Replace sequence numbers
             reason = re.sub(r'frame \d+', 'frame X', reason)
             return reason
         
@@ -1090,36 +1088,54 @@ class SpectroscopyCorrector(PlatesolveCorrector):
             try:
                 result = self.apply_immediate_correction_if_available(current_phase="spectro_sync", current_frame_path=current_frame_path)
                 if result.applied:
+                    self.last_wait_failed_filename = None   # Reset on successful correction
                     if reason_count > 1:
                         logger.debug(f"  (previous message repeated {reason_count} times)")
                     logger.info(f"Correction applied during wait: {result.total_offset_arcsec:.2f}\" offset")
                     time.sleep(result.settle_time)
                     return True
                 
-                # Normalize for deduplication
+                # No correction applied - keep waiting
                 normalized = normalize_reason(result.reason)
                 
                 if normalized != last_reason:
                     if reason_count > 1:
                         logger.debug(f"  (previous message repeated {reason_count} times)")
-                    logger.debug(result.reason)  # Print original message once
+                    logger.debug(result.reason)
                     last_reason = normalized
                     reason_count = 1
                 else:
                     reason_count += 1
                         
             except PlatesolveCorrectorError as e:
-                error_msg = str(e)
-                normalized = normalize_reason(error_msg)
+                # Failed platesolve detected - check if it's NEW
+                file_ready, data = self.check_json_file_ready()
+                current_failed_file = data.get('fitsname', {}).get("0", "") if file_ready else None
                 
-                if normalized != last_reason:
-                    if reason_count > 1:
-                        logger.debug(f"  (previous message repeated {reason_count} times)")
-                    logger.debug(f"Platesolve failure detected: {error_msg}")
-                    last_reason = normalized
-                    reason_count = 1
+                if current_failed_file and current_failed_file != self.last_wait_failed_filename:
+                    # NEW failed solve - exit early
+                    self.last_wait_failed_filename = current_failed_file
+                    error_msg = str(e)
+                    normalized = normalize_reason(error_msg)
+                    
+                    if normalized != last_reason:
+                        if reason_count > 1:
+                            logger.debug(f"  (previous message repeated {reason_count} times)")
+                        logger.debug(f"Platesolve failure detected: {error_msg}")
+                    
+                    logger.debug("New platesolve completed (failed) - ending wait early")
+                    return False
                 else:
-                    reason_count += 1
+                    # Same failed solve we've already seen, keep waiting
+                    normalized = normalize_reason(str(e))
+                    if normalized != last_reason:
+                        if reason_count > 1:
+                            logger.debug(f"  (previous message repeated {reason_count} times)")
+                        logger.debug(f"Platesolve failure detected: {str(e)}")
+                        last_reason = normalized
+                        reason_count = 1
+                    else:
+                        reason_count += 1
                         
             except Exception as e:
                 logger.debug(f"Unexpected error during correction wait: {e}")
