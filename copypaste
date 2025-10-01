@@ -2,50 +2,34 @@ def wait_for_correction_with_timeout(self, timeout_seconds: float, current_frame
     """Wait for platesolve correction with active polling"""
     start_time = time.time()
     check_interval = 1.0
-
+    
     logger.debug(f"Waiting up to {timeout_seconds:.1f}s for platesolve correction...")
-
+    
     last_reason = None
     reason_count = 0
-
+    last_failed_filename = None  # Track which failed solve we've seen
+    
     def normalize_reason(reason: str) -> str:
+        """Normalize reasons with varying numbers for deduplication"""
         import re
         reason = re.sub(r'\d+\.\d+s old', 'X.Xs old', reason)
         reason = re.sub(r'age: \d+ s', 'age: X s', reason)
         reason = re.sub(r'frame \d+', 'frame X', reason)
         return reason
-
+    
     while (time.time() - start_time) < timeout_seconds:
         try:
-            result = self.apply_immediate_correction_if_available(
-                current_phase="spectro_sync",
-                current_frame_path=current_frame_path
-            )
-
+            result = self.apply_immediate_correction_if_available(current_phase="spectro_sync", current_frame_path=current_frame_path)
             if result.applied:
+                if reason_count > 1:
+                    logger.debug(f"  (previous message repeated {reason_count} times)")
                 logger.info(f"Correction applied during wait: {result.total_offset_arcsec:.2f}\" offset")
                 time.sleep(result.settle_time)
                 return True
-
-            # Already applied / duplicate solution → exit immediately
-            if any(keyword in result.reason for keyword in [
-                "Already processed",
-                "Already applied correction"
-            ]):
-                logger.debug(f"Skipping wait: {result.reason}")
-                return False
-
-            # Frame consumed but no correction → exit immediately
-            if any(keyword in result.reason for keyword in [
-                "Telescope not connected",
-                "Coordinate correction failed",
-                "Spectro offset below threshold"
-            ]):
-                logger.debug(f"Frame consumed but no correction: {result.reason}")
-                return False
-
-            # Still waiting for new frame → normalize/dedupe logs
+            
+            # No correction applied - keep waiting
             normalized = normalize_reason(result.reason)
+            
             if normalized != last_reason:
                 if reason_count > 1:
                     logger.debug(f"  (previous message repeated {reason_count} times)")
@@ -54,19 +38,44 @@ def wait_for_correction_with_timeout(self, timeout_seconds: float, current_frame
                 reason_count = 1
             else:
                 reason_count += 1
-
+                    
         except PlatesolveCorrectorError as e:
-            # Safe: this only happens for a new frame that failed solve
-            logger.debug(f"New frame detected but solve failed: {e} → skipping remaining wait")
-            return False
-
+            # Failed platesolve detected - check if it's NEW
+            file_ready, data = self.check_json_file_ready()
+            current_failed_file = data.get('fitsname', {}).get("0", "") if file_ready else None
+            
+            if current_failed_file and current_failed_file != last_failed_filename:
+                # NEW failed solve - exit early
+                last_failed_filename = current_failed_file
+                error_msg = str(e)
+                normalized = normalize_reason(error_msg)
+                
+                if normalized != last_reason:
+                    if reason_count > 1:
+                        logger.debug(f"  (previous message repeated {reason_count} times)")
+                    logger.debug(f"Platesolve failure detected: {error_msg}")
+                
+                logger.debug("New platesolve completed (failed) - ending wait early")
+                return False
+            else:
+                # Same failed solve, keep waiting
+                normalized = normalize_reason(str(e))
+                if normalized != last_reason:
+                    if reason_count > 1:
+                        logger.debug(f"  (previous message repeated {reason_count} times)")
+                    logger.debug(f"Platesolve failure detected: {str(e)}")
+                    last_reason = normalized
+                    reason_count = 1
+                else:
+                    reason_count += 1
+                    
         except Exception as e:
             logger.debug(f"Unexpected error during correction wait: {e}")
-
+        
         time.sleep(check_interval)
-
+    
     if reason_count > 1:
         logger.debug(f"  (previous message repeated {reason_count} times)")
-
+    
     logger.warning(f"Platesolve timeout after {timeout_seconds:.1f} s - continuing")
     return False
