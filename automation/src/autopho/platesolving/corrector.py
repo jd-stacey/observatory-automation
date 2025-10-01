@@ -2,6 +2,7 @@ import json
 import time
 import math
 import logging
+import re
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 from dataclasses import dataclass
@@ -37,6 +38,9 @@ class PlatesolveCorrector:
         self.config_loader = config_loader
         self.last_processed_file = ""
         self.last_applied_sequence = -1
+        self.last_target_id = None
+        self.last_failed_filename = None
+        
         self.cumulative_zero_time = 0
         self.rotator_driver = rotator_driver
         
@@ -103,6 +107,11 @@ class PlatesolveCorrector:
             
             # Check for platesolve failure (exact zeros indicate failed solve)
             if ra_offset_deg == 0.0 and dec_offset_deg == 0.0:
+                current_filename = data.get('fitsname', {}).get("0", "")
+                if current_filename == self.last_failed_filename:
+                    logger.debug("Already processed this failed solve")
+                    raise PlatesolveCorrectorError("Previously processed failed solve")
+                self.last_failed_filename = current_filename
                 logger.debug("Platesolve failure detected: exact zero offsets - skipping this solve")
                 raise PlatesolveCorrectorError("Platesolve returned zero offsets - solve failed, waiting for next")
             
@@ -161,16 +170,13 @@ class PlatesolveCorrector:
             logger.error(f"Error processing platesolve data: {e}")
             raise PlatesolveCorrectorError(f"Failed to process platesolve data: {e}")
         
+    # Update apply_single_correction() method
     def apply_single_correction(self, timeout_seconds: Optional[float] = None) -> CorrectionResult:
         try:
             if not self.telescope_driver.is_connected():
                 return CorrectionResult(
-                    applied=False,
-                    ra_offset_arcsec=0.0,
-                    dec_offset_arcsec=0.0, 
-                    rotation_offset_deg=0.0,
-                    total_offset_arcsec=0.0, 
-                    settle_time=0.0, 
+                    applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0, 
+                    rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0, 
                     reason="Telescope not connected"
                 )
                 
@@ -193,42 +199,45 @@ class PlatesolveCorrector:
                         logger.debug(f"Waiting for platesolve file... {elapsed:.1f} / {timeout_seconds} s elapsed")
                         time.sleep(min(check_interval, remaining))
                         
-                        
-                    
-                    # while (time.time() - start_time) < timeout_seconds:
-                    #     time.sleep(check_interval)
-                    #     file_ready, data = self.check_json_file_ready()
-                    #     if file_ready:
-                    #         break
-                        
                 if not file_ready:
                     return CorrectionResult(
-                    applied=False,
-                    ra_offset_arcsec=0.0,
-                    dec_offset_arcsec=0.0, 
-                    rotation_offset_deg=0.0,
-                    total_offset_arcsec=0.0, 
-                    settle_time=0.0, 
-                    reason="No recent platesolve data available"
-                )
+                        applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0, 
+                        rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0, 
+                        reason="No recent platesolve data available"
+                    )
             
             current_filename = data.get('fitsname', {}).get("0", "")
-
-            # Check sequence to prevent applying old corrections
-            current_seq = extract_sequence_from_filename(current_filename)
-            if current_seq <= self.last_applied_sequence:
-                return CorrectionResult(
-                    applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
-                    rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
-                    reason=f"Already applied correction for sequence {self.last_applied_sequence}"
-                )
-
+            
+            # Check 1: Exact filename match (prevents duplicate processing)
             if current_filename == self.last_processed_file:
                 return CorrectionResult(
                     applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
                     rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
                     reason="Already processed this solution"
                 )
+            
+            # Check 2: Target ID tracking (reset sequence on target change)
+            current_basename = Path(current_filename).name
+            target_match = re.match(r'^(.+?)_\d{8}_', current_basename)
+            current_target_id = target_match.group(1) if target_match else None
+            
+            # Extract sequence from basename
+            current_seq = extract_sequence_from_filename(current_basename)
+            
+            # If target changed, reset sequence tracking
+            if current_target_id and current_target_id != self.last_target_id:
+                self.last_target_id = current_target_id
+                self.last_applied_sequence = -1
+                logger.info(f"New target detected in platesolve: {current_target_id}")
+            
+            # Check 3: Sequence number (only if same target)
+            if current_target_id and current_target_id == self.last_target_id:
+                if current_seq <= self.last_applied_sequence:
+                    return CorrectionResult(
+                        applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
+                        rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
+                        reason=f"Already applied correction for sequence {self.last_applied_sequence}"
+                    )
                 
             ra_offset_deg, dec_offset_deg, rot_offset_deg, settle_time = self.process_platesolve_data(data)
             
@@ -244,32 +253,26 @@ class PlatesolveCorrector:
                 self.last_rotation_offset_deg = rot_offset_deg
                 self.last_measurement_time = time.time()
             
-            
             min_correction = self.platesolve_config.get('correction_thresholds', {}).get('min_arcsec', 1.0)
             min_rotation = 0.1
             
             coordinate_correction_needed = total_offset_arcsec >= min_correction
             rotation_correction_needed = self.rotator_driver and abs(rot_offset_deg) >= min_rotation
             
-            # --- NEW: suppress coord correction for a moment after a rotator move ---
+            # Suppress coord correction briefly after rotator move
             try:
                 last_rot = getattr(self.rotator_driver, "last_rotation_move_ts", 0.0)
-                if (time.time() - last_rot) < 0.8:  # seconds
+                if (time.time() - last_rot) < 0.8:
                     coordinate_correction_needed = False
                     logger.debug("Skipping RA/Dec correction (recent rotator move).")
             except Exception:
                 pass
-            # -----------------------------------------------------------------------
-            
             
             if not coordinate_correction_needed and not rotation_correction_needed:
                 return CorrectionResult(
-                    applied=False,
-                    ra_offset_arcsec=ra_offset_arcsec,
-                    dec_offset_arcsec=dec_offset_arcsec, 
-                    rotation_offset_deg=rot_offset_deg,
-                    total_offset_arcsec=total_offset_arcsec, 
-                    settle_time=settle_time, 
+                    applied=False, ra_offset_arcsec=ra_offset_arcsec,
+                    dec_offset_arcsec=dec_offset_arcsec, rotation_offset_deg=rot_offset_deg,
+                    total_offset_arcsec=total_offset_arcsec, settle_time=settle_time, 
                     reason=f"Offsets below thresholds: coord={total_offset_arcsec:.2f}\", rot={abs(rot_offset_deg):.2f}°"
                 )
             
@@ -286,7 +289,6 @@ class PlatesolveCorrector:
                     logger.error("Coordinate correction failed")
                     
             if rotation_correction_needed:
-                # Actively de-rotate using the platesolver's theta (this MOVES the rotator)
                 logger.info(f"Applying platesolve de-rotation: {rot_offset_deg:+.2f}°")
                 try:
                     rotation_success = self.rotator_driver.apply_rotation_correction(rot_offset_deg)
@@ -303,16 +305,14 @@ class PlatesolveCorrector:
             
             if overall_success and corrections_applied:
                 self.last_processed_file = current_filename
-                self.last_applied_sequence = extract_sequence_from_filename(current_filename)
-                logger.info(f"Applied correction for sequence {self.last_applied_sequence}")
+                self.last_applied_sequence = current_seq  # Use extracted sequence
+                self.last_target_id = current_target_id   # Update target tracking
+                logger.info(f"Applied correction for target={current_target_id}, seq={current_seq}")
                 
                 return CorrectionResult(
-                    applied=True, 
-                    ra_offset_arcsec=ra_offset_arcsec, 
-                    dec_offset_arcsec=dec_offset_arcsec, 
-                    rotation_offset_deg=rot_offset_deg,
-                    total_offset_arcsec=total_offset_arcsec, 
-                    settle_time=settle_time, 
+                    applied=True, ra_offset_arcsec=ra_offset_arcsec, 
+                    dec_offset_arcsec=dec_offset_arcsec, rotation_offset_deg=rot_offset_deg,
+                    total_offset_arcsec=total_offset_arcsec, settle_time=settle_time, 
                     reason="Correction applied successfully",
                     rotation_applied=rotation_correction_needed and rotation_success
                 )
@@ -325,14 +325,10 @@ class PlatesolveCorrector:
                     failure_reasons.append("rotation correction failed")
                     
                 return CorrectionResult(
-                    applied=False, 
-                    ra_offset_arcsec=ra_offset_arcsec, 
-                    dec_offset_arcsec=dec_offset_arcsec, 
-                    rotation_offset_deg=rot_offset_deg,
-                    total_offset_arcsec=total_offset_arcsec, 
-                    settle_time=settle_time, 
-                    reason="; ".join(failure_reasons),
-                    rotation_applied=False
+                    applied=False, ra_offset_arcsec=ra_offset_arcsec, 
+                    dec_offset_arcsec=dec_offset_arcsec, rotation_offset_deg=rot_offset_deg,
+                    total_offset_arcsec=total_offset_arcsec, settle_time=settle_time, 
+                    reason="; ".join(failure_reasons), rotation_applied=False
                 )
         
         except PlatesolveCorrectorError:
