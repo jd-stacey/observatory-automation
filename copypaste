@@ -1,18 +1,39 @@
-# Extract target ID from filename (everything before the timestamp)
-import re
-target_match = re.match(r'^(.+?)_\d{8}_', solved_filename)
-current_target_id = target_match.group(1) if target_match else None
-
-# Only check sequence if same target
-solved_seq = extract_sequence_from_filename(solved_filename)
-if current_target_id and current_target_id == self.last_target_id:
-    if solved_seq <= self.last_applied_sequence:
-        return CorrectionResult(
-            applied=False, ...
-            reason=f"Already applied correction for sequence {self.last_applied_sequence}"
-        )
-else:
-    # Different target - reset sequence tracking
-    logger.debug(f"New target detected in platesolve: {current_target_id}")
-    self.last_target_id = current_target_id
-    self.last_applied_sequence = -1
+def is_platesolve_current_for_frame(self, data: Dict[str, Any], current_frame_path: str) -> bool:
+    """Check if platesolve is for current frame or later AND same target"""
+    try:
+        solved_filename = data.get('fitsname', {}).get("0", "")
+        if not solved_filename:
+            return False
+        
+        # Extract target IDs from both filenames
+        import re
+        def extract_target_id(filename):
+            match = re.match(r'^(.+?)_\d{8}_', filename)
+            return match.group(1) if match else None
+        
+        solved_target = extract_target_id(solved_filename)
+        current_target = extract_target_id(Path(current_frame_path).name)
+        
+        # Different targets = not current
+        if solved_target != current_target:
+            logger.debug(f"Platesolve is for different target: {solved_target} vs {current_target}")
+            return False
+        
+        current_seq = extract_sequence_from_filename(current_frame_path)
+        solved_seq = extract_sequence_from_filename(solved_filename)
+        
+        if current_seq < 0 or solved_seq < 0:
+            logger.debug("Could not extract sequence numbers")
+            return False
+        
+        # Accept current frame or later (same target)
+        if solved_seq >= current_seq:
+            logger.debug(f"Platesolve is current: solved frame {solved_seq} >= current {current_seq}")
+            return True
+        else:
+            logger.debug(f"Platesolve is stale: solved frame {solved_seq} < current {current_seq}")
+            return False
+            
+    except Exception as e:
+        logger.warning(f"Error checking frame currency: {e}")
+        return False
