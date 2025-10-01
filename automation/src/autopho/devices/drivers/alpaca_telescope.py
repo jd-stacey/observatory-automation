@@ -45,7 +45,7 @@ class AlpacaTelescopeDriver:
                 
             if self.telescope.Connected:
                 telescope_name = self.telescope.Name
-                logger.info(f"Successfully connected to telescope :{telescope_name}")
+                logger.info(f"Successfully connected to telescope: {telescope_name}")
                 self.connected = True
                 return True
             else:
@@ -106,6 +106,7 @@ class AlpacaTelescopeDriver:
             
             logger.info(f"Slewing telescope...")
             while self.telescope.Slewing:
+                logger.debug(f"    Telescope Slewing?: {self.telescope.Slewing}...")
                 time.sleep(0.5)
                 
             settle_time = self.config.get('settle_time', 2.0)
