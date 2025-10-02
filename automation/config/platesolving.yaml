@@ -32,7 +32,7 @@ spectro_acquisition:
   correction_interval: 1                # checks for correction after EVERY frame during acquisition
   max_total_offset_arcsec: 1.0          # tighter threshold for spectroscopy fiber alignment
   max_attempts: 45                      # max num of acq frames to take - change this to 1 to bypass acq phase
-  default_session_duration_hours: 1.0   # Default hours per imaging session (can be overridden using --duration CLI)
+  default_session_duration_hours: 6.0   # Default hours per imaging session (can be overridden using --duration CLI)
   folder_suffix: "_acq"
   
   # New: Adaptive exposure settings for handling platesolve failures
@@ -40,7 +40,7 @@ spectro_acquisition:
   exposure_increase_factor: 2.0         # Multiply exposure by this when platesolve fails
   max_zero_attempts: 8                  # Total retry attempts across all exposure levels
   retries_per_exposure_level: 1         # How many times to try each exposure time
-  solver_wait_time: 30.0                # Seconds to wait for solver to process new image #THIS
+  solver_wait_time: 45.0                # Seconds to wait for solver to process new image #THIS
   
 
   # In science mode, allow N failures before adaptive exp. time (in case solver is only failing coz clouds or other error not related to brightness)
