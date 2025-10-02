@@ -422,6 +422,15 @@ class SpectroscopyImagingSession(ImagingSession):
             self._running = False
             
     
+    def _should_apply_correction(self):
+        """Spectroscopy uses synchronous corrections only - disable periodic checks"""
+        return False
+
+    def _apply_periodic_correction(self):
+        """No-op for spectroscopy - corrections happen synchronously"""
+        pass
+    
+    
     def capture_single_exposure(self, telescope_driver=None) -> Optional[str]:
         """Override to use synchronous corrections for spectroscopy"""
         # Check stop event BEFORE capture
@@ -713,40 +722,66 @@ class SpectroscopyCorrector(PlatesolveCorrector):
     def set_current_target(self, target_id: str, base_exposure_time: Optional[float] = None):
         """Set the current target ID to help detect stale platesolve data"""
         if self.current_target_id != target_id:
+            # NEW TARGET - reset everything including session time
             self.current_target_id = target_id
             self.target_start_time = time.time()
+            self.session_start_time = time.time()  # Reset for each new target
+            
+            # Try to delete old platesolve data
+            if self.json_file_path.exists():
+                try:
+                    self.json_file_path.unlink()
+                    logger.info(f"Deleted old platesolve data for new target: {target_id}")
+                except PermissionError:
+                    logger.debug("Could not delete platesolve JSON (file in use) - will validate by timestamp instead")
+                except Exception as e:
+                    logger.warning(f"Could not delete old platesolve JSON: {e}")
+            
+            # Reset all tracking
             self.base_exposure_time = base_exposure_time if base_exposure_time is not None else self.spectro_config.get("exposure_time", 30.0)
-            self.current_exposure_time = self.base_exposure_time  # Reset to base exposure
+            self.current_exposure_time = self.base_exposure_time
             self.last_failed_filename = None
             self.last_applied_sequence = -1
             self.last_processed_filename = None
             self.last_target_id = None
             self.min_acceptable_sequence = 0
-            # Reset retry tracking for new target
+            
+            # Clear retry tracking
             if hasattr(self, 'current_exposure_retries'):
                 delattr(self, 'current_exposure_retries')
             if hasattr(self, 'science_failure_count'):
-                delattr(self, 'science_failure_count')  
+                delattr(self, 'science_failure_count')
+            
             logger.info(f"New spectroscopy target: {target_id}")
-            logger.info(f"Reset adaptive exposure time to {self.current_exposure_time:.1f}s for new target")
+            logger.info(f"Reset adaptive exposure time to {self.current_exposure_time:.1f} s for new target")
+        
         else:
-            # Same target, but update base exposure if provided
+            # SAME target - update exposure if provided, but DON'T reset session_start_time
             if base_exposure_time is not None and base_exposure_time != self.base_exposure_time:
                 old_base = self.base_exposure_time
                 self.base_exposure_time = base_exposure_time
                 self.current_exposure_time = base_exposure_time
                 
-                # Reset failure tracking when manually updating exposure (e.g., phase transition)
                 if hasattr(self, 'current_exposure_retries'):
                     delattr(self, 'current_exposure_retries')
                 if hasattr(self, 'science_failure_count'):
                     delattr(self, 'science_failure_count')
                     
-                logger.info(f"Updated base exposure time from {old_base:.1f}s to {base_exposure_time:.1f}s for target {target_id}")
+                logger.info(f"Updated base exposure time from {old_base:.1f} s to {base_exposure_time:.1f} s for target {target_id}")
     
     def is_platesolve_current_for_frame(self, data: Dict[str, Any], current_frame_path: str) -> bool:
         """Check if platesolve is valid and not yet processed"""
         try:
+            # NEW: First check if platesolve file is from current session
+            if self.session_start_time is not None:
+                try:
+                    json_mtime = self.json_file_path.stat().st_mtime
+                    if json_mtime < self.session_start_time:
+                        logger.debug(f"Platesolve predates current session - rejecting (JSON age: {time.time() - json_mtime:.1f} s, session age: {time.time() - self.session_start_time:.1f} s)")
+                        return False
+                except Exception as e:
+                    logger.warning(f"Could not check platesolve file time: {e}")
+            
             solved_filename = data.get('fitsname', {}).get("0", "")
             if not solved_filename:
                 return False
