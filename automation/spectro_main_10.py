@@ -290,8 +290,8 @@ class SpectroscopyImagingSession(ImagingSession):
     """Imaging session using only the guide camera for spectroscopy"""
 
     def __init__(self, camera_manager, corrector, config_loader, target_info: TargetInfo,
-             ignore_twilight: bool = False, exposure_override: Optional[float] = None,
-             dry_run: bool = False):
+         ignore_twilight: bool = False, exposure_override: Optional[float] = None,
+         dry_run: bool = False, filter_code: str = 'C'):
     
         self.dry_run = dry_run
         self.logger = logging.getLogger(__name__)
@@ -355,7 +355,7 @@ class SpectroscopyImagingSession(ImagingSession):
         
         # Initialize parent with 'C' filter (clear) for spectroscopy
         super().__init__(camera_manager, corrector, config_loader, target_info,
-                        filter_code='C', ignore_twilight=ignore_twilight,
+                        filter_code=filter_code, ignore_twilight=ignore_twilight,
                         exposure_override=exposure_override, images_base_path=spectro_root,
                         is_spectroscopy=True)
         
@@ -424,8 +424,16 @@ class SpectroscopyImagingSession(ImagingSession):
     
     def capture_single_exposure(self, telescope_driver=None) -> Optional[str]:
         """Override to use synchronous corrections for spectroscopy"""
+        # Check stop event BEFORE capture
+        if self._stop_event.is_set():
+            return None
+        
         # Capture image using parent method
         image_filepath = super().capture_single_exposure(telescope_driver=telescope_driver)
+        
+        # Check stop event BEFORE waiting for correction
+        if self._stop_event.is_set() or not image_filepath:
+            return image_filepath
         
         if image_filepath and self.corrector:
             # For spectroscopy: ALWAYS wait for correction synchronously (both ACQ and SCI)
@@ -445,7 +453,18 @@ class SpectroscopyImagingSession(ImagingSession):
         
         return image_filepath
 
-
+    def _switch_to_science_phase(self):
+        '''Override to reset corrector tracking when switching phases'''
+        
+        # Call parent implementation (from session.py) to do normal phase switching stuff
+        super()._switch_to_science_phase()
+        
+        # Reset corrector's sequence tracking since we are starting a new directory and file suffixes
+        if self.corrector and hasattr(self.corrector, 'reset_for_new_sequence'):
+            self.corrector.reset_for_new_sequence(reason="acquisition -> science phase")
+    
+    
+    
     def _should_switch_to_science_from_correction(self, correction_result) -> bool:
         """Determine if correction result indicates we should switch to science phase"""
         if self.current_phase != SessionPhase.ACQUISITION:
@@ -687,6 +706,7 @@ class SpectroscopyCorrector(PlatesolveCorrector):
         self.last_processed_filename = None
         self.last_target_id = None
         self.last_wait_failed_filename = None
+        self.min_acceptable_sequence = 0
         
         logger.info("SpectroscopyCorrector initialized with immediate corrections and adaptive exposure")
     
@@ -701,6 +721,7 @@ class SpectroscopyCorrector(PlatesolveCorrector):
             self.last_applied_sequence = -1
             self.last_processed_filename = None
             self.last_target_id = None
+            self.min_acceptable_sequence = 0
             # Reset retry tracking for new target
             if hasattr(self, 'current_exposure_retries'):
                 delattr(self, 'current_exposure_retries')
@@ -724,46 +745,71 @@ class SpectroscopyCorrector(PlatesolveCorrector):
                 logger.info(f"Updated base exposure time from {old_base:.1f}s to {base_exposure_time:.1f}s for target {target_id}")
     
     def is_platesolve_current_for_frame(self, data: Dict[str, Any], current_frame_path: str) -> bool:
-        """Check if platesolve is valid and not yet processed (ignores current frame number)"""
+        """Check if platesolve is valid and not yet processed"""
         try:
             solved_filename = data.get('fitsname', {}).get("0", "")
             if not solved_filename:
                 return False
             
-            # Extract basenames for proper comparison
             solved_basename = Path(solved_filename).name
             current_basename = Path(current_frame_path).name
             
-            # Extract target IDs from both filenames
             import re
             def extract_target_id(filename):
+                match = re.match(r'^(.+?)_[A-Z]?_\d{8}_', filename)
+                if match:
+                    return match.group(1)
                 match = re.match(r'^(.+?)_\d{8}_', filename)
                 return match.group(1) if match else None
             
+                        
+            def normalize_target_id(tid: str) -> str:
+                return tid.replace('-', '').replace('+', '') if tid else tid
+
             solved_target = extract_target_id(solved_basename)
             current_target = extract_target_id(current_basename)
-            
-            # Different targets = not current
-            if solved_target != current_target:
+
+            # Normalize both forms before any comparisons
+            solved_target_norm  = normalize_target_id(solved_target)
+            current_id_norm     = normalize_target_id(self.current_target_id)
+            current_target_norm = normalize_target_id(current_target)
+
+            if solved_target_norm != current_id_norm:
+                logger.debug(f"Platesolve is for different target: {solved_target} vs current {self.current_target_id}")
+                return False
+
+            if solved_target_norm != current_target_norm:
                 logger.debug(f"Platesolve is for different target: {solved_target} vs {current_target}")
                 return False
+
             
-            # Extract solved sequence number
+            # Check if platesolve is from acquisition directory when we're in science mode
+            if '_acq' in solved_basename and '_acq' not in current_basename:
+                logger.debug(f"Platesolve is from acquisition phase, current frame is science - rejecting")
+                return False
+            
             solved_seq = extract_sequence_from_filename(solved_basename)
             
             if solved_seq < 0:
                 logger.debug("Could not extract sequence number from platesolve")
                 return False
             
-            # Check if we've already processed this sequence
             if solved_seq <= self.last_applied_sequence:
                 logger.debug(f"Platesolve already processed: solved seq {solved_seq} <= last applied {self.last_applied_sequence}")
                 return False
             
-            # Accept any NEW sequence for the current target (even if older than current frame)
+            # Check against the gate: only accept solves for frames captured after last correction
+            if solved_seq < self.min_acceptable_sequence:
+                logger.debug(f"Platesolve too old: solved seq {solved_seq} < min acceptable {self.min_acceptable_sequence}")
+                return False
+            
             logger.debug(f"Platesolve is valid: solved frame {solved_seq} (new, not yet applied)")
             return True
                 
+        except KeyboardInterrupt as e:
+            logger.debug(f"Interrupted by user: {e}")
+            return False
+        
         except Exception as e:
             logger.warning(f"Error checking frame currency: {e}")
             return False  # Default to assuming it's current to avoid blocking corrections
@@ -842,6 +888,10 @@ class SpectroscopyCorrector(PlatesolveCorrector):
             
             return None  # No failure detected
             
+        except KeyboardInterrupt as e:
+            logger.debug(f"Interrupted by user: {e}")
+            return None
+        
         except (KeyError, ValueError, TypeError) as e:
             logger.warning(f"Could not check for platesolve failure: {e}")
             return None
@@ -908,9 +958,19 @@ class SpectroscopyCorrector(PlatesolveCorrector):
             logger.error(f"Invalid data type in platesolve data: {e}")
             raise PlatesolveCorrectorError(f"Invalid platesolve data values: {e}")
     
-    def apply_immediate_correction_if_available(self, current_phase: str = None, current_frame_path: str = None) -> CorrectionResult:
+    def apply_immediate_correction_if_available(self, current_phase: str = None, current_frame_path: str = None, 
+                                           latest_captured_sequence: Optional[int] = None) -> CorrectionResult:
         """Apply correction immediately if fresh platesolve data is available"""
         try:
+            # Safety check: don't apply corrections while telescope is slewing
+            if self.telescope_driver and hasattr(self.telescope_driver.telescope, 'Slewing'):
+                if self.telescope_driver.telescope.Slewing:
+                    return CorrectionResult(
+                        applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
+                        rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
+                        reason="Telescope is slewing - not safe to apply correction"
+                    )
+            
             # Check for fresh data without waiting
             file_ready, data = self.check_json_file_ready()
             
@@ -947,7 +1007,7 @@ class SpectroscopyCorrector(PlatesolveCorrector):
                 )
             
             # Process the correction
-            return self._apply_correction_from_data(data, current_filename, current_phase)
+            return self._apply_correction_from_data(data, current_filename, current_phase, latest_captured_sequence)
             
         except PlatesolveCorrectorError:
             # Re-raise specific corrector errors
@@ -956,7 +1016,8 @@ class SpectroscopyCorrector(PlatesolveCorrector):
             logger.error(f"Unexpected error in immediate correction: {e}")
             raise PlatesolveCorrectorError(f"Immediate correction failed: {e}")
     
-    def _apply_correction_from_data(self, data: Dict[str, Any], filename: str, current_phase: str = None) -> CorrectionResult:
+    def _apply_correction_from_data(self, data: Dict[str, Any], filename: str, current_phase: str = None,
+                                latest_captured_sequence: Optional[int] = None) -> CorrectionResult:
         """Apply correction from platesolve data"""
         # Check if we already processed this exact file
         solved_filename = data.get('fitsname', {}).get("0", "")
@@ -1041,7 +1102,18 @@ class SpectroscopyCorrector(PlatesolveCorrector):
             self.last_processed_filename = solved_filename
             self.last_applied_sequence = solved_seq
             self.last_target_id = current_target_id
-            logger.info(f"Applied correction for target={current_target_id}, seq={solved_seq}")
+            
+            # Set gate based on what frame we're actually at NOW (not the solved frame)
+            if latest_captured_sequence is not None:
+                # Only accept solves for frames captured AFTER this correction
+                self.min_acceptable_sequence = latest_captured_sequence + 1
+                logger.info(f"Applied correction for target={current_target_id}, seq={solved_seq}")
+                logger.debug(f"Set min_acceptable_sequence={self.min_acceptable_sequence} (latest captured was {latest_captured_sequence})")
+            else:
+                # Fallback if we don't know current position: use solved sequence + 1
+                self.min_acceptable_sequence = solved_seq + 1
+                logger.info(f"Applied correction for target={current_target_id}, seq={solved_seq}")
+                logger.warning(f"Set min_acceptable_sequence={self.min_acceptable_sequence} based on solved seq (no capture info)")
             
             return CorrectionResult(
                 applied=True, 
@@ -1077,16 +1149,29 @@ class SpectroscopyCorrector(PlatesolveCorrector):
         reason_count = 0
         
         def normalize_reason(reason: str) -> str:
-            """Normalize reasons with varying numbers for deduplication"""
+            """Normalize reasons with varying numbers for apparently futile deduplication efforts"""
             import re
-            reason = re.sub(r'\d+\.\d+s old', 'X.Xs old', reason)
+            reason = re.sub(r'\d+\.\d+s old', 'X.X s old', reason)
+            reason = re.sub(r'\d+\.\d+ s old', 'X.X s old', reason)
             reason = re.sub(r'age: \d+ s', 'age: X s', reason)
+            reason = re.sub(r'age: \d+s', 'age: X s', reason)
             reason = re.sub(r'frame \d+', 'frame X', reason)
             return reason
         
         while (time.time() - start_time) < timeout_seconds:
             try:
-                result = self.apply_immediate_correction_if_available(current_phase="spectro_sync", current_frame_path=current_frame_path)
+                # Extract sequence from current frame path
+                latest_seq = None
+                if current_frame_path:
+                    latest_seq = extract_sequence_from_filename(Path(current_frame_path).name)
+                    if latest_seq < 0:
+                        latest_seq = None
+                
+                result = self.apply_immediate_correction_if_available(
+                    current_phase="spectro_sync", 
+                    current_frame_path=current_frame_path,
+                    latest_captured_sequence=latest_seq
+                )
                 if result.applied:
                     self.last_wait_failed_filename = None   # Reset on successful correction
                     if reason_count > 1:
@@ -1147,15 +1232,24 @@ class SpectroscopyCorrector(PlatesolveCorrector):
         
         logger.warning(f"Platesolve timeout after {timeout_seconds:.1f} s - continuing")
         return False
+    
+    def reset_for_new_sequence(self, reason: str = 'phase change'):
+        '''Reset tracking state when starting a new sequence (e.g. from acq to sci phases)'''
+        self.last_applied_sequence = -1
+        self.last_processed_filename = None
+        self.last_target_id = None
+        self.min_acceptable_sequence = 0
+        self.last_wait_failed_filename = None
+        logger.info(f"Reset platesolve tracking: {reason}")
 
 
 class SpectroscopySession:
     """Manages spectroscopy sessions with optional mirror support and automatic shutdown"""
 
     def __init__(self, camera_manager, corrector, config_loader, telescope_driver,
-                 mirror_file: str = None, ignore_twilight: bool = False,
-                 dry_run: bool = False, exposure_override: Optional[float] = None,
-                 duration_override: Optional[float] = None):
+             mirror_file: str = None, ignore_twilight: bool = False,
+             dry_run: bool = False, exposure_override: Optional[float] = None,
+             duration_override: Optional[float] = None, filter_code: str = 'C'):
         self.camera_manager = camera_manager
         self.corrector = corrector
         self.config_loader = config_loader
@@ -1164,6 +1258,7 @@ class SpectroscopySession:
         self.dry_run = dry_run
         self.exposure_override = exposure_override
         self.duration_override = duration_override
+        self.filter_code = filter_code
 
         self.mirror = TelescopeMirror(mirror_file) if mirror_file else None
         self.current_session = None
@@ -1370,16 +1465,17 @@ class SpectroscopySession:
         try:
             timestamp_suffix = target_data['timestamp'].strftime('%H%M%S')
             target_info = TargetInfo(
-                tic_id=f"MIRROR_{target_data['ra_hours']:.3f}h_{target_data['dec_deg']:+.3f}d_{timestamp_suffix}",
+                tic_id=f"MIRROR_{target_data['ra_hours']:.3f}h_{target_data['dec_deg']:+.3f}d_{timestamp_suffix}",  # NO _C here!
                 ra_j2000_hours=target_data['ra_hours'],
                 dec_j2000_deg=target_data['dec_deg'],
                 gaia_g_mag=12.0,
                 magnitude_source="spectro-default"
             )
 
-            # Set target in corrector before starting session
+            # IMPORTANT: Set target in corrector BEFORE slewing to prevent applying corrections for old target
             if self.corrector and hasattr(self.corrector, 'set_current_target'):
                 self.corrector.set_current_target(target_info.tic_id, self.exposure_override)
+                self.logger.debug(f"Set corrector target to {target_info.tic_id} before slew")
 
             # Slew telescope (with safety checks)
             if not self.dry_run:
@@ -1400,7 +1496,8 @@ class SpectroscopySession:
                 target_info=target_info,
                 ignore_twilight=self.ignore_twilight,
                 dry_run=self.dry_run,
-                exposure_override=self.exposure_override
+                exposure_override=self.exposure_override,
+                filter_code=self.filter_code
             )
 
             # Start imaging asynchronously so monitoring can continue
@@ -1638,41 +1735,60 @@ def main():
         logger.info("Spectroscopy complete")
         return 0
 
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received - initiating shutdown")
+        # Fall through to finally block for cleanup
+        
     except Exception as e:
         logger.error(f"Critical error: {e}")
         logger.debug("Full traceback:", exc_info=True)
-        return 1
 
     finally:
         # Critical cleanup - ensure hardware is safe
         logger.info("Cleaning up...")
-        try:
-            if camera_manager:
-                logger.info("Shutting down camera coolers...")
-                camera_manager.shutdown_all_coolers()
-        except Exception as e:
-            logger.error(f"Camera cleanup error: {e}")
         
+        # First: stop any background threads that might spam logs
         try:
-            if cover_driver:
-                logger.info("Closing cover...")
-                cover_driver.close_cover()
-        except Exception as e:
-            logger.error(f"Cover cleanup error: {e}")
-        
-        
-        try:
-            if 'tracking_thread' in locals():
+            if 'tracking_thread' in locals() and tracking_thread.is_alive():
                 logger.info("Stopping telescope tracking monitor...")
                 tracking_stop_event.set()
                 tracking_thread.join(timeout=2.0)
                 if tracking_thread.is_alive():
                     logger.warning("Tracking monitor did not shut down cleanly")
+        except KeyboardInterrupt:
+            logger.warning("Interrupted during tracking cleanup - skipping")
+        except Exception as e:
+            logger.error(f"Tracking cleanup error: {e}")
+        
+        # Camera cleanup
+        try:
+            if camera_manager:
+                logger.info("Shutting down camera coolers...")
+                camera_manager.shutdown_all_coolers()
+        except KeyboardInterrupt:
+            logger.warning("Interrupted during camera cleanup - skipping")
+        except Exception as e:
+            logger.error(f"Camera cleanup error: {e}")
+        
+        # Cover cleanup
+        try:
+            if cover_driver:
+                logger.info("Closing cover...")
+                cover_driver.close_cover()
+        except KeyboardInterrupt:
+            logger.warning("Interrupted during cover closure - skipping")
+        except Exception as e:
+            logger.error(f"Cover cleanup error: {e}")
+        
+        # Telescope cleanup (most critical - parking)
+        try:
             if telescope_driver:
                 logger.info("Parking telescope...")
                 telescope_driver.park()
                 telescope_driver.motor_off()
                 telescope_driver.disconnect()
+        except KeyboardInterrupt:
+            logger.warning("Interrupted during telescope cleanup - telescope may not be parked!")
         except Exception as e:
             logger.error(f"Telescope cleanup error: {e}")
         
