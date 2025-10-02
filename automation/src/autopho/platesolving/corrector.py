@@ -93,6 +93,9 @@ class PlatesolveCorrector:
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in platesolve file: {e}")
             return False, None
+        except KeyboardInterrupt as e:
+            logger.debug(f"Interrupted by user: {e}")
+            return False, None
         except Exception as e:
             logger.error(f"Error reading JSON platesolve file: {e}")
             return False, None
