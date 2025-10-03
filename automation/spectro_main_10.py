@@ -468,6 +468,10 @@ class SpectroscopyImagingSession(ImagingSession):
         # Call parent implementation (from session.py) to do normal phase switching stuff
         super()._switch_to_science_phase()
         
+        # Delete the platesolve JSON to prevent stale data from acquisition phase
+        if self.corrector and hasattr(self.corrector, 'delete_platesolve_json'):
+            self.corrector.delete_platesolve_json(reason="acquisition -> science phase transition")
+        
         # Reset corrector's sequence tracking since we are starting a new directory and file suffixes
         if self.corrector and hasattr(self.corrector, 'reset_for_new_sequence'):
             self.corrector.reset_for_new_sequence(reason="acquisition -> science phase")
@@ -769,6 +773,28 @@ class SpectroscopyCorrector(PlatesolveCorrector):
                     
                 logger.info(f"Updated base exposure time from {old_base:.1f} s to {base_exposure_time:.1f} s for target {target_id}")
     
+    def delete_platesolve_json(self, reason: str = "manual deletion"):
+        """Delete the platesolve JSON file to force waiting for fresh data"""
+        if self.json_file_path.exists():
+            try:
+                self.json_file_path.unlink()
+                logger.info(f"Deleted platesolve JSON: {reason}")
+                # Also reset tracking since file is gone
+                self.last_processed_filename = None
+                self.last_applied_sequence = -1
+                self.last_wait_failed_filename = None
+                return True
+            except PermissionError:
+                logger.warning(f"Could not delete platesolve JSON (file in use): {reason}")
+                return False
+            except Exception as e:
+                logger.warning(f"Error deleting platesolve JSON: {e}")
+                return False
+        else:
+            logger.debug(f"Platesolve JSON already deleted: {reason}")
+            return True
+    
+    
     def is_platesolve_current_for_frame(self, data: Dict[str, Any], current_frame_path: str) -> bool:
         """Check if platesolve is valid and not yet processed"""
         try:
@@ -788,6 +814,16 @@ class SpectroscopyCorrector(PlatesolveCorrector):
             
             solved_basename = Path(solved_filename).name
             current_basename = Path(current_frame_path).name
+            
+            # Double-check for acquisition/science phase mismatch
+            solved_is_acq = '_acq' in solved_basename
+            current_is_acq = '_acq' in current_basename
+            
+            if solved_is_acq != current_is_acq:
+                phase_mismatch = "acquisition->science" if solved_is_acq else "science->acquisition"
+                logger.debug(f"Platesolve phase mismatch ({phase_mismatch}) - rejecting")
+                return False
+            
             
             import re
             def extract_target_id(filename):
