@@ -468,13 +468,16 @@ class SpectroscopyImagingSession(ImagingSession):
         # Call parent implementation (from session.py) to do normal phase switching stuff
         super()._switch_to_science_phase()
         
-        # Delete the platesolve JSON to prevent stale data from acquisition phase
-        if self.corrector and hasattr(self.corrector, 'delete_platesolve_json'):
+        # Delete and reset
+        if self.corrector:
             self.corrector.delete_platesolve_json(reason="acquisition -> science phase transition")
-        
-        # Reset corrector's sequence tracking since we are starting a new directory and file suffixes
-        if self.corrector and hasattr(self.corrector, 'reset_for_new_sequence'):
             self.corrector.reset_for_new_sequence(reason="acquisition -> science phase")
+            
+            # Wait for any in-flight platesolve writes to complete
+            time.sleep(1.0)  
+            
+            # Delete again in case one snuck through
+            self.corrector.delete_platesolve_json(reason="post-transition cleanup")
     
     
     
@@ -750,6 +753,13 @@ class SpectroscopyCorrector(PlatesolveCorrector):
             self.last_target_id = None
             self.min_acceptable_sequence = 0
             
+            # Clear cached measurements
+            self.last_total_offset_arcsec = None
+            self.last_ra_offset_arcsec = None
+            self.last_dec_offset_arcsec = None
+            self.last_rotation_offset_deg = None
+            self.last_measurement_time = None
+            
             # Clear retry tracking
             if hasattr(self, 'current_exposure_retries'):
                 delattr(self, 'current_exposure_retries')
@@ -815,13 +825,25 @@ class SpectroscopyCorrector(PlatesolveCorrector):
             solved_basename = Path(solved_filename).name
             current_basename = Path(current_frame_path).name
             
-            # Double-check for acquisition/science phase mismatch
-            solved_is_acq = '_acq' in solved_basename
-            current_is_acq = '_acq' in current_basename
-            
+            solved_is_acq = '_acq' in str(Path(solved_filename).parent)  # Check directory, not filename
+            current_is_acq = '_acq' in str(Path(current_frame_path).parent)
+
             if solved_is_acq != current_is_acq:
                 phase_mismatch = "acquisition->science" if solved_is_acq else "science->acquisition"
                 logger.debug(f"Platesolve phase mismatch ({phase_mismatch}) - rejecting")
+                return False
+            
+            # Extract sequences
+            solved_seq = extract_sequence_from_filename(solved_basename)
+            current_seq = extract_sequence_from_filename(current_basename)
+            
+            if solved_seq < 0 or current_seq < 0:
+                logger.debug("Could not extract sequence numbers")
+                return False
+            
+            # NEW: Reject solves for frames we haven't captured yet
+            if solved_seq > current_seq:
+                logger.debug(f"Platesolve is for future frame: solved seq {solved_seq} > current seq {current_seq}")
                 return False
             
             
@@ -1173,6 +1195,17 @@ class SpectroscopyCorrector(PlatesolveCorrector):
             self.last_processed_filename = solved_filename
             self.last_applied_sequence = solved_seq
             self.last_target_id = current_target_id
+            
+            # Try to delete the json after a successful solve application
+            try:
+                if self.json_file_path.exists():
+                    self.json_file_path.unlink()
+                    logger.debug("Deleted platesolve JSON after successful application")
+            except PermissionError:
+                logger.debug("Tried, but could not delete platesolve JSON (permission error)")
+            except Exception as e:
+                logger.debug(f"Tried, but could not delete JSON: {e}")
+            
             
             # Set gate based on what frame we're actually at NOW (not the solved frame)
             if latest_captured_sequence is not None:
@@ -1536,7 +1569,7 @@ class SpectroscopySession:
         try:
             timestamp_suffix = target_data['timestamp'].strftime('%H%M%S')
             target_info = TargetInfo(
-                tic_id=f"MIRROR_{target_data['ra_hours']:.3f}h_{target_data['dec_deg']:+.3f}d_{timestamp_suffix}",  # NO _C here!
+                tic_id=f"MIRROR_{target_data['ra_hours']*15.0:.3f}r_{target_data['dec_deg']:+.3f}d_{timestamp_suffix}",  # NO _C here!
                 ra_j2000_hours=target_data['ra_hours'],
                 dec_j2000_deg=target_data['dec_deg'],
                 gaia_g_mag=12.0,
