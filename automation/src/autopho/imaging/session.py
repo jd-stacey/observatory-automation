@@ -9,6 +9,7 @@ from enum import Enum
 from autopho.imaging.fits_utils import create_fits_file
 from autopho.imaging.file_manager import FileManager
 from autopho.targets.observability import ObservabilityChecker
+from autopho.platesolving.corrector import extract_sequence_from_filename
 
 logger = logging.getLogger(__name__)
 
@@ -476,7 +477,7 @@ class ImagingSession:
                 
                 # Apply corrections based on current phase
                 if self._should_apply_correction():
-                    self._apply_periodic_correction()
+                    self._apply_periodic_correction(last_frame_path=image_filepath)
                 
             session_duration = (time.time() - self.session_start_time) / 3600
             logger.info("="*75)
@@ -643,9 +644,15 @@ class ImagingSession:
             phase_prefix = "ACQ" if self.current_phase == SessionPhase.ACQUISITION else "SCI"
             logger.debug(f"{phase_prefix} correction check...")
             
+            latest_seq = None
+            if last_frame_path:
+                latest_seq = extract_sequence_from_filename(Path(last_frame_path).name)
+                if latest_seq < 0:
+                    latest_seq = None
+            
             # For photometry, we can pass the last frame path for validation
             # (though less critical than spectroscopy)
-            result = self.corrector.apply_single_correction()
+            result = self.corrector.apply_single_correction(latest_captured_sequence=latest_seq)
             
             if result.applied:
                 logger.info(f"{phase_prefix} correction applied: {result.reason} "
