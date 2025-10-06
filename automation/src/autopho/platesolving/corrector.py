@@ -40,6 +40,7 @@ class PlatesolveCorrector:
         self.last_applied_sequence = -1
         self.last_target_id = None
         self.last_failed_filename = None
+        self.min_acceptable_sequence = 0
         
         self.cumulative_zero_time = 0
         self.rotator_driver = rotator_driver
@@ -174,7 +175,8 @@ class PlatesolveCorrector:
             raise PlatesolveCorrectorError(f"Failed to process platesolve data: {e}")
         
     # Update apply_single_correction() method
-    def apply_single_correction(self, timeout_seconds: Optional[float] = None) -> CorrectionResult:
+    def apply_single_correction(self, timeout_seconds: Optional[float] = None,
+                                latest_captured_sequence: Optional[int] = None) -> CorrectionResult:
         try:
             if not self.telescope_driver.is_connected():
                 return CorrectionResult(
@@ -242,6 +244,13 @@ class PlatesolveCorrector:
                         reason=f"Already applied correction for sequence {self.last_applied_sequence}"
                     )
                 
+            if current_seq < self.min_acceptable_sequence:
+                return CorrectionResult(
+                    applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
+                    rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
+                    reason=f"Solve too old: frame {current_seq} captured before last correction (min: {self.min_acceptable_sequence})"
+                )
+            
             ra_offset_deg, dec_offset_deg, rot_offset_deg, settle_time = self.process_platesolve_data(data)
             
             ra_offset_arcsec = ra_offset_deg * 3600.0
@@ -310,6 +319,11 @@ class PlatesolveCorrector:
                 self.last_processed_file = current_filename
                 self.last_applied_sequence = current_seq  # Use extracted sequence
                 self.last_target_id = current_target_id   # Update target tracking
+                
+                if latest_captured_sequence is not None:
+                    self.min_acceptable_sequence = latest_captured_sequence + 1
+                    logger.debug(f"Set min acceptable seq to {self.min_acceptable_sequence} (latest captured was {latest_captured_sequence})")
+                
                 logger.info(f"Applied correction for target={current_target_id}, seq={current_seq}")
                 
                 return CorrectionResult(
