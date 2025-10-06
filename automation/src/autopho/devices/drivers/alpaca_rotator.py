@@ -597,7 +597,7 @@ class FieldRotationTracker:
 
                 # Debug logging with stricter threshold to avoid spam
                 if abs(error) > move_threshold and abs(error) < 15.0:
-                    logger.debug(f"err={error:.6f}°, thr={move_threshold}°, req_pos={required_position:.6f}°")
+                    logger.debug(f"[field-rot] error={error:.6f}°, thresh={move_threshold}°, req_pos={required_position:.6f}°")
 
                 # Only move if error exceeds threshold and error is reasonable
                 if abs(error) > move_threshold and abs(error) < 20.0:
@@ -606,7 +606,7 @@ class FieldRotationTracker:
                     # Safety check
                     is_safe, safety_msg = self.rotator.check_position_safety(target_position)
                     if is_safe:
-                        logger.debug(f"Moving rotator: {current_position:.6f}° → {target_position:.6f}° (Δ={error:+.6f}°)")
+                        logger.debug(f"[field-rot] Moving rotator: {current_position:.6f}° → {target_position:.6f}° (Δ={error:+.6f}°)")
                         
                         # Use the existing position-based move method
                         success = self._execute_tracking_move(target_position)
@@ -616,16 +616,16 @@ class FieldRotationTracker:
                             cooldown_time = 0.5  # Short cooldown for normal moves
                             self._cooldown_until = _t.time() + cooldown_time
                         else:
-                            logger.warning("Tracking move failed, will retry next cycle")
+                            logger.warning("[field-rot] Tracking move failed, will retry next cycle")
                             
                     else:
-                        logger.warning(f"Unsafe rotator move rejected: {safety_msg}")
+                        logger.warning(f"[field-rot] Unsafe rotator move rejected: {safety_msg}")
 
                 elif abs(error) >= 30.0:
                     logger.error(f"[field-rot] Rejecting huge error: {error:.6f}° - possible calculation bug")
 
             except Exception as e:
-                logger.warning(f"Tracking loop error: {e}")
+                logger.warning(f"[field-rot] Tracking loop error: {e}")
 
             time.sleep(sleep_interval)
 
@@ -751,7 +751,7 @@ class FieldRotationTracker:
             estimated_time = move_distance / 2.5  # Conservative 1°/s estimate
             timeout_duration = max(min_timeout, estimated_time + 3.0)
             
-            logger.debug(f"Move distance: {move_distance:.3f}°, timeout: {timeout_duration:.1f}s")
+            logger.debug(f"[field-rot] Move distance: {move_distance:.3f}°, timeout: {timeout_duration:.1f} s")
             
             # Start the move
             self.rotator.rotator.MoveAbsolute(target_position)
@@ -775,14 +775,14 @@ class FieldRotationTracker:
                     if settle_time > 0:
                         time.sleep(settle_time)
                         
-                    logger.debug(f"Move successful: {current_pos_start:.6f}° → {current_pos:.6f}°")
+                    logger.debug(f"[field-rot] Move successful: {current_pos_start:.6f}° → {current_pos:.6f}°")
                     return True
                 
                 # Check for stalled movement
                 if abs(current_pos - last_pos) < 0.001:  # Less than 0.001° change
                     stall_count += 1
                     if stall_count > 20:  # 1 second of no movement (20 * 50ms)
-                        logger.warning(f"Rotator appears stalled at {current_pos:.6f}°, target was {target_position:.6f}°")
+                        logger.warning(f"[field-rot] Rotator appears stalled at {current_pos:.6f}°, target was {target_position:.6f}°")
                         return False
                 else:
                     stall_count = 0
@@ -793,12 +793,12 @@ class FieldRotationTracker:
             # Timeout - log the failure with more detail
             final_pos = self.rotator.get_position()
             actual_moved = abs(final_pos - current_pos_start)
-            logger.warning(f"Move timeout: target={target_position:.6f}°, start={current_pos_start:.6f}°, "
+            logger.warning(f"[field-rot] Move timeout: target={target_position:.6f}°, start={current_pos_start:.6f}°, "
                         f"final={final_pos:.6f}°, moved={actual_moved:.6f}° in {timeout_duration:.1f} s")
             return False
             
         except Exception as e:
-            logger.error(f"Tracking move execution failed: {e}")
+            logger.error(f"[field-rot] Tracking move execution failed: {e}")
             return False
     
     
