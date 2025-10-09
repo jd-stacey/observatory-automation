@@ -42,6 +42,9 @@ class PlatesolveCorrector:
         self.last_failed_filename = None
         self.min_acceptable_sequence = 0
         
+        self.current_target_id = None
+        self.session_start_time = None
+        
         self.cumulative_zero_time = 0
         self.rotator_driver = rotator_driver
         
@@ -71,6 +74,49 @@ class PlatesolveCorrector:
         else:
             logger.info("PlatesolveCorrector initialized without rotator")
         
+    def set_current_target(self, target_id: str):
+        """Set the expected target ID for validation"""
+        if self.current_target_id != target_id:
+            self.current_target_id = target_id
+            self.session_start_time = time.time()
+            
+            # Try to delete old platesolve data
+            if self.json_file_path.exists():
+                try:
+                    self.json_file_path.unlink()
+                    logger.info(f"Deleted old platesolve data for new target: {target_id}")
+                except PermissionError:
+                    logger.debug("Could not delete platesolve JSON (file in use)")
+                except Exception as e:
+                    logger.warning(f"Could not delete old platesolve JSON: {e}")
+            
+            # Reset tracking
+            self.last_applied_sequence = -1
+            self.last_processed_file = ""
+            self.last_target_id = None
+            self.min_acceptable_sequence = 0
+            self.last_failed_filename = None
+            
+            logger.info(f"Set current target: {target_id}")
+    
+    def _normalize_target_id(self, target_id: str) -> str:
+        """Normalize target ID for comparison (remove dashes, pluses)"""
+        if not target_id:
+            return ""
+        return target_id.replace('-', '').replace('+', '').upper()
+    
+    def _extract_target_from_filename(self, filename: str) -> Optional[str]:
+        """Extract target ID from filename"""
+        basename = Path(filename).name
+        # Match pattern: TARGETID_FILTER_YYYYMMDD_HHMMSS_XXs_NNNNN.fits
+        # or: TARGETID_YYYYMMDD_HHMMSS_XXs_NNNNN.fits
+        match = re.match(r'^(.+?)_[A-Z]?_?\d{8}_', basename)
+        if match:
+            return match.group(1)
+        # Fallback pattern without filter
+        match = re.match(r'^(.+?)_\d{8}_', basename)
+        return match.group(1) if match else None
+    
     def check_json_file_ready(self) -> Tuple[bool, Optional[Dict[str, Any]]]:
         try:
             if not self.json_file_path.exists():
@@ -101,6 +147,57 @@ class PlatesolveCorrector:
             logger.error(f"Error reading JSON platesolve file: {e}")
             return False, None
         
+    def is_platesolve_for_current_target(self, data: Dict[str, Any]) -> bool:
+        """Check if platesolve data is for the current target"""
+        try:
+            # If no target set, accept anything (backwards compatibility)
+            if not self.current_target_id:
+                logger.debug("No current target set - accepting platesolve")
+                return True
+            
+            # Check if platesolve is from current session
+            if self.session_start_time is not None:
+                try:
+                    json_mtime = self.json_file_path.stat().st_mtime
+                    if json_mtime < self.session_start_time:
+                        logger.debug(f"Platesolve predates current session - rejecting "
+                                   f"(JSON age: {time.time() - json_mtime:.1f}s, "
+                                   f"session age: {time.time() - self.session_start_time:.1f}s)")
+                        return False
+                except Exception as e:
+                    logger.warning(f"Could not check platesolve file time: {e}")
+            
+            # Extract target from platesolve filename
+            solved_filename = data.get('fitsname', {}).get("0", "")
+            if not solved_filename:
+                logger.debug("No filename in platesolve data")
+                return False
+            
+            solved_target = self._extract_target_from_filename(solved_filename)
+            if not solved_target:
+                logger.debug("Could not extract target from platesolve filename")
+                return False
+            
+            # Normalize both for comparison
+            solved_norm = self._normalize_target_id(solved_target)
+            current_norm = self._normalize_target_id(self.current_target_id)
+            
+            if solved_norm != current_norm:
+                logger.warning(f"Platesolve target mismatch! "
+                             f"Expected: {self.current_target_id}, "
+                             f"Got: {solved_target} "
+                             f"(from file: {Path(solved_filename).name})")
+                return False
+            
+            logger.debug(f"Platesolve target matches: {solved_target}")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"Error validating platesolve target: {e}")
+            return False  # Reject on validation errors
+    
+    
+    
     def process_platesolve_data(self, data: Dict[str, Any]) -> Tuple[float, float, float, float]:
     
         try:
@@ -174,7 +271,6 @@ class PlatesolveCorrector:
             logger.error(f"Error processing platesolve data: {e}")
             raise PlatesolveCorrectorError(f"Failed to process platesolve data: {e}")
         
-    # Update apply_single_correction() method
     def apply_single_correction(self, timeout_seconds: Optional[float] = None,
                                 latest_captured_sequence: Optional[int] = None) -> CorrectionResult:
         try:
@@ -210,6 +306,14 @@ class PlatesolveCorrector:
                         rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0, 
                         reason="No recent platesolve data available"
                     )
+            
+            # **NEW: Validate target BEFORE processing**
+            if not self.is_platesolve_for_current_target(data):
+                return CorrectionResult(
+                    applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
+                    rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
+                    reason="Platesolve is for different target - rejecting"
+                )
             
             current_filename = data.get('fitsname', {}).get("0", "")
             
@@ -320,10 +424,24 @@ class PlatesolveCorrector:
                 self.last_applied_sequence = current_seq  # Use extracted sequence
                 self.last_target_id = current_target_id   # Update target tracking
                 
+                # Delete platesolve JSON after successful solve
+                try:
+                    if self.json_file_path.exists():
+                        self.json_file_path.unlink()
+                        logger.debug("Deleted platesolve JSON after successful correction")
+                except PermissionError:
+                    logger.debug("Could not delete platesolve JSON (file in use)")
+                except Exception as e:
+                    logger.debug(f"Could not delete platesolve JSON: {e}")
+                
                 if latest_captured_sequence is not None:
                     self.min_acceptable_sequence = latest_captured_sequence + 1
                     logger.debug(f"Set min acceptable seq to {self.min_acceptable_sequence} (latest captured was {latest_captured_sequence})")
+                else:
+                    self.min_acceptable_sequence = current_seq + 1
+                    logger.debug(f"Set min acceptable seq to {self.min_acceptable_sequence} based on solved seq (no capture info)")
                 
+                               
                 logger.info(f"Applied correction for target={current_target_id}, seq={current_seq}")
                 
                 return CorrectionResult(
