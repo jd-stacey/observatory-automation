@@ -275,7 +275,10 @@ class ImagingSession:
             else:
                 logger.warning("Failed to start field rotation tracking")
         
-        
+        if self.corrector:
+            self.corrector.min_acceptable_sequence = 0
+            self.corrector.last_applied_sequence = -1
+            logger.debug("Corrector sequence tracking reset for science phase")
         
         
         logger.info(f"Acquisition complete: {self.acquisition_count} frames")
@@ -517,11 +520,10 @@ class ImagingSession:
             ##### DEBUGGING #####
             # Report telescope's .Tracking bool and its current RA/Dec Coords and internal Alt/Az coords
             # before every imaging frame
-            # may be worth trying setting .Tracking = True before every frame too if this is the issue
             
             if telescope_driver:
                 logger.debug(f"    DEBUG: .Tracking = {telescope_driver.telescope.Tracking}")
-                logger.debug(f"    DEBUG: Current Scope Pos = {telescope_driver.get_coordinates()}")
+                logger.debug(f"    DEBUG: Current Scope Pos (ra_hr, dec_deg) = {telescope_driver.get_coordinates()}")
                 logger.debug(f"    DEBUG: Current AltAz: Alt={telescope_driver.telescope.Altitude:.6f}, Az={telescope_driver.telescope.Azimuth:.6f}")
                 
             
