@@ -109,7 +109,7 @@ def wait_for_observing_conditions(target_info, obs_checker, ignore_twilight=Fals
     logger.info("WAITING FOR OBSERVING CONDITIONS")
     logger.info("="*60)
     logger.info(f"Target: {target_info.tic_id}")
-    logger.info(f"Coordinates: RA={target_info.ra_j2000_hours:.6f} h, Dec={target_info.dec_j2000_deg:.6f}°")
+    logger.info(f"Coordinates: RA={target_info.ra_j2000_hours:.6f} h ({target_info.ra_j2000_hours*15.0:.6f}°), Dec={target_info.dec_j2000_deg:.6f}°")
     
     start_time = datetime.now(timezone.utc)
     max_wait_hours = 16  # Don't wait more than 16 hours
@@ -133,12 +133,12 @@ def wait_for_observing_conditions(target_info, obs_checker, ignore_twilight=Fals
             logger.info(f"Waiting reasons: {'; '.join(obs_status.reasons)}")
             
             # Check if we're in a hopeless situation
-            if (obs_status.sun_altitude < -10 and obs_status.target_altitude < 0):
-                elapsed_hours = (datetime.now(timezone.utc) - start_time).total_seconds() / 3600
-                if elapsed_hours > 2:
-                    logger.warning("Target remains below horizon well into night")
-                    logger.warning("Target likely not observable tonight - consider different target")
-                    return False
+            # if (obs_status.sun_altitude < -10 and obs_status.target_altitude < 0):
+            #     elapsed_hours = (datetime.now(timezone.utc) - start_time).total_seconds() / 3600
+            #     if elapsed_hours > 8:
+            #         logger.warning("Target remains below horizon well into night")
+            #         logger.warning("Target likely not observable tonight - consider different target")
+            #         return False
             
             logger.info(f"Next check in {poll_interval/60:.1f} minutes...")
             
@@ -306,7 +306,7 @@ def main():
                     gaia_g_mag=12.0,  # Default for exposure calculation
                     magnitude_source="manual-default"
                 )
-                logger.info(f"Manual target: RA={ra_hours:.6f} h, Dec={dec_deg:.6f}°")
+                logger.info(f"Manual target: RA={ra_hours:.6f} h ({ra_hours*15.0:.6f}°), Dec={dec_deg:.6f}°")
                 
             except (ValueError, IndexError) as e:
                 logger.error(f"Invalid coordinates format '{args.coords}': {e}")
@@ -394,7 +394,7 @@ def main():
             
             tel_info = telescope_driver.get_telescope_info()
             logger.info(f"Connected to: {tel_info.get('name', 'Unknown telescope')}")
-            logger.info(f"Current position: RA={tel_info.get('ra_hours', 0):.6f} h, "
+            logger.info(f"Current position: RA={tel_info.get('ra_hours', 0):.6f} h ({tel_info.get('ra_hours', 0)*15.0:.6f}°), "
                         f"Dec={tel_info.get('dec_degrees', 0):.6f}°")
             
             logger.info("Starting telescope tracking monitor...")
@@ -502,9 +502,14 @@ def main():
                 logger.info("Cover opened successfully")
             
             
-            logger.info("Initialising platesolve corrector...")
             try:
+                logger.info("Initialising platesolve corrector...")
                 corrector = PlatesolveCorrector(telescope_driver, config_loader, rotator_driver)
+                
+                if corrector and hasattr(corrector, 'set_current_target'):
+                    corrector.set_current_target(target_info.tic_id)
+                    logger.debug(f"Set corrector target: {target_info.tic_id}")
+                
                 logger.info("Platesolve corrector initialised and ready for imaging loop")
                 
                 # Checks for latest platesolve info on initialization
@@ -558,7 +563,7 @@ def main():
         else:
             logger.info('DRY RUN: Skipping telescope operations')
             logger.info(f"  Would start telescope motor")
-            logger.info(f"  Would slew to: RA={target_info.ra_j2000_hours:.6f} h, "
+            logger.info(f"  Would slew to: RA={target_info.ra_j2000_hours:.6f} h ({target_info.ra_j2000_hours*15.0:.6f}°), "
                         f"Dec={target_info.dec_j2000_deg:.6f}°")
             logger.info(f"  Would use exposure time: {exposure_time} s")
             logger.info("DRY RUN: Skipping cover operations")
@@ -596,7 +601,7 @@ def main():
         logger.info(" "*30+"SESSION SUMMARY")
         logger.info("="*75)
         logger.info(f"Target: {target_info.tic_id}")
-        logger.info(f"Coordinates: RA={target_info.ra_j2000_hours:.6f} h, Dec={target_info.dec_j2000_deg:.6f}°")
+        logger.info(f"Coordinates: RA={target_info.ra_j2000_hours:.6f} h ({target_info.ra_j2000_hours*15.0:.6f}°), Dec={target_info.dec_j2000_deg:.6f}°")
         logger.info(f"Target altitude: {obs_status.target_altitude:.1f}°")
         logger.info(f"Sun altitude: {obs_status.sun_altitude:.1f}°")
         logger.info(f"Target observable: {obs_status.observable}")
