@@ -597,7 +597,7 @@ class FieldRotationTracker:
 
                 # Debug logging with stricter threshold to avoid spam
                 if abs(error) > move_threshold and abs(error) < 15.0:
-                    logger.debug(f"[field-rot] error={error:.6f}°, thresh={move_threshold}°, req_pos={required_position:.6f}°")
+                    logger.debug(f"[field-rot] err={error:.6f}°, thresh={move_threshold}°, req_pos={required_position:.6f}°")
 
                 # Only move if error exceeds threshold and error is reasonable
                 if abs(error) > move_threshold and abs(error) < 20.0:
