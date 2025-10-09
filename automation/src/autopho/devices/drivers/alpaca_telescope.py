@@ -101,6 +101,9 @@ class AlpacaTelescopeDriver:
             j2000 = SkyCoord(ra=ra_hours*u.hourangle, dec=dec_deg*u.deg, frame='fk5', equinox='J2000')
             jnow = j2000.transform_to(SkyCoord(ra=ra_hours*u.hourangle, dec=dec_deg*u.deg, frame='fk5', equinox=Time.now()).frame)
             
+            while self.telescope.Slewing:
+                logger.debug(f"    Telescope is currently slewing - waiting for it to stop... {self.telescope.Slewing}...")
+                time.sleep(0.5)
             
             self.telescope.SlewToCoordinatesAsync(jnow.ra.hour, jnow.dec.deg)
             
