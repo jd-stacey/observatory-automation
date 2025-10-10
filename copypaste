@@ -97,14 +97,25 @@ def main():
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging level (default: INFO)"
     )
+    parser.add_argument(
+        "--current-position",
+        action="store_true",
+        help="Capture image at telescope's current position (no slewing, skips observability checks)"
+    )
     
     args = parser.parse_args()
     
     # Validation
-    if not args.tic_id and not args.coords:
-        parser.error("Must provide either tic_id or --coords")
-    if args.tic_id and args.coords:
-        parser.error("Cannot use both tic_id and --coords - choose one")
+    if args.current_position:
+        # Current position mode - don't need target info
+        if args.tic_id or args.coords:
+            parser.error("Cannot use --current-position with tic_id or --coords")
+    else:
+        # Normal mode - need target
+        if not args.tic_id and not args.coords:
+            parser.error("Must provide either tic_id or --coords (or use --current-position)")
+        if args.tic_id and args.coords:
+            parser.error("Cannot use both tic_id and --coords - choose one")
     
     # Setup logging
     try:
@@ -113,7 +124,9 @@ def main():
         log_dir = Path(config_loader.get_config("paths")["logs"])
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         
-        if args.tic_id:    
+        if args.current_position:
+            log_name = f"single_{timestamp}_CURRENTPOS.log"
+        elif args.tic_id:    
             log_name = f"single_{timestamp}_{args.tic_id}.log"
         elif args.coords:
             log_name = f"single_{timestamp}_MANUAL.log"
@@ -147,8 +160,18 @@ def main():
         config_loader.load_all_configs()
         logger.info('Configuration loaded successfully')
         
-        # Resolve target
-        if args.coords:
+        # Resolve target (unless using current position)
+        if args.current_position:
+            logger.info("Using telescope's current position (no target resolution)")
+            # Create a generic target_info for current position
+            target_info = TargetInfo(
+                tic_id="CURRENT_POSITION",
+                ra_j2000_hours=0.0,  # Will be updated after telescope connection
+                dec_j2000_deg=0.0,
+                gaia_g_mag=12.0,
+                magnitude_source="current-position"
+            )
+        elif args.coords:
             logger.info(f"Using manual coordinates: {args.coords}")
             try:
                 coords_parts = args.coords.strip().split()
@@ -180,34 +203,38 @@ def main():
             target_resolver = TICTargetResolver(config_loader)
             target_info = target_resolver.resolve_tic_id(args.tic_id)
         
-        # Check observability
-        logger.info("Checking target observability...")
-        try:
-            observatory_config = config_loader.get_config('observatory')
-            checker = ObservabilityChecker(observatory_config)
-            obs_status = checker.check_target_observability(
-                target_info.ra_j2000_hours,
-                target_info.dec_j2000_deg,
-                ignore_twilight=args.ignore_twilight
-            )
-        
-            logger.info(f"Current target altitude: {obs_status.target_altitude:.1f}°")
-            logger.info(f"Current sun altitude: {obs_status.sun_altitude:.1f}°")
-            if obs_status.airmass:
-                logger.debug(f"Airmass: {obs_status.airmass:.2f}")
-                
-            if not obs_status.observable:
-                logger.error("Target not currently observable:")
-                for reason in obs_status.reasons:
-                    logger.error(f"  {reason}")
-                logger.error("Aborting - target must be observable to capture image")
-                return 1
+        # Check observability (skip if using current position)
+        if not args.current_position:
+            logger.info("Checking target observability...")
+            try:
+                observatory_config = config_loader.get_config('observatory')
+                checker = ObservabilityChecker(observatory_config)
+                obs_status = checker.check_target_observability(
+                    target_info.ra_j2000_hours,
+                    target_info.dec_j2000_deg,
+                    ignore_twilight=args.ignore_twilight
+                )
             
-            logger.info("Target is observable - proceeding")
+                logger.info(f"Current target altitude: {obs_status.target_altitude:.1f}°")
+                logger.info(f"Current sun altitude: {obs_status.sun_altitude:.1f}°")
+                if obs_status.airmass:
+                    logger.debug(f"Airmass: {obs_status.airmass:.2f}")
+                    
+                if not obs_status.observable:
+                    logger.error("Target not currently observable:")
+                    for reason in obs_status.reasons:
+                        logger.error(f"  {reason}")
+                    logger.error("Aborting - target must be observable to capture image")
+                    return 1
                 
-        except ObservabilityError as e:
-            logger.error(f"Observability check error: {e}")
-            return 1
+                logger.info("Target is observable - proceeding")
+                    
+            except ObservabilityError as e:
+                logger.error(f"Observability check error: {e}")
+                return 1
+        else:
+            logger.info("Skipping observability checks (using current position)")
+            obs_status = None
         
         # Discover cameras
         logger.info('Discovering cameras...')
@@ -248,6 +275,13 @@ def main():
         logger.info(f"Connected to: {tel_info.get('name', 'Unknown telescope')}")
         logger.info(f"Current position: RA={tel_info.get('ra_hours', 0):.6f} h ({tel_info.get('ra_hours', 0)*15.0:.6f}°), "
                     f"Dec={tel_info.get('dec_degrees', 0):.6f}°")
+        
+        # Update target_info if using current position
+        if args.current_position:
+            target_info.ra_j2000_hours = tel_info.get('ra_hours', 0)
+            target_info.dec_j2000_deg = tel_info.get('dec_degrees', 0)
+            target_info.tic_id = f"CURRENTPOS_{target_info.ra_j2000_hours:.3f}h_{target_info.dec_j2000_deg:+.3f}d"
+            logger.info(f"Using current telescope position as target")
         
         # Connect to cover
         cover_driver = None
@@ -296,20 +330,23 @@ def main():
             logger.warning(f"Filter wheel connection failed: {e} - continuing with current filter")
             filter_driver = None
         
-        # Slew to target
-        logger.info("Slewing to target coordinates...")
-        slew_success = telescope_driver.slew_to_coordinates(
-            target_info.ra_j2000_hours,
-            target_info.dec_j2000_deg
-        )
-        
-        if not slew_success:
-            logger.error('Failed to slew to target')
-            telescope_driver.motor_off()
-            telescope_driver.disconnect()
-            return 1
-        
-        logger.info('Telescope positioned at target coordinates')
+        # Slew to target (skip if using current position)
+        if not args.current_position:
+            logger.info("Slewing to target coordinates...")
+            slew_success = telescope_driver.slew_to_coordinates(
+                target_info.ra_j2000_hours,
+                target_info.dec_j2000_deg
+            )
+            
+            if not slew_success:
+                logger.error('Failed to slew to target')
+                telescope_driver.motor_off()
+                telescope_driver.disconnect()
+                return 1
+            
+            logger.info('Telescope positioned at target coordinates')
+        else:
+            logger.info('Using current telescope position (no slewing)')
         
         # Open cover
         if cover_driver:
