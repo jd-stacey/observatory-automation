@@ -250,17 +250,27 @@ def main():
             logger.error('Camera discovery failed')
             return 1
         
-        # Connect to main camera
+        # Connect to main camera (disable auto-cooler initialization)
         main_camera = camera_manager.get_main_camera()
         if not main_camera:
             logger.error("Main camera not found")
             return 1
-            
-        if not main_camera.connect():
-            logger.error("Failed to connect to main camera")
-            return 1
         
-        logger.info(f"Connected to main camera: {main_camera.name}")
+        # Manually connect without cooler initialization
+        try:
+            if not main_camera.camera.Connected:
+                main_camera.camera.Connected = True
+                import time
+                time.sleep(0.5)
+            main_camera.connected = main_camera.camera.Connected
+            if main_camera.connected:
+                logger.info(f"Connected to main camera: {main_camera.name} (cooler management disabled)")
+            else:
+                logger.error("Failed to connect to main camera")
+                return 1
+        except Exception as e:
+            logger.error(f"Failed to connect to main camera: {e}")
+            return 1
         
         # Connect to telescope
         logger.info('Connecting to telescope...')
@@ -370,16 +380,37 @@ def main():
         
         logger.info(f"Binning: {binning}x{binning}, Gain: {gain}")
         
-        # Capture the image
-        image_array = main_camera.capture_image(
-            exposure_time=args.exposure_time,
-            binning=binning,
-            gain=gain,
-            light=True
-        )
+        # Capture the image (with retry on timeout)
+        max_retries = 3
+        image_array = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info(f"Capture attempt {attempt}/{max_retries}...")
+                image_array = main_camera.capture_image(
+                    exposure_time=args.exposure_time,
+                    binning=binning,
+                    gain=gain,
+                    light=True
+                )
+                if image_array is not None:
+                    break
+                logger.warning(f"Attempt {attempt} returned no data, retrying...")
+            except Exception as e:
+                if "timed out" in str(e).lower() or "timeout" in str(e).lower():
+                    logger.warning(f"Attempt {attempt} timed out: {e}")
+                    if attempt < max_retries:
+                        logger.info("Retrying capture...")
+                        import time
+                        time.sleep(2)  # Brief pause before retry
+                    else:
+                        logger.error("All capture attempts failed")
+                        raise
+                else:
+                    # Non-timeout error, don't retry
+                    raise
         
         if image_array is None:
-            logger.error("Camera returned no image data")
+            logger.error("Camera returned no image data after all attempts")
             return 1
         
         logger.info("Image captured successfully")
