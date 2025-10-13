@@ -1,19 +1,19 @@
 # T2 Automation Software - User Guide (Drafting...)
 ## At Start-up (RaptorTCU)
 ### 1. Connect Wi-Fi internet to 'eduroam' network.
-<img src="img/eduroam.png" width=200/>
+<img src="img/eduroam.png" width=180/>
 
 ### 2. Ensure Autoslew <img src="img/autoslew.png" width="30" style="vertical-align: text-bottom;"/> and ASA ACC <img src="img/acc.png" width="30" style="vertical-align: text-bottom;"/> are running.
 <img src="img/autoslewss.png" height="200"/>   <img src="img/accss.png" height="200"/>
 
 ### 3. Open ASCOM Remote <img src="img/ascomremote.png" width="30" style="vertical-align: text-bottom;"/> and ensure drivers are connected and the Remote Server is Up.
-<img src="img/ascomremoteconnected.png"/>
+<img src="img/ascomremoteconnected.png" width="170"/>
 
-<div style="page-break-after: always;"></div>
+<!-- <div style="page-break-after: always;"></div> -->
 
-If drivers are not connected, e.g. you see:
+If drivers are not connected, e.g. if you see:
 
-<img src="img/ascomremotenotconnected.png"/>
+<img src="img/ascomremotenotconnected.png" width="150"/>
 
 Press 'Connect' and wait for confirmation messages (Note: the filter wheel must not be connected to ANY other software, i.e. ensure MaximDL, NINA etc are closed, or it will not connect), e.g.:
 
@@ -23,8 +23,8 @@ Then press 'Start' and wait for confirmation messages, e.g.:
 
 <img src="img/ascomremoteconnectmsgs2.png"/>
 
-### 4. Open a Command Prompt from the Start Menu
-<img src="img/cmd.png"/>
+### 4. Open a Command Prompt from the Start Menu <img src="img/cmd.png" width="200" style="vertical-align: text-bottom;"/>
+
 
 ### 5. In the terminal window, type:
 ```bash
@@ -42,12 +42,15 @@ cd automation
 ```
 Hints: You can use 'TAB' to auto-complete. E.g. if u type 'cd doc' and hit 'TAB' it should autocomplete the rest of the folder/file name. Type 'dir' to see the contents of the folder you are currently in. Type 'cd ..' to go up a folder in the structure.
 
-<div style="page-break-after: always;"></div>
+<!-- <div style="page-break-after: always;"></div> -->
 
 Your final command prompt should look like this:
 ```bash
 (drivescope) C:\Users\asa\Documents\JS\automation>
 ```
+
+<div style="page-break-after: always;"></div>
+
 # Taking a Single Image (Determining Exposure Time)
 You may wish to take a single image (or a series of single images) to confirm you have the correct target and to determine the optimal exposure time for your target.
 
@@ -89,11 +92,11 @@ Notes:
 - Observability: The program will check that the target is above 30° altitude and confirm that the Sun's altitude is low enough to allow observations. Using the `--ignore-twilight` command line argument will bypass Sun altitude checks and should only be used for daytime testing purposes with the dome closed. The program will terminate if either observability condition is not met.
 
 #### Examples
-To observe a TIC target with 5 second exposure time:
+- To observe a TIC target with 5 second exposure time:
 ```bash
 python t2_singleimage.py 123456789 --exposure-time 5.0
 ```
-To observe a TIC target with 10 second exposure time using the Lum filter:
+- To observe a TIC target with 10 second exposure time using the Lum filter:
 ```bash
 python t2_singleimage.py 123456789 --exposure-time 10.0 --filter L
 ```
@@ -111,17 +114,19 @@ e.g., P:\Photometry\2025\20250930\T2\singleimages
 ```
 Use File Explorer <img src="img/fileexplorer.png" width="30" style="vertical-align: text-bottom;"/> to navigate to the image directory and find the .fits file (P: drive is also called 'photometryshare').
 
+<div style="page-break-after: always;"></div>
+
 Open the .fits file in MaxIm DL <img src="img/maximdl.png" width="30" style="vertical-align: text-bottom;"/> by right-clicking the file and selecting 'Open With -> MaxIm DL' <img src="img/openwithmaximdl.png" height="20" style="vertical-align: text-bottom;"/>.
 
 Enable crosshairs by right-clicking in your image and selecting 'Crosshairs -> Visible'.
 
-<img src="img/maximdlcrosshairs.png" width="300"/>
+<img src="img/maximdlcrosshairs.png" width="350"/>
 
 You will likely need to zoom out to see your full image (use mouse wheel or the zoom buttons at the top <img src="img/maximdlzoom.png" height="20" style="vertical-align: text-bottom;"/>).
 
 Open the information window by clicking the information icon at the top <img src="img/maximdlinfo.png" height="20" style="vertical-align: text-bottom;"/>, or via 'Ctrl + I' or via 'View -> Information Window'.
 
-<img src="img/maximdlinfowindow.png" width="140"/>
+<img src="img/maximdlinfowindow.png" width="240"/>
 
 Position the aperture over your target star (make sure to select the correct star, it might not be the one at/near the crosshair centre) and measure the maximum count (ideal is around 10,000-30,000). You can adjust the size of the aperture by right-clicking the image and selecting 'Set Aperture Radius'.
 
@@ -198,6 +203,8 @@ If your target is not immediately observable (hasn't risen about 30° altitude y
 
 <img src="img/observability.png"/>
 
+<div style="page-break-after: always;"></div>
+
 ### Files
 Directories are automatically created and files saved according to date, e.g. (images in folders with the '_acq' suffix are used for target acquisition purposes):
 ```bash
@@ -260,15 +267,15 @@ The program will detect whether Autoslew is running (and try to launch it if it 
 #### If any security warnings or user account alerts pop-up, make sure to click 'Yes' to allow them.
 <img src="img/uac.png" width="300"/>
 
-If successful, the system statuses for each device (Autoslew, Telescope, Rotator, Cover) should turn green and show their current status, e.g.:
+If successful, the system status for each device (Autoslew, Telescope, Rotator, Cover) should turn green and show their current status, e.g.:
 
 <img src="img/shutdownstatus.png"/>
 
 If unsuccessful, try re-checking connections by clicking '1. Start Autoslew & Check Connections' again.
 
-### 2. Shutdown the Telescope
+### 3. Shutdown the Telescope
 
-Click '2. TELESCOPE SHUTDOWN'
+Click '2. TELESCOPE SHUTDOWN'.
 
 <img src="img/shutdownshutdown.png"/>
 
@@ -276,7 +283,7 @@ A series of warning messages will pop-up, if you continue past them the tool wil
 
 <img src="img/shutdownmsg1.png" width="350"/>  <img src="img/shutdownmsg2.png" width="350"/>  
 
-If successful, the system statuses for each device should update, e.g.:
+If successful, the system status for each device should update, e.g.:
 
 <img src="img/shutdowncompletestatus.png"/>
 
