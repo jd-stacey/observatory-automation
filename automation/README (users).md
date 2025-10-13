@@ -1,5 +1,5 @@
-# T2 Automation Software - User Guide (Being Drafted....)
-## At Start-up
+# T2 Automation Software - User Guide (Drafting...)
+## At Start-up (RaptorTCU)
 ### 1. Connect Wi-Fi internet to 'eduroam' network.
 <img src="img/eduroam.png" width=200/>
 
@@ -9,7 +9,9 @@
 ### 3. Open ASCOM Remote <img src="img/ascomremote.png" width="30" style="vertical-align: text-bottom;"/> and ensure drivers are connected and the Remote Server is Up.
 <img src="img/ascomremoteconnected.png"/>
 
-If drivers are not connected, e.g.:
+<div style="page-break-after: always;"></div>
+
+If drivers are not connected, e.g. you see:
 
 <img src="img/ascomremotenotconnected.png"/>
 
@@ -25,23 +27,25 @@ Then press 'Start' and wait for confirmation messages, e.g.:
 <img src="img/cmd.png"/>
 
 ### 5. In the terminal window, type:
-```powershell
+```bash
 conda activate drivescope
 ```
 The prompt prefix should change to (drivescope), e.g.:
-```powershell
-(drivescope) C:\Users\asa
+```bash
+(drivescope) C:\Users\asa>
 ```
 
 ### 6. Change directories to the automation folder, by either (depending on which folder you start in):
-```powershell
+```bash
 cd Documents\JS\automation
 cd automation
 ```
 Hints: You can use 'TAB' to auto-complete. E.g. if u type 'cd doc' and hit 'TAB' it should autocomplete the rest of the folder/file name. Type 'dir' to see the contents of the folder you are currently in. Type 'cd ..' to go up a folder in the structure.
 
+<div style="page-break-after: always;"></div>
+
 Your final command prompt should look like this:
-```powershell
+```bash
 (drivescope) C:\Users\asa\Documents\JS\automation>
 ```
 # Taking a Single Image (Determining Exposure Time)
@@ -53,14 +57,14 @@ You may wish to take a single image (or a series of single images) to confirm yo
 - Camera coolers: This program will NOT initiate the camera's coolers.
 
 The program to take a single image is called via:
-```powershell
+```bash
 python t2_singleimage.py [TARGET] [OPTIONS]
 ```
 ## Basic Usage
 
 ### Using TIC ID
 Any of these formats are acceptable:
-```powershell
+```bash
 python t2_singleimage.py 123456789
 python t2_singleimage.py TIC123456789
 python t2_singleimage.py TIC-123456789
@@ -71,7 +75,7 @@ Target coordinates will be determined via TIC look-up. The exposure time must be
 Command line arguments can be used for additional customization and to override program defaults.
 
 | Option | Description | Default |
-|--------|-----------|---------|
+|--------|-----------|:---------:|
 |`-h` or `--help` | Displays help message and exits | `-` |
 |`--exposure-time` (Required) | Exposure time in seconds for the image | `-` |
 |`--coords` | Resolves target based on J2000 coordinates ("RA_DEG DEC_DEG") instead of TIC ID | `-` |
@@ -86,15 +90,15 @@ Notes:
 
 #### Examples
 To observe a TIC target with 5 second exposure time:
-```powershell
+```bash
 python t2_singleimage.py 123456789 --exposure-time 5.0
 ```
 To observe a TIC target with 10 second exposure time using the Lum filter:
-```powershell
+```bash
 python t2_singleimage.py 123456789 --exposure-time 10.0 --filter L
 ```
 - To observe a target without a TIC ID via its J2000 coordinates (RA and Dec in decimal degrees) with 20 second exposure time with the Clear filter (Clear is the default):
-```powershell
+```bash
 python t2_singleimage.py --coords "256.263748 -42.17295" --exposure-time 20.0
 ```
 
@@ -103,8 +107,7 @@ Images are saved to the following directory (based on the observation date):
 ```
 P:\Photometry\YYYY\YYYYMMDD\T2\singleimages
 
-e.g.:
-P:\Photometry\2025\20250930\T2\singleimages
+e.g., P:\Photometry\2025\20250930\T2\singleimages
 ```
 Use File Explorer <img src="img/fileexplorer.png" width="30" style="vertical-align: text-bottom;"/> to navigate to the image directory and find the .fits file (P: drive is also called 'photometryshare').
 
@@ -122,7 +125,7 @@ Open the information window by clicking the information icon at the top <img src
 
 Position the aperture over your target star (make sure to select the correct star, it might not be the one at/near the crosshair centre) and measure the maximum count (ideal is around 10,000-30,000). You can adjust the size of the aperture by right-clicking the image and selecting 'Set Aperture Radius'.
 
-<img src="img/maximdlexp.png" width="500"/>
+<img src="img/maximdlexp.png" width="600"/>
 
 If counts are not appropriate, repeat procedure (take a new image) with a different exposure time. If the counts are too high, reduce the exposure time, if the counts are too low, increase the exposure time (remember a target's counts will usually increase as it rises in the sky, less atmosphere to see through). 
 
@@ -130,12 +133,14 @@ Once you have an optimised exposure time, you can proceed to Automated (Continuo
 
 Close MaxIm DL.
 
+<div style="page-break-after: always;"></div>
+
 # Automated (Continuous) Photometry
 
 Automated Photometry has one primary mode, where targets are resolved based on their TIC ID.
 
 The program is called via:
-```powershell
+```bash
 python -u main.py [TARGET] [OPTIONS]
 ```
 
@@ -143,28 +148,28 @@ python -u main.py [TARGET] [OPTIONS]
 
 ### Using TIC ID
 Any of these formats are acceptable:
-```powershell
+```bash
 python -u main.py 123456789
 python -u main.py TIC123456789
 python -u main.py TIC-123456789
 ```
 
-Target coordinates and magnitude will be determined via TIC look-up and default exposure time calculated based on Gaia G-mag. The exposure time can (and should) be overridden using command line arguments.
+Target coordinates and magnitude will be determined via TIC look-up and default exposure time calculated based on Gaia G-mag. The exposure time can (and should) be overridden using command line arguments (use Single Image Mode above to determine optimal exposure time).
 
 ### Command Line Arguments
 Command line arguments can be used for additional customization and to override program defaults.
 
 | Option | Description | Default |
-|--------|-----------|---------|
+|--------|-----------|:---------:|
 |`-h` or `--help` | Displays help message and exits | `-` |
 |`--coords` | Resolves target based on J2000 coordinates ("RA_DEG DEC_DEG") instead of TIC ID | `-` |
 |`--filter` | Selects the filter to use (L/B/G/R/C/I/H) | `C` |
-|`--exposure-time` | Override exposure time (seconds) | Calc from Gaia G-mag |
+|`--exposure-time` (Recommended) | Override exposure time calculations (seconds) | `-` |
 |`--log-level` | Terminal display logging level (DEBUG/INFO/WARNING/ERROR) | `INFO` |
 |`--duration` | Session duration (hours) | `-` |
 |`--max-exposures` | Maximum number of exposures to take | `-` |
 |`--ignore-twilight` | Bypass twilight (Sun Altitude) checks for daytime testing | `False` |
-|`--no-park` | Skip telescope parking at end of session | Auto-park |
+|`--no-park` | Skip telescope parking at end of session | `False` |
 
 Notes:
 - Filter options: L=Lum, B=Blue, G=Green, R=Sloan-r, C=Clear, I=Sloan-i, H=H-alpha
@@ -173,19 +178,19 @@ Notes:
 #### Examples
 
 - To observe a TIC target with 10 second exposure time:
-```powershell
+```bash
 python -u main.py 123456789 --exposure-time 10.0
 ```
 - To observe a TIC target with 30 second exposure time with the Lum filter:
-```powershell
+```bash
 python -u main.py 123456789 --exposure-time 30.0 --filter L
 ```
 - To observe a target without a TIC ID via its J2000 coordinates (RA and Dec in decimal degrees) with 20 second exposure time with the Clear filter (Clear is the default):
-```powershell
+```python
 python -u main.py --coords "256.263748 -42.17295" --exposure-time 20.0
 ```
 - To observe a TIC target with 5 second exposure time and more detailed console logging:
-```powershell
+```python
 python -u main.py 123456789 --exposure-time 5.0 --log-level DEBUG
 ```
 ### On Observability
@@ -193,13 +198,99 @@ If your target is not immediately observable (hasn't risen about 30° altitude y
 
 <img src="img/observability.png"/>
 
+### Files
+Directories are automatically created and files saved according to date, e.g. (images in folders with the '_acq' suffix are used for target acquisition purposes):
+```bash
+P:\Photometry\YYYY\YYYYMMDD\T2\TIC123456789
+```
+
+### Platesolving/Guiding...
+
+
+# Automated Spectroscopy
+
+## Basic Usage
+
+### Using TIC ID
+
+### Using Coordinates
+
+### Using T5 Mirroring
+#### Log Parsing etc
+
+
+
+<div style="page-break-after: always;"></div>
+
+# Telescope Shutdown Tool (T2shutdown.exe) <img src="img/shutdown.png" width="40" style="vertical-align: text-bottom;"/>
+
+### DO NOT use this tool during normal telescope operations - it will perform physical actions on telescope systems.
+
+### This tool will NOT interact with the cameras at all. 
+
+#### If you have used the cameras in other programs (e.g. MaxIM DL) you MUST stop the coolers and disconnect the cameras in those programs manually.
+
+## In Automated Photometry or Spectroscopy
+
+The telescope should automatically handle shutdown procedures in both automated photometry and spectroscopy modes, closing covers, stopping the rotator and parking the telescope (unless the `--no-park` argument is used which prevents parking, or the `--ignore-twilight` argument is used which ignores sunrise) at the end of observations.
+
+However, program errors, TCU restarts or manual observations via other programs, for example, may require manual shutdown of the telescope into a safe operating mode. The T2shutdown.exe program can be used for this purpose.
+
+## Using the Shutdown Tool
+
+### 1. Open the Tool
+Open the tool by double-clicking the T2shutdown.exe file on the RaptorTCU Desktop.
+
+<img src="img/shutdownexe.png"/>
+
+<img src="img/shutdownmenu.png"/>
+
+### 2. Initialise Connections
+
+Ideally, Autoslew <img src="img/autoslew.png" width="30" style="vertical-align: text-bottom;"/> and ASA ACC <img src="img/acc.png" width="30" style="vertical-align: text-bottom;"/> should already be running, though the tool will try to launch them if it detects they are not running.
+
+<div style="page-break-after: always;"></div>
+
+Click '1. Start Autoslew & Check Connections'
+
+<img src="img/shutdownstart.png"/>
+
+The program will detect whether Autoslew is running (and try to launch it if it doesn't) and initialise various connections (this full process can take up to 45 seconds).
+
+#### If any security warnings or user account alerts pop-up, make sure to click 'Yes' to allow them.
+<img src="img/uac.png" width="300"/>
+
+If successful, the system statuses for each device (Autoslew, Telescope, Rotator, Cover) should turn green and show their current status, e.g.:
+
+<img src="img/shutdownstatus.png"/>
+
+If unsuccessful, try re-checking connections by clicking '1. Start Autoslew & Check Connections' again.
+
+### 2. Shutdown the Telescope
+
+Click '2. TELESCOPE SHUTDOWN'
+
+<img src="img/shutdownshutdown.png"/>
+
+A series of warning messages will pop-up, if you continue past them the tool will stop the rotator, close the telescope covers, slew the telescope to its park position and turn off its motors.
+
+<img src="img/shutdownmsg1.png" width="350"/>  <img src="img/shutdownmsg2.png" width="350"/>  
+
+If successful, the system statuses for each device should update, e.g.:
+
+<img src="img/shutdowncompletestatus.png"/>
+
+And the Activity Log should show successful completion, e.g.:
+
+<img src="img/shutdowncompletelog.png"/>
+
+You can now exit the Shutdown Tool.
+
+<div style="page-break-after: always;"></div>
+
+# Troubleshooting
+
+## Field Rotator and Rotator Flips...
+
+
 <img src="img/"/>
-
-
-### Platesolving...
-
-### Field Rotator and Rotator Flips...
-
-### Mirror/Log Parsing...
-
-## Troubleshooting
