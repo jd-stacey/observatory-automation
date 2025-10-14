@@ -13,27 +13,29 @@ from autopho.targets.resolver import TICTargetResolver, TargetResolutionError, T
 from autopho.devices.drivers.alpaca_telescope import AlpacaTelescopeDriver, AlpacaTelescopeError
 from autopho.devices.drivers.alpaca_cover import AlpacaCoverDriver, AlpacaCoverError
 from autopho.devices.drivers.alpaca_filterwheel import AlpacaFilterWheelDriver, AlpacaFilterWheelError
+from autopho.devices.drivers.alpaca_focuser import AlpacaFocuserDriver, AlpacaFocuserError
 from autopho.devices.camera import CameraManager, CameraError
 from autopho.targets.observability import ObservabilityChecker, ObservabilityError
 from autopho.imaging.fits_utils import create_fits_file
 from autopho.imaging.file_manager import FileManager
 
+
 # Import focuser driver from the project structure
-sys.path.insert(0, str(Path(__file__).parent / 'src' / 'autopho' / 'devices' / 'drivers'))
-try:
-    from alpaca_focuser import AlpacaFocuserDriver, AlpacaFocuserError
-except ImportError:
-    # Fallback if it's in a different location
-    from pathlib import Path
-    import importlib.util
-    focuser_path = Path(__file__).parent / 'src' / 'autopho' / 'devices' / 'drivers' / 'alpaca_focuser.py'
-    if not focuser_path.exists():
-        raise ImportError("Cannot find alpaca_focuser.py - please check file location")
-    spec = importlib.util.spec_from_file_location("alpaca_focuser", focuser_path)
-    alpaca_focuser = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(alpaca_focuser)
-    AlpacaFocuserDriver = alpaca_focuser.AlpacaFocuserDriver
-    AlpacaFocuserError = alpaca_focuser.AlpacaFocuserError
+# sys.path.insert(0, str(Path(__file__).parent / 'src' / 'autopho' / 'devices' / 'drivers'))
+# try:
+#     from alpaca_focuser import AlpacaFocuserDriver, AlpacaFocuserError
+# except ImportError:
+#     # Fallback if it's in a different location
+#     from pathlib import Path
+#     import importlib.util
+#     focuser_path = Path(__file__).parent / 'src' / 'autopho' / 'devices' / 'drivers' / 'alpaca_focuser.py'
+#     if not focuser_path.exists():
+#         raise ImportError("Cannot find alpaca_focuser.py - please check file location")
+#     spec = importlib.util.spec_from_file_location("alpaca_focuser", focuser_path)
+#     alpaca_focuser = importlib.util.module_from_spec(spec)
+#     spec.loader.exec_module(alpaca_focuser)
+#     AlpacaFocuserDriver = alpaca_focuser.AlpacaFocuserDriver
+#     AlpacaFocuserError = alpaca_focuser.AlpacaFocuserError
 
 
 def setup_logging(log_level: str, log_dir: Path, log_name: str = None):
@@ -160,9 +162,9 @@ def main():
         filters_to_test = sweep_config.get('filters', ['C', 'B', 'G', 'R', 'L', 'I', 'H'])
         
         logger.info(f"Focus sweep configuration:")
-        logger.info(f"  Range: ±{range_steps} steps")
+        logger.info(f"  Range: ±{range_steps}")
         logger.info(f"  Step size: {step_size}")
-        logger.info(f"  Exposure time: {exposure_time}s")
+        logger.info(f"  Exposure time: {exposure_time} s")
         logger.info(f"  Filters: {', '.join(filters_to_test)}")
         
         # Resolve target
@@ -170,7 +172,7 @@ def main():
         target_resolver = TICTargetResolver(config_loader)
         target_info = target_resolver.resolve_tic_id(args.tic_id)
         logger.info(f"Target: {target_info.tic_id}")
-        logger.info(f"Coordinates: RA={target_info.ra_j2000_hours:.6f} h, Dec={target_info.dec_j2000_deg:.6f}°")
+        logger.info(f"Coordinates: RA={target_info.ra_j2000_hours:.6f} h ({target_info.ra_j2000_hours*15.0:.6f}°), Dec={target_info.dec_j2000_deg:.6f}°")
         
         # Check observability
         logger.info("Checking target observability...")
@@ -333,7 +335,7 @@ def main():
             
             logger.info("")
             logger.info("="*75)
-            logger.info(f"FILTER: {filter_code} (Optimal position: {optimal_position})")
+            logger.info(f"FILTER: {filter_code} (Starting position: {optimal_position})")
             logger.info("="*75)
             
             # Change filter
@@ -368,7 +370,7 @@ def main():
                         binning=binning,
                         gain=gain,
                         light=True
-                    )
+                    ) 
                     
                     if image_array is None:
                         logger.warning(f"No image data returned for position {focus_pos}")
@@ -388,8 +390,8 @@ def main():
                     if hasattr(hdu, 'header'):
                         hdu.header['IMGTYPE'] = ('FocusSweep', 'Focus position test image')
                         hdu.header['FOCUSPOS'] = (focus_pos, 'Focuser position during exposure')
-                        hdu.header['FOCUSOPT'] = (optimal_position, 'Optimal focus position for filter')
-                        hdu.header['FOCUSOFF'] = (focus_pos - optimal_position, 'Offset from optimal position')
+                        hdu.header['FOCUSCFG'] = (optimal_position, 'Starting focus position for filter')
+                        hdu.header['FOCUSOFF'] = (focus_pos - optimal_position, 'Offset from starting position')
                     
                     # Save with focus position in filename
                     filename = f"{target_info.tic_id}_{filter_code}_focus{focus_pos:05d}_{timestamp}.fits"
@@ -472,14 +474,15 @@ def main():
                 filter_driver.disconnect()
             if focuser_driver:
                 logger.info("Disconnecting focuser...")
-                focuser_driver.disconnect()
+                # Focuser_driver.disconnect()
+                # Focuser cleanup not needed
             if telescope_driver:
                 logger.info("Turning telescope motor off...")
                 telescope_driver.motor_off()
                 telescope_driver.disconnect()
             if camera_manager:
                 logger.info("Disconnecting camera...")
-                # Camera cleanup if needed
+                # Camera cleanup not needed
             
             logger.info("="*75)
             logger.info(" "*26+"SESSION COMPLETE")
