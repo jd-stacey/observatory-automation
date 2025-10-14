@@ -32,22 +32,22 @@ focuser:
   type: alpaca
   address: "127.0.0.1:11112"
   device_number: 0
-  # maybe Dict of nominal values for Filters: Focus Lengths in here e.g.
-  focus_positions:
-    c: 15155
+  # maybe Dict of nominal values for Filters: Focus Positions in here e.g.
+  focus_positions:          # starting positions for t2_focus_sweep.py testing
+    c: 15100
     l: 15200
-    b: 14980
-    g: 15050
-    r: 15120
+    b: 15120
+    g: 15150
+    r: 15270
     i: 15180
     h: 15300
-  focus_sweep:
-    range_steps: 100        # ±100 steps around optimal
-    step_size: 10           # test every 10 steps
+  focus_sweep:              # Only for use with t2_focus_sweep.py - for testing filter/focuser positions
+    range_steps: 200        # ±100 around optimal
+    step_size: 25           # test every 10 steps
     exposure_time: 3.0      # 3 seconds per image
-    filters: ['C', 'L', 'B', 'G', 'R', 'I', 'H']  # which to test
+    filters: ['C', 'L', 'B', 'G', 'R', 'I', 'H']  # which filters to test
   spectro_focus_position:
-    spectro: 18433 #?
+    spectro: 18433 
 
 
 
@@ -58,22 +58,22 @@ filter_wheel:
   settle_time: 0.1        # time to wait after filter change
 
 cameras:
-  main:                         
-    type: alpaca
-    address: "127.0.0.1:11113"  
-    name_pattern: "294MM"
-    role: 'guide'                
-    default_binning: 4
-    default_gain: 150
-    target_temperature: -10.0
-  # main:                          
+  # main:                         
   #   type: alpaca
   #   address: "127.0.0.1:11113"  
-  #   name_pattern: "6200MM"
-  #   role: 'main'                 
+  #   name_pattern: "294MM"
+  #   role: 'guide'                
   #   default_binning: 4
-  #   default_gain: 100
-  #   target_temperature: -15.0
+  #   default_gain: 200
+  #   target_temperature: -10.0
+  main:                          
+    type: alpaca
+    address: "127.0.0.1:11113"  
+    name_pattern: "6200MM"
+    role: 'main'                 
+    default_binning: 4
+    default_gain: 100
+    target_temperature: -15.0
   
   guide:                         
     type: alpaca
@@ -81,10 +81,9 @@ cameras:
     name_pattern: "294MM"
     role: 'guide'                
     default_binning: 4
-    default_gain: 150
+    default_gain: 200
     target_temperature: -10.0
     
   
-
 
   
