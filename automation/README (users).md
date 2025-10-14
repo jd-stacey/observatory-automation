@@ -144,12 +144,12 @@ Close MaxIm DL.
 
 Automated Photometry has one primary mode, where targets are resolved based on their TIC ID.
 
+## Basic Usage
+
 The program is called via:
 ```bash
 python -u main.py [TARGET] [OPTIONS]
 ```
-
-## Basic Usage
 
 ### Using TIC ID
 Any of these formats are acceptable:
@@ -213,18 +213,79 @@ P:\Photometry\YYYY\YYYYMMDD\T2\TIC123456789
 
 ### Platesolving/Guiding...
 
+<div style="page-break-after: always;"></div>
 
 # Automated Spectroscopy
+Automated Spectroscopy has three primary operating modes:
+- **Single Target Mode via TIC ID** - Observe a specific TIC catalog target.
+- **Single Target Mode via Coordinates** - Observe a specific target via J2000 coordinates.
+- **Mirror Mode** - Continuously monitor another telescope via log parsing and mirror its targets.
 
 ## Basic Usage
+The program is called via:
+```bash
+python -u t2_spectro.py [MODE] [TARGET] [OPTIONS]
+```
 
 ### Using TIC ID
 
+Any of these formats are acceptable:
+```bash
+python -u t2_spectro.py tic 123456789
+python -u t2_spectro.py tic TIC123456789
+python -u t2_spectro.py tic TIC-123456789
+```
+
 ### Using Coordinates
+```bash
+python -u t2_spectro.py coords "44.5 -30.2"
+```
+*Note: Both RA and Dec coordinates are in decimal degrees.
 
-### Using T5 Mirroring
-#### Log Parsing etc
+### Using Mirror Mode
+```bash
+python -u t2_spectro.py mirror
+```
 
+#### Log Parsing
+To enable log parsing
+
+Open Windows Powershell from the Start Menu <img src="img/powershell.png" width="200" style="vertical-align: text-bottom;"/>
+
+Change to the P: drive by typing:
+```bash
+P:
+```
+
+Change directories to the temp folder by typing:
+```bash
+cd temp
+```
+
+Run the log parser by typing:
+```bash
+python parse_telcom_log.py
+```
+Leave Powershell running - it will continuously check for new spectroscopy targets and monitor dome closure messages from the other telescope.
+
+### Command Line Arguments
+
+Command line arguments can be used for additional customization and to override program defaults, though are generally not required in spectroscopy mode.
+
+| Option | Description | Default |
+|--------|-------------|:-------:|
+|`--ignore-twilight` | Bypass twilight (Sun Altitude) checks for daytime testing (will also prevent shutdown) | `False` |
+|`--exposure-time` | Override exposure time (seconds) | Set in config |
+|`--duration` | Session duration (hours) | Set in config |
+|`--poll-interval` | How often to check mirror file for new targets (seconds) | `10.0` |
+|`--log-level` | Terminal display logging level (DEBUG/INFO/WARNING/ERROR) | `INFO` |
+|`--dry-run` | Simulate without hardware movement or imaging | `False` |
+<!-- |`--config-dir` | Configuration directory | `config` | -->
+
+
+### Imaging and Plate-Solving During Spectroscopy
+
+Imaging during spectroscopy is only used for plate-solving and guiding (positioning the star directly over the fibre), so the calculation of exposure times is adaptive, automatically adjusting based on responses from the external platesolver.
 
 
 <div style="page-break-after: always;"></div>
@@ -271,7 +332,7 @@ If successful, the system status for each device (Autoslew, Telescope, Rotator, 
 
 <img src="img/shutdownstatus.png"/>
 
-If unsuccessful, try re-checking connections by clicking '1. Start Autoslew & Check Connections' again.
+If unsuccessful, try re-checking connections by clicking '1. Start Autoslew & Check Connections' again. 
 
 ### 3. Shutdown the Telescope
 
