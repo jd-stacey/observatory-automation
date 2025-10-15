@@ -15,7 +15,8 @@ from autopho.config.loader import ConfigLoader, ConfigurationError
 from autopho.targets.resolver import TICTargetResolver, TargetInfo
 from autopho.devices.drivers.alpaca_telescope import AlpacaTelescopeDriver
 from autopho.devices.drivers.alpaca_cover import AlpacaCoverDriver
-from autopho.devices.drivers.alpaca_focuser import AlpacaFocuserDriver
+from autopho.devices.drivers.alpaca_focuser import AlpacaFocuserDriver, AlpacaFocuserError
+from autopho.devices.focus_filter_manager import FocusFilterManager, FocusFilterManagerError
 from autopho.devices.camera import CameraManager, CameraError
 from autopho.targets.observability import ObservabilityChecker
 from autopho.platesolving.corrector import PlatesolveCorrector, PlatesolveCorrectorError, CorrectionResult
@@ -1702,6 +1703,10 @@ def main():
             if not telescope_driver.connect(config_loader.get_telescope_config()):
                 logger.error("Failed to connect to telescope")
                 return 1
+            
+            
+            # SPECTRO FOCUSER INTEGRATION HERE
+            
             
             # Safety check: verify telescope is not parked before turning on motor
             tel_info = telescope_driver.get_telescope_info()

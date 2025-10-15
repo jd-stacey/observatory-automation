@@ -12,6 +12,8 @@ from autopho.targets.resolver import TICTargetResolver, TargetResolutionError, T
 from autopho.devices.drivers.alpaca_telescope import AlpacaTelescopeDriver, AlpacaTelescopeError
 from autopho.devices.drivers.alpaca_cover import AlpacaCoverDriver, AlpacaCoverError
 from autopho.devices.drivers.alpaca_filterwheel import AlpacaFilterWheelDriver, AlpacaFilterWheelError
+from autopho.devices.drivers.alpaca_focuser import AlpacaFocuserDriver, AlpacaFocuserError
+from autopho.devices.focus_filter_manager import FocusFilterManager, FocusFilterManagerError
 from autopho.devices.camera import CameraManager, CameraError
 from autopho.targets.observability import ObservabilityChecker, ObservabilityError
 from autopho.imaging.fits_utils import create_fits_file
@@ -340,6 +342,28 @@ def main():
             logger.warning(f"Filter wheel connection failed: {e} - continuing with current filter")
             filter_driver = None
         
+        # Connect to focuser
+        focuser_driver = None
+        logger.info("Connecting to focuser...")
+        try:
+            focuser_driver = AlpacaFocuserDriver()
+            focuser_config = config_loader.get_focuser_config()
+            if focuser_config and focuser_driver.connect(focuser_config):
+                focuser_info = focuser_driver.get_focuser_info()
+                logger.info(f"Connected to focuser: {focuser_info.get('name', 'Unknown')}")
+                logger.info(f"    Current position: {focuser_info.get('position', 'Unknown')}")
+            else:
+                logger.warning("Failed to connect to focuser - continuing without")
+                focuser_driver = None
+        except AlpacaFocuserError as e:
+            logger.warning(f"Focuser connection failed: {e} - continuing without")
+            focuser_driver = None
+        except Exception as e:
+            logger.warning(f"Unexpected focuser error: {e} - continuing without")
+            focuser_driver = None
+        
+        # SET FOCUS_FILTER_MANAGER HERE
+        
         # Slew to target (skip if using current position)
         if not args.current_position:
             logger.info("Slewing to target coordinates...")
@@ -509,6 +533,8 @@ def main():
                 # cover_driver.close_cover()
             if filter_driver:
                 filter_driver.disconnect()
+            if focuser_driver:
+                focuser_driver.disconnect()
             if telescope_driver:
                 logger.warning("Leaving telescope at target position (not parking)")
                 logger.info("Turning telescope motor off...")

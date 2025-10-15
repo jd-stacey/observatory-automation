@@ -68,11 +68,11 @@ python t2_singleimage.py [TARGET] [OPTIONS]
 ### Using TIC ID
 Any of these formats are acceptable:
 ```bash
-python t2_singleimage.py 123456789
-python t2_singleimage.py TIC123456789
-python t2_singleimage.py TIC-123456789
+python t2_singleimage.py 123456789 [OPTIONS]
+python t2_singleimage.py TIC123456789 [OPTIONS]
+python t2_singleimage.py TIC-123456789 [OPTIONS]
 ```
-Target coordinates will be determined via TIC look-up. The exposure time must be entered using command line arguments.
+Target coordinates will be determined via TIC look-up. **The exposure time must be entered using command line arguments.**
 
 ### Command Line Arguments
 Command line arguments can be used for additional customization and to override program defaults.
@@ -80,7 +80,7 @@ Command line arguments can be used for additional customization and to override 
 | Option | Description | Default |
 |--------|-----------|:---------:|
 |`-h` or `--help` | Displays help message and exits | `-` |
-|`--exposure-time` (Required) | Exposure time in seconds for the image | `-` |
+|`--exposure-time` (**Required**) | Exposure time in seconds for the image | `-` |
 |`--coords` | Resolves target based on J2000 coordinates ("RA_DEG DEC_DEG") instead of TIC ID | `-` |
 |`--current-position` | Take image at current position (no telescope slewing, no observability checks) | `False` |
 |`--filter` | Selects the filter to use (L/B/G/R/C/I/H) | `C` |
