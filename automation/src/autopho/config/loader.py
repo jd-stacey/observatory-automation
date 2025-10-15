@@ -183,6 +183,9 @@ class ConfigLoader:
         
         return final_exposure
         
+    def get_focuser_config(self) -> Dict[str, Any]:
+        devices_config = self.get_config("devices")
+        return devices_config.get('focuser', {})
     
     def get_header_config(self) -> Dict[str, Any]:
         if not hasattr(self, '_header_config'):
