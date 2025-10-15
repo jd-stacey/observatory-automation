@@ -1,525 +1,156 @@
-import sys
+"""
+Coordinated Filter Wheel and Focuser Management
+Handles synchronized filter changes with automatic focus adjustments
+"""
+
 import logging
-from rich.logging import RichHandler
-import argparse
-from pathlib import Path
-from datetime import datetime, timezone
-
-sys.path.insert(0, str(Path(__file__).parent / 'src'))
-
-from autopho.config.loader import ConfigLoader, ConfigurationError
-from autopho.targets.resolver import TICTargetResolver, TargetResolutionError, TargetInfo
-from autopho.devices.drivers.alpaca_telescope import AlpacaTelescopeDriver, AlpacaTelescopeError
-from autopho.devices.drivers.alpaca_cover import AlpacaCoverDriver, AlpacaCoverError
+from typing import Optional, Tuple
 from autopho.devices.drivers.alpaca_filterwheel import AlpacaFilterWheelDriver, AlpacaFilterWheelError
-from autopho.devices.camera import CameraManager, CameraError
-from autopho.targets.observability import ObservabilityChecker, ObservabilityError
-from autopho.imaging.fits_utils import create_fits_file
-from autopho.imaging.file_manager import FileManager
+from autopho.devices.drivers.alpaca_focuser import AlpacaFocuserDriver, AlpacaFocuserError
+
+logger = logging.getLogger(__name__)
+
+class FocusFilterManagerError(Exception):
+    """Exception raised for focus/filter coordination errors"""
+    pass
 
 
-def setup_logging(log_level: str, log_dir: Path, log_name: str = None):
-    """Setup logging for single image capture"""
-    numeric_level = getattr(logging, log_level.upper(), None)
-    if not isinstance(numeric_level, int):
-        raise ValueError(f"Invalid log level: {log_level}")
+class FocusFilterManager:
+    """Manages coordinated filter wheel and focuser operations"""
     
-    log_dir.mkdir(parents=True, exist_ok=True)
-    
-    if log_name is None:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        log_name = f"single_{timestamp}.log"
+    def __init__(self, filter_driver: Optional[AlpacaFilterWheelDriver] = None,
+                 focuser_driver: Optional[AlpacaFocuserDriver] = None):
+        """
+        Initialize the manager with optional filter and focuser drivers
         
-    logfile = log_dir / log_name
-    
-    console_handler = RichHandler(
-        rich_tracebacks=True,
-        markup=True, 
-        show_path=True
-    )
-    
-    console_handler.setFormatter(logging.Formatter("%(message)s"))
-    console_handler.setLevel(numeric_level)
-    
-    file_handler = logging.FileHandler(logfile, encoding="utf-8")
-    file_handler.setFormatter(logging.Formatter(
-        "%(asctime)s - %(name)s:%(lineno)d - %(levelname)s - %(message)s",
-        datefmt="[%Y-%m-%d %H:%M:%S]"
-    ))
-    file_handler.setLevel(logging.DEBUG)
+        Args:
+            filter_driver: Connected filter wheel driver (optional)
+            focuser_driver: Connected focuser driver (optional)
+        """
+        self.filter_driver = filter_driver
+        self.focuser_driver = focuser_driver
+        self.logger = logging.getLogger(__name__)
         
-    logging.basicConfig(
-        level=logging.DEBUG,
-        handlers=[console_handler, file_handler]
-    )
-    
-    return logfile
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="T2 Single Image Capture - For exposure time optimization"
-    )
-    parser.add_argument(
-        "tic_id",
-        nargs='?',
-        help="TIC ID to observe (e.g. TIC-123456789 or 123456789)"
-    )
-    parser.add_argument(
-        "--exposure-time",
-        type=float,
-        required=True,
-        help="Exposure time in seconds"
-    )
-    parser.add_argument(
-        "--filter",
-        default='C',
-        choices=["C", "B", "G", "R", "L", "I", "H", "c", "b", "g", "r", "l", "i", "h"],
-        help="Filter selection: C=Clear, B=Blue, G=Green, R=Sloan-r, L=Lum, I=Sloan-i, H=H-alpha (default: C)"
-    )
-    parser.add_argument(
-        "--coords",
-        help="Manual coordinates: 'RA_DEGREES DEC_DEGREES' (overrides TIC lookup)"
-    )
-    parser.add_argument(
-        "--ignore-twilight",
-        action="store_true",
-        help="Ignore twilight conditions for daytime testing"
-    )
-    parser.add_argument(
-        "--config-dir",
-        default="config",
-        help="Configuration directory path (default: config)"
-    )
-    parser.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Logging level (default: INFO)"
-    )
-    parser.add_argument(
-        "--current-position",
-        action="store_true",
-        help="Capture image at telescope's current position (no slewing, skips observability checks)"
-    )
-    
-    args = parser.parse_args()
-    
-    # Validation
-    if args.current_position:
-        # Current position mode - don't need target info
-        if args.tic_id or args.coords:
-            parser.error("Cannot use --current-position with tic_id or --coords")
-    else:
-        # Normal mode - need target
-        if not args.tic_id and not args.coords:
-            parser.error("Must provide either tic_id or --coords (or use --current-position)")
-        if args.tic_id and args.coords:
-            parser.error("Cannot use both tic_id and --coords - choose one")
-    
-    # Setup logging
-    try:
-        config_loader = ConfigLoader(args.config_dir)
-        config_loader.load_all_configs()
-        log_dir = Path(config_loader.get_config("paths")["logs"])
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        # Track current state
+        self.current_filter = None
+        self.current_focus_position = None
         
-        if args.current_position:
-            log_name = f"single_{timestamp}_CURRENTPOS.log"
-        elif args.tic_id:    
-            log_name = f"single_{timestamp}_{args.tic_id}.log"
-        elif args.coords:
-            log_name = f"single_{timestamp}_MANUAL.log"
-        else:
-            log_name = f"single_{timestamp}.log"
-    
-        logfile = setup_logging(args.log_level, log_dir, log_name)
-        logger = logging.getLogger(__name__)
-        logger.info(f"Logging to {logfile}")
-    except Exception as e:
-        print(f"Logging setup error: {e}")
-        return 1
-    
-    # Suppress verbose library logging
-    logging.getLogger('astroquery').setLevel(logging.WARNING)
-    logging.getLogger('urllib3.connectionpool').setLevel(logging.INFO)
-    
-    logger.info("="*75)
-    logger.info(" "*25+"SINGLE IMAGE CAPTURE")
-    logger.info("="*75)
-    
-    telescope_driver = None
-    cover_driver = None
-    filter_driver = None
-    camera_manager = None
-    
-    try:
-        # Load configuration
-        logger.info("Loading configuration...")
-        config_loader = ConfigLoader(args.config_dir)
-        config_loader.load_all_configs()
-        logger.info('Configuration loaded successfully')
-        
-        # Resolve target (unless using current position)
-        if args.current_position:
-            logger.info("Using telescope's current position (no target resolution)")
-            # Create a generic target_info for current position
-            target_info = TargetInfo(
-                tic_id="CURRENT_POSITION",
-                ra_j2000_hours=0.0,  # Will be updated after telescope connection
-                dec_j2000_deg=0.0,
-                gaia_g_mag=12.0,
-                magnitude_source="current-position"
-            )
-        elif args.coords:
-            logger.info(f"Using manual coordinates: {args.coords}")
+        # Initialize current state if drivers connected
+        if self.filter_driver and self.filter_driver.is_connected():
             try:
-                coords_parts = args.coords.strip().split()
-                if len(coords_parts) != 2:
-                    raise ValueError("Expected 'RA_DEGREES DEC_DEGREES'")
-                ra_hours = float(coords_parts[0]) / 15.0
-                dec_deg = float(coords_parts[1])
-                
-                if not (0 <= ra_hours < 24):
-                    raise ValueError(f"RA must be 0-360 degrees, got {float(coords_parts[0])}")
-                if not (-90 <= dec_deg <= 90):
-                    raise ValueError(f"Dec must be -90 to +90 degrees, got {dec_deg}")
-                    
-                target_info = TargetInfo(
-                    tic_id=f"MANUAL-{ra_hours:.3f}h_{dec_deg:+.3f}d",
-                    ra_j2000_hours=ra_hours,
-                    dec_j2000_deg=dec_deg,
-                    gaia_g_mag=12.0,
-                    magnitude_source="manual-default"
-                )
-                logger.info(f"Manual target: RA={ra_hours:.6f} h ({ra_hours*15.0:.6f}°), Dec={dec_deg:.6f}°")
-                
-            except (ValueError, IndexError) as e:
-                logger.error(f"Invalid coordinates format '{args.coords}': {e}")
-                logger.error("Use format: --coords 'RA_DEGREES DEC_DEGREES' (e.g., '123.456 -67.890')")
-                return 1
-        else:
-            logger.info(f"Resolving target: {args.tic_id}")
-            target_resolver = TICTargetResolver(config_loader)
-            target_info = target_resolver.resolve_tic_id(args.tic_id)
-        
-        # Check observability (skip if using current position)
-        if not args.current_position:
-            logger.info("Checking target observability...")
-            try:
-                observatory_config = config_loader.get_config('observatory')
-                checker = ObservabilityChecker(observatory_config)
-                obs_status = checker.check_target_observability(
-                    target_info.ra_j2000_hours,
-                    target_info.dec_j2000_deg,
-                    ignore_twilight=args.ignore_twilight
-                )
-            
-                logger.info(f"Current target altitude: {obs_status.target_altitude:.1f}°")
-                logger.info(f"Current sun altitude: {obs_status.sun_altitude:.1f}°")
-                if obs_status.airmass:
-                    logger.debug(f"Airmass: {obs_status.airmass:.2f}")
-                    
-                if not obs_status.observable:
-                    logger.error("Target not currently observable:")
-                    for reason in obs_status.reasons:
-                        logger.error(f"  {reason}")
-                    logger.error("Aborting - target must be observable to capture image")
-                    return 1
-                
-                logger.info("Target is observable - proceeding")
-                    
-            except ObservabilityError as e:
-                logger.error(f"Observability check error: {e}")
-                return 1
-        else:
-            logger.info("Skipping observability checks (using current position)")
-            obs_status = None
-        
-        # Discover cameras
-        logger.info('Discovering cameras...')
-        camera_manager = CameraManager()
-        camera_configs = config_loader.get_camera_configs()
-        
-        if camera_manager.discover_cameras(camera_configs):
-            logger.info('Camera discovery successful:')
-            for camera_status in camera_manager.list_all_cameras():
-                logger.info(f"  {camera_status['role'].upper()} camera: {camera_status['name']} "
-                            f"(ID: {camera_status['device_id']})")
-        else:
-            logger.error('Camera discovery failed')
-            return 1
-        
-        # Connect to main camera (disable auto-cooler initialization)
-        main_camera = camera_manager.get_main_camera()
-        if not main_camera:
-            logger.error("Main camera not found")
-            return 1
-        
-        # Manually connect without cooler initialization
-        try:
-            if not main_camera.camera.Connected:
-                main_camera.camera.Connected = True
-                import time
-                time.sleep(0.5)
-            main_camera.connected = main_camera.camera.Connected
-            if main_camera.connected:
-                logger.info(f"Connected to main camera: {main_camera.name} (cooler management disabled)")
-            else:
-                logger.error("Failed to connect to main camera")
-                return 1
-        except Exception as e:
-            logger.error(f"Failed to connect to main camera: {e}")
-            return 1
-        
-        # Connect to telescope
-        logger.info('Connecting to telescope...')
-        telescope_driver = AlpacaTelescopeDriver()
-        telescope_config = config_loader.get_telescope_config()
-        
-        if not telescope_driver.connect(telescope_config):
-            logger.error('Failed to connect to telescope')
-            return 1
-        
-        tel_info = telescope_driver.get_telescope_info()
-        logger.info(f"Connected to: {tel_info.get('name', 'Unknown telescope')}")
-        logger.info(f"Current position: RA={tel_info.get('ra_hours', 0):.6f} h ({tel_info.get('ra_hours', 0)*15.0:.6f}°), "
-                    f"Dec={tel_info.get('dec_degrees', 0):.6f}°")
-        
-        # Update target_info if using current position
-        if args.current_position:
-            target_info.ra_j2000_hours = tel_info.get('ra_hours', 0)
-            target_info.dec_j2000_deg = tel_info.get('dec_degrees', 0)
-            target_info.tic_id = f"CURRENTPOS_{target_info.ra_j2000_hours:.3f}h_{target_info.dec_j2000_deg:+.3f}d"
-            logger.info(f"Using current telescope position as target")
-        
-        # Connect to cover
-        cover_driver = None
-        logger.info("Connecting to cover...")
-        try:
-            cover_driver = AlpacaCoverDriver()
-            cover_config = config_loader.get_cover_config()
-            if cover_config and cover_driver.connect(cover_config):
-                cover_info = cover_driver.get_cover_info()
-                logger.info(f"Connected to: {cover_info.get('name', 'Unknown cover')} - State: {cover_info.get('cover_state', 'Unknown')}")
-            else:
-                logger.warning("Failed to connect to cover - continuing without")
-                cover_driver = None
-        except AlpacaCoverError as e:
-            logger.warning(f"Cover connection failed: {e} - continuing without")
-            cover_driver = None
-        
-        # Turn telescope motor on
-        logger.info('Turning telescope motor on...') 
-        motor_success = telescope_driver.motor_on()
-        if not motor_success:
-            logger.error('Failed to turn telescope motor on')
-            telescope_driver.disconnect()
-            return 1
-        
-        # Connect to filter wheel
-        filter_driver = None
-        logger.info("Connecting to filter wheel...")
-        try:
-            filter_driver = AlpacaFilterWheelDriver()
-            filter_config = config_loader.get_filter_wheel_config()
-            
-            if filter_config and filter_driver.connect(filter_config):
-                filter_info = filter_driver.get_filter_info()
-                logger.info(f"Connected to filter wheel: {filter_info.get('total_filters', 0)} filters")
-                logger.info(f"Current filter: {filter_info.get('filter_name', 'Unknown')}")
-                
-                if filter_driver.change_filter(args.filter.upper()):
-                    logger.info(f"Filter set to: {args.filter.upper()}")
-                else:
-                    logger.warning(f"Failed to change to filter {args.filter.upper()} - continuing with current filter")
-            else:
-                logger.warning(f"Failed to connect to filter wheel - continuing with current filter")
-                filter_driver = None
-        except AlpacaFilterWheelError as e:
-            logger.warning(f"Filter wheel connection failed: {e} - continuing with current filter")
-            filter_driver = None
-        
-        # Slew to target (skip if using current position)
-        if not args.current_position:
-            logger.info("Slewing to target coordinates...")
-            slew_success = telescope_driver.slew_to_coordinates(
-                target_info.ra_j2000_hours,
-                target_info.dec_j2000_deg
-            )
-            
-            if not slew_success:
-                logger.error('Failed to slew to target')
-                telescope_driver.motor_off()
-                telescope_driver.disconnect()
-                return 1
-            
-            logger.info('Telescope positioned at target coordinates')
-        else:
-            logger.info('Using current telescope position (no slewing)')
-        
-        # Open cover
-        if cover_driver:
-            logger.info("Opening cover...")
-            if not cover_driver.open_cover():
-                logger.error("Failed to open cover - aborting")
-                return 1
-            logger.info("Cover opened successfully")
-        
-        # Capture single image
-        logger.info("="*75)
-        logger.info(" "*25+"CAPTURING IMAGE")
-        logger.info("="*75)
-        logger.info(f"Exposure time: {args.exposure_time} s")
-        logger.info(f"Filter: {args.filter.upper()}")
-        
-        # Get camera settings
-        camera_config = main_camera.config
-        binning = camera_config.get('default_binning', 4)
-        gain = camera_config.get('default_gain', 100)
-        
-        logger.info(f"Binning: {binning}x{binning}, Gain: {gain}")
-        
-        # Capture the image (with retry on timeout)
-        max_retries = 3
-        image_array = None
-        for attempt in range(1, max_retries + 1):
-            try:
-                logger.info(f"Capture attempt {attempt}/{max_retries}...")
-                image_array = main_camera.capture_image(
-                    exposure_time=args.exposure_time,
-                    binning=binning,
-                    gain=gain,
-                    light=True
-                )
-                if image_array is not None:
-                    break
-                logger.warning(f"Attempt {attempt} returned no data, retrying...")
+                self.current_filter = self.filter_driver.get_current_filter_name()
             except Exception as e:
-                if "timed out" in str(e).lower() or "timeout" in str(e).lower():
-                    logger.warning(f"Attempt {attempt} timed out: {e}")
-                    if attempt < max_retries:
-                        logger.info("Retrying capture...")
-                        import time
-                        time.sleep(2)  # Brief pause before retry
-                    else:
-                        logger.error("All capture attempts failed")
-                        raise
-                else:
-                    # Non-timeout error, don't retry
-                    raise
+                self.logger.warning(f"Could not get initial filter state: {e}")
         
-        if image_array is None:
-            logger.error("Camera returned no image data after all attempts")
-            return 1
-        
-        logger.info("Image captured successfully")
-        
-        # Create FITS file
-        logger.info("Creating FITS file...")
-        hdu = create_fits_file(
-            image_array=image_array,
-            target_info=target_info,
-            camera_device=main_camera,
-            config_loader=config_loader,
-            filter_code=args.filter.upper(),
-            exposure_time=args.exposure_time
-        )
-        
-        # Add single image marker to header
-        if hasattr(hdu, 'header'):
-            hdu.header['IMGTYPE'] = ('SingleImage', 'Single test image for exposure optimization')
-        
-        # Setup save directory structure
-        file_manager = FileManager(config_loader)
-        
-        # Create singleimages subdirectory
-        base_target_dir = file_manager.create_target_directory(target_info.tic_id)
-        single_images_dir = base_target_dir / "singleimages"
-        single_images_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Save the file
-        filepath = file_manager.save_fits_file(
-            hdu=hdu,
-            tic_id=target_info.tic_id,
-            filter_code=args.filter.upper(),
-            exposure_time=args.exposure_time,
-            sequence_number=1,  # Always 1 for single images
-            target_dir=single_images_dir
-        )
-        
-        if filepath:
-            logger.info("="*75)
-            logger.info(" "*30+"SUCCESS")
-            logger.info("="*75)
-            logger.info(f"Image saved to: {filepath}")
-            logger.info(f"Open this file in SAOImage DS9 or similar to check target counts")
-        else:
-            logger.error("Failed to save FITS file")
-            return 1
-        
-        # Summary
-        logger.info("="*75)
-        logger.info(" "*28+"IMAGE SUMMARY")
-        logger.info("="*75)
-        logger.info(f"Target: {target_info.tic_id}")
-        logger.info(f"Coordinates: RA={target_info.ra_j2000_hours:.6f} h ({target_info.ra_j2000_hours*15.0:.6f}°), "
-                    f"Dec={target_info.dec_j2000_deg:.6f}°")
-        logger.info(f"Exposure time: {args.exposure_time} s")
-        logger.info(f"Filter: {args.filter.upper()}")
-        logger.info(f"Image size: {image_array.shape[1]}x{image_array.shape[0]}")
-        logger.info(f"Binning: {binning}x{binning}")
-        logger.info(f"Gain: {gain}")
-        logger.info("="*75)
-        logger.info("Telescope remains at target position for additional captures")
-        logger.info("="*75)
-        
-        return 0
+        if self.focuser_driver and self.focuser_driver.is_connected():
+            try:
+                self.current_focus_position = self.focuser_driver.get_position()
+            except Exception as e:
+                self.logger.warning(f"Could not get initial focus position: {e}")
     
-    except ConfigurationError as e:
-        logger.error(f"Configuration error: {e}")
-        return 1
-    except TargetResolutionError as e:
-        logger.error(f"Target resolution error: {e}")
-        return 1
-    except ObservabilityError as e:
-        logger.error(f"Observability error: {e}")
-        return 1
-    except AlpacaTelescopeError as e:
-        logger.error(f"Telescope error: {e}")
-        return 1
-    except AlpacaCoverError as e:
-        logger.error(f"Cover error: {e}")
-        return 1
-    except CameraError as e:
-        logger.error(f"Camera error: {e}")
-        return 1
-    except KeyboardInterrupt:
-        logger.info(f"Operation cancelled by user")
-        return 0
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        logger.debug(f"Full traceback", exc_info=True)
-        return 1
-    finally:
+    def change_filter_with_focus(self, filter_code: str, 
+                                  skip_if_same: bool = True) -> Tuple[bool, bool]:
+        """
+        Change filter and adjust focus position in one coordinated operation
+        
+        Args:
+            filter_code: Target filter code (e.g., 'C', 'B', 'G', 'R', etc.)
+            skip_if_same: Skip operation if already at target filter
+            
+        Returns:
+            Tuple of (filter_changed, focus_changed) booleans
+            
+        Raises:
+            FocusFilterManagerError: If operation fails critically
+        """
+        filter_code = filter_code.upper()
+        filter_changed = False
+        focus_changed = False
+        
+        # Check if we have required drivers
+        if not self.filter_driver:
+            self.logger.warning("No filter wheel driver available")
+            return False, False
+        
+        if not self.focuser_driver:
+            self.logger.warning("No focuser driver available - filter will change without focus adjustment")
+        
+        # Check if already at target filter
+        if skip_if_same:
+            try:
+                current = self.filter_driver.get_current_filter_name()
+                current_code = None
+                if current and len(current) > 0:
+                    # Extract code from filter name (e.g., "Sloan r'" -> 'R')
+                    for code in ['L', 'B', 'G', 'R', 'C', 'I', 'H']:
+                        if code.lower() in current.lower():
+                            current_code = code
+                            break
+                
+                if current_code == filter_code:
+                    self.logger.info(f"Already at filter {filter_code}, skipping change")
+                    self.current_filter = current_code
+                    return False, False
+            except Exception as e:
+                self.logger.warning(f"Could not check current filter: {e}")
+        
+        # Step 1: Change filter
+        self.logger.info(f"Changing filter to {filter_code}...")
         try:
-            # Cleanup - but don't park telescope
-            if cover_driver:
-                logger.info("Closing cover...")
-                cover_driver.close_cover()
-            if filter_driver:
-                filter_driver.disconnect()
-            if telescope_driver:
-                logger.info("Leaving telescope at target position (not parking)")
-                logger.info("Turning telescope motor off...")
-                telescope_driver.motor_off()
-                telescope_driver.disconnect()
-            logger.info("="*75)
-            logger.info(" "*29+"CAPTURE COMPLETE")
-            logger.info("="*75)
-        except Exception as e:
-            logger.error(f"Cleanup error: {e}")
-
-
-if __name__ == '__main__':
-    sys.exit(main())
+            if self.filter_driver.change_filter(filter_code):
+                filter_changed = True
+                self.current_filter = filter_code
+                self.logger.info(f"Filter changed to {filter_code}")
+            else:
+                self.logger.error(f"Filter change to {filter_code} failed")
+                raise FocusFilterManagerError(f"Failed to change filter to {filter_code}")
+        except AlpacaFilterWheelError as e:
+            self.logger.error(f"Filter wheel error: {e}")
+            raise FocusFilterManagerError(f"Filter wheel error: {e}")
+        
+        # Step 2: Adjust focus if focuser available
+        if self.focuser_driver and self.focuser_driver.is_connected():
+            try:
+                # Use the focuser's built-in filter->position mapping
+                self.logger.info(f"Adjusting focus for filter {filter_code}...")
+                if self.focuser_driver.set_position_from_filter(filter_code):
+                    focus_changed = True
+                    self.current_focus_position = self.focuser_driver.get_position()
+                    self.logger.info(f"Focus adjusted to {self.current_focus_position}")
+                else:
+                    self.logger.warning(f"Focus adjustment failed for filter {filter_code}")
+                    # Don't raise error - filter change succeeded, focus is just not optimal
+            except AlpacaFocuserError as e:
+                self.logger.warning(f"Focuser error during adjustment: {e}")
+                # Don't raise error - filter change succeeded
+            except Exception as e:
+                self.logger.warning(f"Unexpected error during focus adjustment: {e}")
+        else:
+            self.logger.debug("No focuser available for focus adjustment")
+        
+        return filter_changed, focus_changed
+    
+    def get_current_state(self) -> dict:
+        """Get current filter and focus state"""
+        state = {
+            'filter_code': self.current_filter,
+            'focus_position': self.current_focus_position,
+            'filter_available': self.filter_driver is not None and self.filter_driver.is_connected(),
+            'focuser_available': self.focuser_driver is not None and self.focuser_driver.is_connected()
+        }
+        return state
+    
+    def initialize_to_clear_with_focus(self) -> bool:
+        """Initialize to Clear filter with appropriate focus"""
+        self.logger.info("Initializing to Clear filter with focus adjustment...")
+        try:
+            filter_changed, focus_changed = self.change_filter_with_focus('C', skip_if_same=False)
+            if filter_changed:
+                self.logger.info("Initialized to Clear filter successfully")
+                return True
+            else:
+                self.logger.warning("Failed to initialize to Clear filter")
+                return False
+        except FocusFilterManagerError as e:
+            self.logger.error(f"Initialization failed: {e}")
+            return False
