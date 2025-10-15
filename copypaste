@@ -55,7 +55,7 @@ class FocusFilterManager:
         
         Args:
             filter_code: Target filter code (e.g., 'C', 'B', 'G', 'R', etc.)
-            skip_if_same: Skip operation if already at target filter
+            skip_if_same: Skip FILTER change if already at target, but always verify focus
             
         Returns:
             Tuple of (filter_changed, focus_changed) booleans
@@ -76,6 +76,7 @@ class FocusFilterManager:
             self.logger.warning("No focuser driver available - filter will change without focus adjustment")
         
         # Check if already at target filter
+        skip_filter_change = False
         if skip_if_same:
             try:
                 current = self.filter_driver.get_current_filter_name()
@@ -88,25 +89,27 @@ class FocusFilterManager:
                             break
                 
                 if current_code == filter_code:
-                    self.logger.info(f"Already at filter {filter_code}, skipping change")
+                    self.logger.info(f"Already at filter {filter_code}, skipping filter change")
                     self.current_filter = current_code
-                    return False, False
+                    skip_filter_change = True
+                    # Note: We do NOT return here - we still need to check/adjust focus!
             except Exception as e:
                 self.logger.warning(f"Could not check current filter: {e}")
         
-        # Step 1: Change filter
-        self.logger.info(f"Changing filter to {filter_code}...")
-        try:
-            if self.filter_driver.change_filter(filter_code):
-                filter_changed = True
-                self.current_filter = filter_code
-                self.logger.info(f"Filter changed to {filter_code}")
-            else:
-                self.logger.error(f"Filter change to {filter_code} failed")
-                raise FocusFilterManagerError(f"Failed to change filter to {filter_code}")
-        except AlpacaFilterWheelError as e:
-            self.logger.error(f"Filter wheel error: {e}")
-            raise FocusFilterManagerError(f"Filter wheel error: {e}")
+        # Step 1: Change filter (if needed)
+        if not skip_filter_change:
+            self.logger.info(f"Changing filter to {filter_code}...")
+            try:
+                if self.filter_driver.change_filter(filter_code):
+                    filter_changed = True
+                    self.current_filter = filter_code
+                    self.logger.info(f"Filter changed to {filter_code}")
+                else:
+                    self.logger.error(f"Filter change to {filter_code} failed")
+                    raise FocusFilterManagerError(f"Failed to change filter to {filter_code}")
+            except AlpacaFilterWheelError as e:
+                self.logger.error(f"Filter wheel error: {e}")
+                raise FocusFilterManagerError(f"Filter wheel error: {e}")
         
         # Step 2: Adjust focus if focuser available
         if self.focuser_driver and self.focuser_driver.is_connected():
