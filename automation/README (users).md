@@ -1,5 +1,10 @@
+---
+title: T2 Automation Guide (Users)
+---
+
+
 # T2 Automation Software - User Guide (Drafting...)
-## At Start-up (RaptorTCU)
+## At Start-up (RaptorTCU) - For Both Photometry and Spectroscopy
 ### 1. Connect Wi-Fi internet to 'eduroam' network.
 <img src="img/eduroam.png" width=180/>
 
@@ -213,6 +218,16 @@ P:\Photometry\YYYY\YYYYMMDD\T2\TIC123456789
 
 ### Platesolving/Guiding...
 
+...
+...
+
+Gotta double-check - just run this on guestobserver@minervaphotometry?:
+```bash
+run_astrom_wrapper.sh
+```
+
+
+
 <div style="page-break-after: always;"></div>
 
 # Automated Spectroscopy
@@ -280,8 +295,6 @@ Command line arguments can be used for additional customization and to override 
 |`--poll-interval` | How often to check mirror file for new targets (seconds) | `10.0` |
 |`--log-level` | Terminal display logging level (DEBUG/INFO/WARNING/ERROR) | `INFO` |
 |`--dry-run` | Simulate without hardware movement or imaging | `False` |
-<!-- |`--config-dir` | Configuration directory | `config` | -->
-
 
 ### Imaging and Plate-Solving During Spectroscopy
 
