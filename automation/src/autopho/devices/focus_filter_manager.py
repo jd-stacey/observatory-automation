@@ -103,7 +103,7 @@ class FocusFilterManager:
                 if self.filter_driver.change_filter(filter_code):
                     filter_changed = True
                     self.current_filter = filter_code
-                    self.logger.info(f"Filter changed to {filter_code}")
+                    self.logger.debug(f"Filter changed to {filter_code}")
                 else:
                     self.logger.error(f"Filter change to {filter_code} failed")
                     raise FocusFilterManagerError(f"Failed to change filter to {filter_code}")
@@ -149,7 +149,7 @@ class FocusFilterManager:
         try:
             filter_changed, focus_changed = self.change_filter_with_focus('C', skip_if_same=False)
             if filter_changed:
-                self.logger.info("Initialized to Clear filter successfully")
+                self.logger.debug("Initialized to Clear filter successfully")
                 return True
             else:
                 self.logger.warning("Failed to initialize to Clear filter")
