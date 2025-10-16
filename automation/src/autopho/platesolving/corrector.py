@@ -134,6 +134,8 @@ class PlatesolveCorrector:
             with open(self.json_file_path, 'r') as f:
                 data = json.load(f)
                 
+            logger.debug(f"    JSON contents - fitsname: {data.get('fitsname', {}).get('0', 'MISSING')}")
+            logger.debug(f"    JSON file mtime: {self.json_file_path.stat().st_mtime}, current time: {time.time()}")
             logger.debug(f"Platesolve JSON file ready (age: {age_seconds:.0f} s)")
             return True, data
         
@@ -220,8 +222,8 @@ class PlatesolveCorrector:
             dec_offset_arcsec = dec_offset_deg * 3600.0
             total_offset_arcsec = math.sqrt(ra_offset_arcsec**2 + dec_offset_arcsec**2)
             
-            logger.debug(f"Raw offsets: RA={ra_offset_arcsec:.2f}\", Dec={dec_offset_arcsec:.2f}\","
-                        f"Rot={rot_offset_deg:.2f}° , Total={total_offset_arcsec:.2f}\"")
+            logger.debug(f"Raw offsets: RA={ra_offset_arcsec:.2f}\", Dec={dec_offset_arcsec:.2f}\", "
+                        f"Rot={rot_offset_deg:.2f}°, Total={total_offset_arcsec:.2f}\"")
             
             thresholds = self.platesolve_config.get('correction_thresholds', {})
             min_threshold = thresholds.get('min_arcsec', 1.0)
@@ -332,6 +334,9 @@ class PlatesolveCorrector:
             
             # Extract sequence from basename
             current_seq = extract_sequence_from_filename(current_basename)
+            logger.debug(f"    Reading current_basename as: {current_basename}")
+            logger.debug(f"    Reading current_target_id as: {current_target_id}")
+            logger.debug(f"    Reading current_seq as: {current_seq}")
             
             # If target changed, reset sequence tracking
             if current_target_id and current_target_id != self.last_target_id:
