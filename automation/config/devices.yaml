@@ -42,12 +42,12 @@ focuser:
     i: 15180
     h: 15300
   focus_sweep:              # Only for use with t2_focus_sweep.py - for testing filter/focuser positions
-    range_steps: 200        # ±100 around optimal
-    step_size: 25           # test every 10 steps
+    range_steps: 200        # ±N around starting pos
+    step_size: 20           # test every N steps
     exposure_time: 3.0      # 3 seconds per image
     filters: ['C', 'L', 'B', 'G', 'R', 'I', 'H']  # which filters to test
   spectro_focus_position:
-    spectro: 18433 
+    spectro: 18371 
 
 
 
