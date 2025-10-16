@@ -301,6 +301,20 @@ def main():
             target_info.dec_j2000_deg = tel_info.get('dec_degrees', 0)
             target_info.tic_id = f"CURRENTPOS_{target_info.ra_j2000_hours:.3f}h_{target_info.dec_j2000_deg:+.3f}d"
             logger.info(f"Using current telescope position as target")
+            
+            # Enable telescope tracking if using --current-position
+            try:
+                if not telescope_driver.telescope.Tracking:
+                    logger.warning("Telescope tracking disabled - re-enabling")
+                    telescope_driver.telescope.Tracking = True
+                    import time
+                    time.sleep(0.5)
+                    if telescope_driver.telescope.Tracking:
+                        logger.info("Telescope tracking successfully enabled")
+                    else:
+                        logger.error("Failed to re-enable telescope tracking")
+            except Exception as e:
+                logger.warning(f"Tracking error: {e}")
         
         # Connect to cover
         cover_driver = None
