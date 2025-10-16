@@ -1681,6 +1681,7 @@ def main():
     telescope_driver = None
     cover_driver = None
     corrector = None
+    focuser_driver = None
 
     try:
 
@@ -1704,9 +1705,37 @@ def main():
                 logger.error("Failed to connect to telescope")
                 return 1
             
-            
-            # SPECTRO FOCUSER INTEGRATION HERE
-            
+            # Connect to focuser and set spectro focus position (from devices.yaml)
+            focuser_driver = None
+            logger.info("Connecting to focuser for spectroscopy...")
+            try:
+                focuser_driver = AlpacaFocuserDriver()
+                focuser_config = config_loader.get_focuser_config()
+                
+                if focuser_config and focuser_driver.connect(focuser_config):
+                    focuser_info = focuser_driver.get_focuser_info()
+                    logger.info(f"Connected to focuser: {focuser_info.get('name', 'Unknown')}")
+                    logger.info(f"    Current position: {focuser_info.get('position', 'Unknown')}")
+                    
+                    # Get spectro focus position from config
+                    spectro_pos = focuser_config.get('spectro_focus_position', {}).get('spectro')
+                    if spectro_pos:
+                        logger.info(f"Moving focuser to spectroscopy position: {spectro_pos}")
+                        if focuser_driver.move_to_position(spectro_pos):
+                            logger.info(f"Focuser positioned for spectroscopy at {spectro_pos}")
+                        else:
+                            logger.warning("Failed to move focuser to spectro position - continuing anyway")
+                    else:
+                        logger.warning("No spectro_focus_position defined in config - skipping focus adjustment")
+                else:
+                    logger.warning("Failed to connect to focuser - continuing without")
+                    focuser_driver = None
+            except AlpacaFocuserError as e:
+                logger.warning(f"Focuser connection failed: {e} - continuing without")
+                focuser_driver = None
+            except Exception as e:
+                logger.warning(f"Unexpected focuser error: {e} - continuing without")
+                focuser_driver = None
             
             # Safety check: verify telescope is not parked before turning on motor
             tel_info = telescope_driver.get_telescope_info()
@@ -1896,11 +1925,13 @@ def main():
         except Exception as e:
             logger.error(f"Camera cleanup error: {e}")
         
-        # Cover cleanup
+        # Cover and Focuser cleanup
         try:
             if cover_driver:
                 logger.info("Closing cover...")
                 cover_driver.close_cover()
+            if focuser_driver:
+                focuser_driver.disconnect()
         except KeyboardInterrupt:
             logger.warning("Interrupted during cover closure - skipping")
         except Exception as e:

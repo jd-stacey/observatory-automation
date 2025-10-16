@@ -114,7 +114,7 @@ def wait_for_observing_conditions(target_info, obs_checker, ignore_twilight=Fals
     logger.info(f"Coordinates: RA={target_info.ra_j2000_hours:.6f} h ({target_info.ra_j2000_hours*15.0:.6f}°), Dec={target_info.dec_j2000_deg:.6f}°")
     
     start_time = datetime.now(timezone.utc)
-    max_wait_hours = 16  # Don't wait more than 16 hours
+    max_wait_hours = 36  # Don't wait more than 36 hours
     
     while (datetime.now(timezone.utc) - start_time).total_seconds() < (max_wait_hours * 3600):
         try:
@@ -134,7 +134,7 @@ def wait_for_observing_conditions(target_info, obs_checker, ignore_twilight=Fals
             logger.info(f"Sun: {obs_status.sun_altitude:.1f}°, Target: {obs_status.target_altitude:.1f}°")
             logger.info(f"Waiting reasons: {'; '.join(obs_status.reasons)}")
             
-            # Check if we're in a hopeless situation
+            # Check if we're in a hopeless situation - exit function if still waiting after N hours (currently 8)
             # if (obs_status.sun_altitude < -10 and obs_status.target_altitude < 0):
             #     elapsed_hours = (datetime.now(timezone.utc) - start_time).total_seconds() / 3600
             #     if elapsed_hours > 8:
@@ -223,11 +223,12 @@ def main():
         help="Manual coordinates: 'RA_DEGREES DEC_DEGREES (overrides TIC lookup)"
     )
     
-    parser.add_argument(
-        '--test-acquisition',
-        action='store_true',
-        help="Test acquisition flow without taking images (for daytime testing)"
-    )
+    # TESTING WITHOUT TEST_ACQUISITION  
+    # parser.add_argument(
+    #     '--test-acquisition',
+    #     action='store_true',
+    #     help="Test acquisition flow without taking images (for daytime testing)"
+    # )
     
     parser.add_argument(
         '--no-park',
@@ -242,7 +243,9 @@ def main():
     if args.tic_id and args.coords:
         parser.error("Cannot use both tic_id and --coords - choose one")
     
+    # Set up logging directoryand config files
     try:
+        # Load configuration files
         config_loader = ConfigLoader(args.config_dir)
         config_loader.load_all_configs()
         log_dir = Path(config_loader.get_config("paths")["logs"])
@@ -259,13 +262,14 @@ def main():
         logger.info(f"Logging to {logfile}")
     except Exception as e:
         logger.error(f"Logging setup error: {e}")
-           
+    
+    # Suppress verbose library logging           
     logging.getLogger('astroquery').setLevel(logging.WARNING)
     logging.getLogger('urllib3.connectionpool').setLevel(logging.INFO)
+    
     logger.info("="*75)
     logger.info(" "*27+"AUTOMATED PHOTOMETRY")
     logger.info("="*75)
-    
     
     telescope_driver = None
     rotator_driver = None
@@ -451,33 +455,6 @@ def main():
                 telescope_driver.disconnect()
                 return 1
                         
-            
-            # Connect to Filter Wheel
-            filter_driver = None
-            logger.info("Connecting to filter wheel...")
-            try:
-                filter_driver = AlpacaFilterWheelDriver()
-                filter_config = config_loader.get_filter_wheel_config()
-                
-                if filter_config and filter_driver.connect(filter_config):
-                    filter_info = filter_driver.get_filter_info()
-                    logger.info(f"Connected to filter wheel: {filter_info.get('total_filters', 0)} filters")
-                    logger.info(f"Filters: {filter_info.get('all_filters', [])}")
-                    logger.info(f"Current filter: {filter_info.get('filter_name', 'Unknown')}")
-                    
-                    if filter_driver.change_filter(args.filter.upper()):
-                        logger.info(f"Filter set to: {args.filter.upper()}")
-                    else:
-                        logger.warning(f"Failed to change to filter {args.filter.upper()} - continuing with current filter")
-                else:
-                    logger.warning(f"Failed to connect to filter wheel - continuing with current filter")
-                    filter_driver = None
-            except AlpacaFilterWheelError as e:
-                logger.warning(f"Filter wheel connection failed: {e} - continuing with current filter")
-                filter_driver = None
-            except Exception as e:
-                logger.warning(f"Unexpected filter wheel error: {e} - continuing with current filter")
-            
             # Connect to focuser
             focuser_driver = None
             logger.info("Connecting to focuser...")
@@ -498,6 +475,63 @@ def main():
             except Exception as e:
                 logger.warning(f"Unexpected focuser error: {e} - continuing without")
                 focuser_driver = None
+            
+            # Initialise Focuser/Filter coordination
+            # logger.info("Initializing filter/focus coordination...")
+            # focus_filter_mgr = FocusFilterManager(filter_driver=filter_driver, focuser_driver=focuser_driver)
+            
+            
+            
+            # Connect to Filter Wheel and initialise Focuser/Filter coordination
+            filter_driver = None
+            logger.info("Connecting to filter wheel...")
+            try:
+                filter_driver = AlpacaFilterWheelDriver()
+                filter_config = config_loader.get_filter_wheel_config()
+                
+                if filter_config and filter_driver.connect(filter_config):
+                    filter_info = filter_driver.get_filter_info()
+                    logger.info(f"Connected to filter wheel: {filter_info.get('total_filters', 0)} filters")
+                    logger.info(f"Filters: {filter_info.get('all_filters', [])}")
+                    logger.info(f"Current filter: {filter_info.get('filter_name', 'Unknown')}")
+                    
+                    if filter_driver.change_filter(args.filter.upper()):
+                        logger.info(f"Filter set to: {args.filter.upper()}")
+                    else:
+                        logger.warning(f"Failed to change to filter {args.filter.upper()} - continuing with current filter")
+                        
+                    
+                    ##### #FILTER/FOCUS COORDINATION HERE - (Uncomment when optimal focus positions are in devices.yaml)
+                    ##### #Also delete/comment the small if/else block above (containing change_filter)
+                    # Initialise Focuser/Filter coordination
+                    # logger.info("Initializing filter/focus coordination...")
+                    # focus_filter_mgr = FocusFilterManager(filter_driver=filter_driver, focuser_driver=focuser_driver)
+                    
+                    # Use manager to set filter position and focus position
+                    # if focus_filter_mgr:
+                    #     logger.info(f"Setting filter to {args.filter.upper()} with focus adjustment...")
+                    #     try:
+                    #         filter_changed, focus_changed = focus_filter_mgr.change_filter_with_focus(args.filter.upper())
+                    #         if filter_changed:
+                    #             logger.info(f"Filter set to: {args.filter.upper()}")
+                    #         if focus_changed:
+                    #             logger.info(f"Focus adjusted for filter {args.filter.upper()}")
+                    #         if not filter_changed and not focus_changed:
+                    #             logger.info("Already at target filter/focus configuration")
+                    #     except FocusFilterManagerError as e:
+                    #         logger.warning(f"Filter/focus coordination failed: {e} - continuing anyway")
+                    
+                else:
+                    logger.warning(f"Failed to connect to filter wheel - continuing with current filter")
+                    filter_driver = None
+            except AlpacaFilterWheelError as e:
+                logger.warning(f"Filter wheel connection failed: {e} - continuing with current filter")
+                filter_driver = None
+            except Exception as e:
+                logger.warning(f"Unexpected filter wheel error: {e} - continuing with current filter")
+            
+            
+            
             
             logger.info("Slewing to target coordinates...")
             slew_success = telescope_driver.slew_to_coordinates(
@@ -593,30 +627,31 @@ def main():
             logger.info(f"  Would set filter to {args.filter.upper()}")
             logger.info("DRY RUN: Skipping rotator operations")
             logger.info("DRY RUN: Skipping camera/imaging operations")
-            if args.test_acquisition:
-                try:
-                    session = ImagingSession(
-                        camera_manager=None,  # No camera needed for test
-                        corrector=None,       # No corrector needed for test
-                        config_loader=config_loader,
-                        target_info=target_info, 
-                        filter_code=args.filter.upper(),
-                        ignore_twilight=args.ignore_twilight,
-                        exposure_override=args.exposure_time
-                    )
-                except ImagingSessionError:
-                    logger.warning("Could not create session for testing - continuing with dry run")
-                    session = None
-            
-        if args.test_acquisition and session:
-            logger.info("Running acquisition flow test...")
-            test_success = session.test_acquisition_flow(simulate_corrections=True)
-            if test_success:
-                logger.info("Acquisition test completed successfully")
-                return 0
-            else:
-                logger.error("Acquisition test failed")
-                return 1
+            # TESTING WITHOUT TEST_ACQUISITION  
+            # if args.test_acquisition:
+            #     try:
+            #         session = ImagingSession(
+            #             camera_manager=None,  # No camera needed for test
+            #             corrector=None,       # No corrector needed for test
+            #             config_loader=config_loader,
+            #             target_info=target_info, 
+            #             filter_code=args.filter.upper(),
+            #             ignore_twilight=args.ignore_twilight,
+            #             exposure_override=args.exposure_time
+            #         )
+            #     except ImagingSessionError:
+            #         logger.warning("Could not create session for testing - continuing with dry run")
+            #         session = None
+        # TESTING WITHOUT TEST_ACQUISITION    
+        # if args.test_acquisition and session:
+        #     logger.info("Running acquisition flow test...")
+        #     test_success = session.test_acquisition_flow(simulate_corrections=True)
+        #     if test_success:
+        #         logger.info("Acquisition test completed successfully")
+        #         return 0
+        #     else:
+        #         logger.error("Acquisition test failed")
+        #         return 1
             
         logger.info("="*75)
         logger.info(" "*30+"SESSION SUMMARY")

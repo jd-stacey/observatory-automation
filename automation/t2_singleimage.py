@@ -1,3 +1,9 @@
+'''
+Use this program to take a single image of a target, resolved by TIC ID or J2000 coordinates (or by using --current-position). 
+The --exposure-time command line argument MUST be used to sete exposure time (in seconds).
+Binning and Gain levels are set for each camera in the config file: devices.yaml.
+'''
+
 import sys
 import logging
 from rich.logging import RichHandler
@@ -21,7 +27,7 @@ from autopho.imaging.file_manager import FileManager
 
 
 def setup_logging(log_level: str, log_dir: Path, log_name: str = None):
-    """Setup logging for single image capture"""
+    """Setup file and console logging for single image capture"""
     numeric_level = getattr(logging, log_level.upper(), None)
     if not isinstance(numeric_level, int):
         raise ValueError(f"Invalid log level: {log_level}")
@@ -59,6 +65,7 @@ def setup_logging(log_level: str, log_dir: Path, log_name: str = None):
 
 
 def main():
+    # Set up command line arguments
     parser = argparse.ArgumentParser(
         description="T2 Single Image Capture - For exposure time optimization"
     )
@@ -156,7 +163,7 @@ def main():
     camera_manager = None
     
     try:
-        # Load configuration
+        # Load configuration files
         logger.info("Loading configuration...")
         config_loader = ConfigLoader(args.config_dir)
         config_loader.load_all_configs()
@@ -362,7 +369,29 @@ def main():
             logger.warning(f"Unexpected focuser error: {e} - continuing without")
             focuser_driver = None
         
-        # SET FOCUS_FILTER_MANAGER HERE
+        ###### SET FOCUS_FILTER_MANAGER HERE (uncomment below once focus positions are in)
+        # # Create coordinated focus/filter manager
+        # logger.info("Initializing filter/focus coordination...")
+        # focus_filter_mgr = FocusFilterManager(filter_driver=filter_driver, focuser_driver=focuser_driver)
+        
+        # # Use manager to set filter
+        # if focus_filter_mgr:
+        #     logger.info(f"Setting filter to {args.filter.upper()} with focus adjustment...")
+        #     try:
+        #         filter_changed, focus_changed = focus_filter_mgr.change_filter_with_focus(args.filter.upper())
+        #         if filter_changed:
+        #             logger.info(f"Filter set to: {args.filter.upper()}")
+        #         if focus_changed:
+        #             logger.info(f"Focus adjusted for filter {args.filter.upper()}")
+        #         if not filter_changed and not focus_changed:
+        #             logger.info("Already at target filter/focus configuration")
+        #     except FocusFilterManagerError as e:
+        #         logger.warning(f"Filter/focus coordination failed: {e} - continuing anyway")
+        #     except Exception as e:
+        #         logger.warning(f"Unexpected Filer/focus coordination error: {e}")
+        
+        
+        
         
         # Slew to target (skip if using current position)
         if not args.current_position:
@@ -477,7 +506,7 @@ def main():
             logger.info(" "*30+"SUCCESS")
             logger.info("="*75)
             logger.info(f"Image saved to: {filepath}")
-            logger.info(f"Open this file in SAOImage DS9 or similar to check target counts")
+            logger.info(f"Open this file in MaxIm DL or similar to check target counts")
         else:
             logger.error("Failed to save FITS file")
             return 1
