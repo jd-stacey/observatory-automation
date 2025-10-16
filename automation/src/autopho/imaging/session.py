@@ -170,63 +170,64 @@ class ImagingSession:
             logger.warning("Failed to write target JSON for external platesolver")
     
     
-    def test_acquisition_flow(self, simulate_corrections: bool = True) -> bool:
-        """Test the acquisition phase flow without taking actual images"""
-        try:
-            logger.info("Testing acquisition flow...")
+    # TESTING WITHOUT TEST_ACQUISITION  
+    # def test_acquisition_flow(self, simulate_corrections: bool = True) -> bool:
+    #     """Test the acquisition phase flow without taking actual images"""
+    #     try:
+    #         logger.info("Testing acquisition flow...")
             
-            if not self.acquisition_enabled:
-                logger.info("Acquisition disabled - test complete")
-                return True
+    #         if not self.acquisition_enabled:
+    #             logger.info("Acquisition disabled - test complete")
+    #             return True
                 
-            logger.info(f"Acquisition directory: {self.acquisition_dir}")
-            logger.info(f"Science directory: {self.science_dir}")
-            logger.info(f"Current phase: {self.current_phase.value}")
+    #         logger.info(f"Acquisition directory: {self.acquisition_dir}")
+    #         logger.info(f"Science directory: {self.science_dir}")
+    #         logger.info(f"Current phase: {self.current_phase.value}")
             
-            # Simulate acquisition phase
-            max_attempts = self.acquisition_config.get('max_attempts', 20)
-            exposure_time = self.acquisition_config.get('exposure_time', 3.0)
-            correction_interval = self.acquisition_config.get('correction_interval', 1)
-            threshold = self.acquisition_config.get('max_total_offset_arcsec', 3.0)
+    #         # Simulate acquisition phase
+    #         max_attempts = self.acquisition_config.get('max_attempts', 20)
+    #         exposure_time = self.acquisition_config.get('exposure_time', 3.0)
+    #         correction_interval = self.acquisition_config.get('correction_interval', 1)
+    #         threshold = self.acquisition_config.get('max_total_offset_arcsec', 3.0)
             
-            logger.info(f"Test config: {exposure_time}s exposures, max {max_attempts} attempts")
-            logger.info(f"Correction interval: every {correction_interval} frame(s)")
-            logger.info(f"Acquisition threshold: {threshold} arcseconds")
+    #         logger.info(f"Test config: {exposure_time}s exposures, max {max_attempts} attempts")
+    #         logger.info(f"Correction interval: every {correction_interval} frame(s)")
+    #         logger.info(f"Acquisition threshold: {threshold} arcseconds")
             
-            # Simulate some acquisition attempts
-            for attempt in range(1, min(6, max_attempts + 1)):  # Test up to 5 attempts
-                logger.info(f"[ACQUISITION] Simulated frame {attempt}")
-                self.acquisition_count = attempt
+    #         # Simulate some acquisition attempts
+    #         for attempt in range(1, min(6, max_attempts + 1)):  # Test up to 5 attempts
+    #             logger.info(f"[ACQUISITION] Simulated frame {attempt}")
+    #             self.acquisition_count = attempt
                 
-                if simulate_corrections and (attempt % correction_interval) == 0:
-                    # Simulate improving accuracy over time
-                    simulated_offset = max(10.0 - (attempt * 2.0), 0.5)
-                    logger.info(f"Simulated correction applied - offset: {simulated_offset:.1f}\"")
+    #             if simulate_corrections and (attempt % correction_interval) == 0:
+    #                 # Simulate improving accuracy over time
+    #                 simulated_offset = max(10.0 - (attempt * 2.0), 0.5)
+    #                 logger.info(f"Simulated correction applied - offset: {simulated_offset:.1f}\"")
                     
-                    # Check if we've reached acquisition threshold
-                    if simulated_offset <= threshold:
-                        logger.info(f"Simulated acquisition complete! Offset: {simulated_offset:.1f}\" <= {threshold}\"")
-                        break
+    #                 # Check if we've reached acquisition threshold
+    #                 if simulated_offset <= threshold:
+    #                     logger.info(f"Simulated acquisition complete! Offset: {simulated_offset:.1f}\" <= {threshold}\"")
+    #                     break
                 
-                if attempt >= max_attempts:
-                    logger.warning(f"Simulated max attempts reached ({max_attempts})")
-                    break
+    #             if attempt >= max_attempts:
+    #                 logger.warning(f"Simulated max attempts reached ({max_attempts})")
+    #                 break
             
-            # Test phase transition
-            logger.info("Testing phase transition...")
-            self._switch_to_science_phase()
+    #         # Test phase transition
+    #         logger.info("Testing phase transition...")
+    #         self._switch_to_science_phase()
             
-            if self.current_phase == SessionPhase.SCIENCE:
-                logger.info("Phase transition successful")
-                logger.info(f"Now in science phase, directory: {self.science_dir}")
-                return True
-            else:
-                logger.error("Phase transition failed")
-                return False
+    #         if self.current_phase == SessionPhase.SCIENCE:
+    #             logger.info("Phase transition successful")
+    #             logger.info(f"Now in science phase, directory: {self.science_dir}")
+    #             return True
+    #         else:
+    #             logger.error("Phase transition failed")
+    #             return False
                 
-        except Exception as e:
-            logger.error(f"Acquisition flow test failed: {e}")
-            return False
+    #     except Exception as e:
+    #         logger.error(f"Acquisition flow test failed: {e}")
+    #         return False
     
     
     
