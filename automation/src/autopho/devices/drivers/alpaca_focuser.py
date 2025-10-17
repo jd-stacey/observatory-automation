@@ -1,3 +1,6 @@
+'''For Alpaca connection and operation of the focuser - position, limits, change position etc.
+Will also interact with the joint/coordinated focus_filter_manager.py which jointly operates the filter wheel and the focuser'''
+
 import time
 import logging
 from typing import Dict, Any, Tuple, Union
@@ -8,13 +11,16 @@ try:
 except ImportError:
     ALPACA_AVAILABLE = False
     
+# Set up logging
 logger = logging.getLogger(__name__)
 
 class AlpacaFocuserError(Exception):
     pass
 
+# Set up focuser driver class
 class AlpacaFocuserDriver:
     def __init__(self):
+        # Ensure alpyca is installed
         if not ALPACA_AVAILABLE:
             raise AlpacaFocuserError("Alpaca library not available. Please install.")
         self.config: Dict[str, Any] | None = None
@@ -33,7 +39,7 @@ class AlpacaFocuserDriver:
         try:
             self.focuser = Focuser(address=address, device_number=device_number)
             if not self.is_connected():
-                self.focuser.Connected = True
+                self.focuser.Connected = True 
                 time.sleep(0.5)
 
             if self.is_connected():
