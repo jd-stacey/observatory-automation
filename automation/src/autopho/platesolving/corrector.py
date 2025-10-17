@@ -222,8 +222,8 @@ class PlatesolveCorrector:
             dec_offset_arcsec = dec_offset_deg * 3600.0
             total_offset_arcsec = math.sqrt(ra_offset_arcsec**2 + dec_offset_arcsec**2)
             
-            logger.debug(f"Raw offsets: RA={ra_offset_arcsec:.2f}\", Dec={dec_offset_arcsec:.2f}\", "
-                        f"Rot={rot_offset_deg:.2f}°, Total={total_offset_arcsec:.2f}\"")
+            logger.debug(f"Raw offsets: RA={ra_offset_arcsec:.2f}\" ({ra_offset_deg:.8f}°), Dec={dec_offset_arcsec:.2f}\" ({dec_offset_deg:.8f}°), "
+                        f"Rot={rot_offset_deg:.6f}°, Total={total_offset_arcsec:.4f}\"")
             
             thresholds = self.platesolve_config.get('correction_thresholds', {})
             min_threshold = thresholds.get('min_arcsec', 1.0)
