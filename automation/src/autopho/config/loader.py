@@ -4,15 +4,14 @@ import os
 from pathlib import Path
 from typing import Dict, Any, Optional
 import logging
-
+# Set up logging
 logger = logging.getLogger(__name__)
 
 
 class ConfigurationError (Exception):
     pass
-
+# Set up config loader class
 class ConfigLoader:
-    
     
     def __init__(self, config_dir: str = 'config'):
         self.config_dir = Path(config_dir)
@@ -20,6 +19,7 @@ class ConfigLoader:
         self._validate_config_dir()
         
     def _validate_config_dir(self):
+        '''Ensure all required config files exist'''
         if not self.config_dir.exists():
             raise ConfigurationError(f"Configuartion directory not found: {self.config_dir}")
         
@@ -43,6 +43,7 @@ class ConfigLoader:
         
     
     def _load_yaml_file(self,filename: str):
+        '''Safely load the config file (*.yaml)'''
         filepath = self.config_dir / filename
         try:
             with open(filepath, 'r') as f:
@@ -55,6 +56,7 @@ class ConfigLoader:
             raise ConfigurationError(f"Cannot read {filename}: {e}")
         
     def load_all_configs(self):
+        '''Safely load and validate all required config files'''
         config_files = {
             'observatory': 'observatory.yaml',
             'devices': 'devices.yaml',
@@ -74,6 +76,7 @@ class ConfigLoader:
         return self._configs
     
     def _validate_configs(self):
+        '''Only partially implemented validation - generally not required'''
         obs = self._configs.get('observatory', {})
         required_obs = ['latitude', 'longitude', 'altitude', 'min_altitude', 'twilight_altitude']
         for field in required_obs:
@@ -118,8 +121,8 @@ class ConfigLoader:
             if path not in paths:
                 raise ConfigurationError(f"Missing required path: {path}")
             
-            
     def get_config(self, section: str):
+        '''Get the config from a given section'''
         if not self._configs:
             self.load_all_configs()
         if section not in self._configs:
@@ -127,35 +130,35 @@ class ConfigLoader:
         
         return self._configs[section]
     
-    
     def get_telescope_config(self):
-        return self.get_config('devices')['telescope']
+        return self.get_config('devices')['telescope']  # Get telescope config information from devices.yaml
     
     def get_rotator_config(self):
-        devices_config = self.get_config('devices')
+        devices_config = self.get_config('devices')     # Get rotator config information from devices.yaml
         return devices_config.get('rotator', {})
     
     def get_cover_config(self):
-        devices_config = self.get_config('devices')
+        devices_config = self.get_config('devices')     # Get cover config information from devices.yaml
         return devices_config.get('cover', {})
     
     def get_camera_configs(self):
         '''Get camera configuration (multiple cameras by name pattern)'''
-        devices = self.get_config('devices')
+        devices = self.get_config('devices')            # Get multiple camera configs information from devices.yaml
         return devices.get('cameras', {})
     
     def get_camera_config(self, role: str = "main"):
-        cameras = self.get_camera_configs()
+        cameras = self.get_camera_configs()             # Get individual camera config based on role
         if role not in cameras:
             raise ConfigurationError(f"Camera role: {role} not found in configuration")
         return cameras[role]
     
     def get_filter_wheel_config(self) -> Optional[Dict[str, Any]]:
-        devices_config = self.get_config('devices')
+        devices_config = self.get_config('devices')     # Get filter wheel config information from devices.yaml
         return devices_config.get('filter_wheel')
     
     def get_exposure_time(self, gaia_g_mag: float, filter_code: str = 'C') -> float:
-        exposures = self.get_config('exposures')
+        '''Calculate base exposure time from exposures.yaml as a backup if user doesnt enter an exposure time'''
+        exposures = self.get_config('exposures')        # Ranges from exposures.yaml
         base_exposure = exposures.get('default_exposure', 5.0)
         magnitude_ranges = exposures.get('magnitude_ranges', [])
         for range_config in magnitude_ranges:
@@ -165,7 +168,7 @@ class ConfigLoader:
             if min_mag <= gaia_g_mag < max_mag:
                 base_exposure = range_config['exposure']
                 break
-            
+        # Implement filter scaling - adjust exposure time based on filter chosen    
         filter_scaling = exposures.get('filter_scaling', {})
         
         filter_scale_map ={
@@ -184,10 +187,11 @@ class ConfigLoader:
         return final_exposure
         
     def get_focuser_config(self) -> Dict[str, Any]:
-        devices_config = self.get_config("devices")
+        devices_config = self.get_config("devices")     # Get focuser config information from devices.yaml
         return devices_config.get('focuser', {})
     
     def get_header_config(self) -> Dict[str, Any]:
+        '''Get header information from headers.yaml config file'''
         if not hasattr(self, '_header_config'):
             header_file = self.config_dir / "headers.yaml"
             if not header_file.exists():
@@ -204,15 +208,16 @@ class ConfigLoader:
         return self._header_config
     
     def get_field_rotation_config(self):
-        return self.get_config('field_rotation')
+        return self.get_config('field_rotation')    # Just get the field rotation config info from field_rotation.yaml
     
     def get_fits_headers(self):
-        return self.get_config('headers')
+        return self.get_config('headers')           # Just get the headers config info from headers.yaml
     
     def get_paths(self):
-        return self.get_config('paths')
+        return self.get_config('paths')             # Just get the paths config info from paths.yaml
     
     def write_target_json (self, target_data: Dict[str, Any]):
+        '''Write/update the target json file - used by external platesolver'''
         try:
             paths = self.get_paths()
             target_file = Path(paths['target_json'])
@@ -228,9 +233,10 @@ class ConfigLoader:
             return False
         
     def read_solver_status(self):
+        '''Check the status of the external platesolver json file and return its contents'''
         try:
             paths = self.get_paths()
-            status_file = Path(paths['solver_status_json'])
+            status_file = Path(paths['solver_status_json'])     # json file path from paths.yaml
             
             if not status_file.exists():
                 return None
@@ -238,11 +244,11 @@ class ConfigLoader:
             import time
             mod_time = status_file.stat().st_mtime
             age_seconds = time.time() - mod_time
-            
+            # Check and report age of json file
             if age_seconds > 200:
-                logger.warning(f"Solver status is {age_seconds:.0f}s old")
+                logger.warning(f"Solver status is {age_seconds:.0f} s old")
                 return None
-            
+            # Read and return the contents of the file
             with open(status_file, 'r') as f:
                 data = json.load(f)
                 logger.debug(f"Read solver status from JSON")
@@ -252,15 +258,12 @@ class ConfigLoader:
             logger.error(f"Failed to read solver status: {e}")
             return None
 
-
 _global_config = None    
-
-
 def get_config_loader(config_dir: str='config'):
     global _global_config
     if _global_config is None:
         _global_config = ConfigLoader(config_dir)
-    return _global_config
+    return _global_config       # Get the config loader itself
 
     
         
