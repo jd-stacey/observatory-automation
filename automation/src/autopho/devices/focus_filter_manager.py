@@ -7,14 +7,14 @@ import logging
 from typing import Optional, Tuple
 from autopho.devices.drivers.alpaca_filterwheel import AlpacaFilterWheelDriver, AlpacaFilterWheelError
 from autopho.devices.drivers.alpaca_focuser import AlpacaFocuserDriver, AlpacaFocuserError
-
+# Set up logging
 logger = logging.getLogger(__name__)
 
 class FocusFilterManagerError(Exception):
     """Exception raised for focus/filter coordination errors"""
     pass
 
-
+# Set up manager class
 class FocusFilterManager:
     """Manages coordinated filter wheel and focuser operations"""
     
