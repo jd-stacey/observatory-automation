@@ -8,7 +8,7 @@ try:
     ASTRO_AVAILABLE = True
 except ImportError:
     ASTRO_AVAILABLE = False
-    
+# Set up logging    
 logger = logging.getLogger(__name__)
 
 
@@ -27,12 +27,12 @@ class TargetInfo:
     
 class TargetResolutionError(Exception):
     pass
-
+# Set up target resolver class
 class TICTargetResolver:
     
     def __init__(self, config_loader=None):
         if not ASTRO_AVAILABLE:
-            raise TargetResolutionError(f"Required astronomy packages not available. Please install.")
+            raise TargetResolutionError(f"Required astronomy packages not available. Please install.")  # Ensure astroquery installed
         
         # Default config values (fallback only)
         default_config = {
@@ -45,7 +45,7 @@ class TICTargetResolver:
         
         if config_loader:
             try:
-                exposures_config = config_loader.get_config('exposures')
+                exposures_config = config_loader.get_config('exposures')    # from exposures.yaml
                 target_config = exposures_config.get('target_resolution', {})
                 
                 # Start with defaults and update if config is valid
@@ -55,23 +55,24 @@ class TICTargetResolver:
                         self.config['gaia_magnitude'].update(target_config['gaia_magnitude'])
                         logger.debug("Loaded target resolution config from exposures.yaml")
                     else:
-                        logger.debug("No gaia_magnitude config found, using defaults")
+                        logger.debug("No gaia_magnitude config found, using defaults and tic lookup")
                 else:
-                    logger.debug("No target_resolution config found, using defaults")
+                    logger.debug("No target_resolution config found, using defaults and tic lookup")
                     
             except Exception as e:
-                logger.warning(f"Could not load target resolution config, using defaults: {e}")
+                logger.warning(f"Could not load target resolution config, using defaults and tic lookup: {e}")
                 self.config = default_config
         else:
             self.config = default_config
         
     def resolve_tic_id(self, tic_id: str):
+        '''Resolve a target based on its TIC ID'''
         logger.debug(f"Resolving TIC ID: {tic_id}")
-        clean_tic = self._clean_tic_id(tic_id)
+        clean_tic = self._clean_tic_id(tic_id)      # Clean the TIC ID (remove '-' etc for lookup)
         
         try:
-            tic_data = self._query_tic_catalog(clean_tic)
-            target_info = self._build_target_info(clean_tic, tic_data)
+            tic_data = self._query_tic_catalog(clean_tic)       # Check the catalog for the TIC ID
+            target_info = self._build_target_info(clean_tic, tic_data)  # Return the target info and log
             
             logger.info(f"Successfully resolved {tic_id}: RA={target_info.ra_j2000_hours:.6f} h ({target_info.ra_j2000_hours*15.0:.6f}°), "
                        f"Dec={target_info.dec_j2000_deg:.6f}°, G={target_info.gaia_g_mag:.2f} "
@@ -83,6 +84,7 @@ class TICTargetResolver:
             raise TargetResolutionError(f"Cannot resolve TIC ID {tic_id}: {e}")
         
     def _clean_tic_id(self, tic_id: str):
+        '''Clean the TIC ID'''
         tic_id = str(tic_id).strip()
         
         if tic_id.upper().startswith('TIC'):
@@ -96,9 +98,11 @@ class TICTargetResolver:
         return clean_id
     
     def _query_tic_catalog(self, tic_id: str):
+        '''Check the TIC catalog for the TIC ID and get info (coords, Gaia mag, TESS mag, etc)'''
         logger.debug(f"Querying TIC catalog for ID: {tic_id}")
         
         try:
+            # Query the catalog
             tic_table = Catalogs.query_criteria(
                 catalog='Tic',
                 ID=int(tic_id)
@@ -108,7 +112,7 @@ class TICTargetResolver:
                 raise TargetResolutionError(f"TIC ID {tic_id} not found in catalog")
             
             tic_row = tic_table[0]
-            
+            # Get the info from the data
             tic_data = {
                 'tic_id': tic_id,
                 'ra_deg': float(tic_row.get('ra', 0)),
