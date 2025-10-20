@@ -132,7 +132,7 @@ def main():
         config_loader.load_all_configs()
         log_dir = Path(config_loader.get_config("paths")["logs"])
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        
+        # Set up log filenames
         if args.current_position:
             log_name = f"single_{timestamp}_CURRENTPOS.log"
         elif args.tic_id:    
@@ -185,10 +185,10 @@ def main():
             try:
                 coords_parts = args.coords.strip().split()
                 if len(coords_parts) != 2:
-                    raise ValueError("Expected 'RA_DEGREES DEC_DEGREES'")
-                ra_hours = float(coords_parts[0]) / 15.0
+                    raise ValueError("Expected 'RA_DEGREES DEC_DEGREES'")   # Ensure coords in correct format
+                ra_hours = float(coords_parts[0]) / 15.0    # Convert RA in degrees to RA in HOURS
                 dec_deg = float(coords_parts[1])
-                
+                # Ensure coords are valid
                 if not (0 <= ra_hours < 24):
                     raise ValueError(f"RA must be 0-360 degrees, got {float(coords_parts[0])}")
                 if not (-90 <= dec_deg <= 90):
@@ -198,7 +198,7 @@ def main():
                     tic_id=f"MANUAL-{ra_hours:.3f}h_{dec_deg:+.3f}d",
                     ra_j2000_hours=ra_hours,
                     dec_j2000_deg=dec_deg,
-                    gaia_g_mag=12.0,
+                    gaia_g_mag=12.0,    # just use a default value
                     magnitude_source="manual-default"
                 )
                 logger.info(f"Manual target: RA={ra_hours:.6f} h ({ra_hours*15.0:.6f}°), Dec={dec_deg:.6f}°")
@@ -209,16 +209,16 @@ def main():
                 return 1
         else:
             logger.info(f"Resolving target: {args.tic_id}")
-            target_resolver = TICTargetResolver(config_loader)
-            target_info = target_resolver.resolve_tic_id(args.tic_id)
+            target_resolver = TICTargetResolver(config_loader)          # Set up target resolver (from resolver.py)
+            target_info = target_resolver.resolve_tic_id(args.tic_id)   # Resolve target id (from resolver.py)
         
         # Check observability (skip if using current position)
         if not args.current_position:
             logger.info("Checking target observability...")
             try:
-                observatory_config = config_loader.get_config('observatory')
-                checker = ObservabilityChecker(observatory_config)
-                obs_status = checker.check_target_observability(
+                observatory_config = config_loader.get_config('observatory')    # Observatory config from observatory.yaml
+                checker = ObservabilityChecker(observatory_config)              # Set up observability checker from observability.py
+                obs_status = checker.check_target_observability(                # Check target observability from observability.py
                     target_info.ra_j2000_hours,
                     target_info.dec_j2000_deg,
                     ignore_twilight=args.ignore_twilight
@@ -227,8 +227,8 @@ def main():
                 logger.info(f"Current target altitude: {obs_status.target_altitude:.1f}°")
                 logger.info(f"Current sun altitude: {obs_status.sun_altitude:.1f}°")
                 if obs_status.airmass:
-                    logger.debug(f"Airmass: {obs_status.airmass:.2f}")
-                    
+                    logger.debug(f"Airmass: {obs_status.airmass:.2f}")      # Airmass for logging
+                # Log status if not observable    
                 if not obs_status.observable:
                     logger.error("Target not currently observable:")
                     for reason in obs_status.reasons:
@@ -247,12 +247,12 @@ def main():
         
         # Discover cameras
         logger.info('Discovering cameras...')
-        camera_manager = CameraManager()
-        camera_configs = config_loader.get_camera_configs()
+        camera_manager = CameraManager()                    # from camera.py
+        camera_configs = config_loader.get_camera_configs() # from loader.py
         
         if camera_manager.discover_cameras(camera_configs):
             logger.info('Camera discovery successful:')
-            for camera_status in camera_manager.list_all_cameras():
+            for camera_status in camera_manager.list_all_cameras(): # from camera.py
                 logger.info(f"  {camera_status['role'].upper()} camera: {camera_status['name']} "
                             f"(ID: {camera_status['device_id']})")
         else:
@@ -260,18 +260,18 @@ def main():
             return 1
         
         # Connect to main camera (disable auto-cooler initialization)
-        main_camera = camera_manager.get_main_camera()
+        main_camera = camera_manager.get_main_camera()  # from camera.py
         if not main_camera:
             logger.error("Main camera not found")
             return 1
         
-        # Manually connect without cooler initialization
+        # Manually connect without cooler initialization for single image mode
         try:
-            if not main_camera.camera.Connected:
-                main_camera.camera.Connected = True
+            if not main_camera.camera.Connected:        # Alpaca call
+                main_camera.camera.Connected = True     # Alpaca call
                 import time
                 time.sleep(0.5)
-            main_camera.connected = main_camera.camera.Connected
+            main_camera.connected = main_camera.camera.Connected    # Alapca call
             if main_camera.connected:
                 logger.info(f"Connected to main camera: {main_camera.name} (cooler management disabled)")
             else:
@@ -283,14 +283,14 @@ def main():
         
         # Connect to telescope
         logger.info('Connecting to telescope...')
-        telescope_driver = AlpacaTelescopeDriver()
-        telescope_config = config_loader.get_telescope_config()
+        telescope_driver = AlpacaTelescopeDriver()                  # from alpaca_telescope.py
+        telescope_config = config_loader.get_telescope_config()     # from loader.py
         
-        if not telescope_driver.connect(telescope_config):
+        if not telescope_driver.connect(telescope_config):          # from alpaca_telescope.py 
             logger.error('Failed to connect to telescope')
             return 1
         
-        tel_info = telescope_driver.get_telescope_info()
+        tel_info = telescope_driver.get_telescope_info()            # from alpaca_telescope.py
         logger.info(f"Connected to: {tel_info.get('name', 'Unknown telescope')}")
         logger.info(f"Current position: RA={tel_info.get('ra_hours', 0):.6f} h ({tel_info.get('ra_hours', 0)*15.0:.6f}°), "
                     f"Dec={tel_info.get('dec_degrees', 0):.6f}°")
@@ -304,9 +304,9 @@ def main():
             
             # Enable telescope tracking if using --current-position
             try:
-                if not telescope_driver.telescope.Tracking:
+                if not telescope_driver.telescope.Tracking:     # Alpaca call, from alpaca_telescope.py
                     logger.warning("Telescope tracking disabled - re-enabling")
-                    telescope_driver.telescope.Tracking = True
+                    telescope_driver.telescope.Tracking = True  # Alapca call, from alpaca_telescope.py
                     import time
                     time.sleep(0.5)
                     if telescope_driver.telescope.Tracking:
@@ -320,10 +320,10 @@ def main():
         cover_driver = None
         logger.info("Connecting to cover...")
         try:
-            cover_driver = AlpacaCoverDriver()
-            cover_config = config_loader.get_cover_config()
-            if cover_config and cover_driver.connect(cover_config):
-                cover_info = cover_driver.get_cover_info()
+            cover_driver = AlpacaCoverDriver()                      # from alpaca_cover.py
+            cover_config = config_loader.get_cover_config()         # from loader.py
+            if cover_config and cover_driver.connect(cover_config): # from alpaca_cover.py
+                cover_info = cover_driver.get_cover_info()          # from alpaca_cover.py
                 logger.info(f"Connected to: {cover_info.get('name', 'Unknown cover')} - State: {cover_info.get('cover_state', 'Unknown')}")
             else:
                 logger.warning("Failed to connect to cover - continuing without")
@@ -334,25 +334,25 @@ def main():
         
         # Turn telescope motor on
         logger.info('Turning telescope motor on...') 
-        motor_success = telescope_driver.motor_on()
+        motor_success = telescope_driver.motor_on()             # from alpaca_telescope.py
         if not motor_success:
             logger.error('Failed to turn telescope motor on')
-            telescope_driver.disconnect()
+            telescope_driver.disconnect()                       # from alpaca_telescope.py
             return 1
         
         # Connect to filter wheel
         filter_driver = None
         logger.info("Connecting to filter wheel...")
         try:
-            filter_driver = AlpacaFilterWheelDriver()
-            filter_config = config_loader.get_filter_wheel_config()
-            
-            if filter_config and filter_driver.connect(filter_config):
-                filter_info = filter_driver.get_filter_info()
+            filter_driver = AlpacaFilterWheelDriver()                   # from alpaca_filterwheel.py
+            filter_config = config_loader.get_filter_wheel_config()     # from loader.py
+            # Connect to filter wheel
+            if filter_config and filter_driver.connect(filter_config):  # from alpaca_filterwheel.py
+                filter_info = filter_driver.get_filter_info()           # from alpaca_filterwheel.py
                 logger.info(f"Connected to filter wheel: {filter_info.get('total_filters', 0)} filters")
                 logger.info(f"Current filter: {filter_info.get('filter_name', 'Unknown')}")
-                
-                if filter_driver.change_filter(args.filter.upper()):
+                # Change filter wheel to selected filter
+                if filter_driver.change_filter(args.filter.upper()):    # from alpaca_filterwheel.py
                     logger.info(f"Filter set to: {args.filter.upper()}")
                 else:
                     logger.warning(f"Failed to change to filter {args.filter.upper()} - continuing with current filter")
@@ -367,10 +367,10 @@ def main():
         focuser_driver = None
         logger.info("Connecting to focuser...")
         try:
-            focuser_driver = AlpacaFocuserDriver()
-            focuser_config = config_loader.get_focuser_config()
-            if focuser_config and focuser_driver.connect(focuser_config):
-                focuser_info = focuser_driver.get_focuser_info()
+            focuser_driver = AlpacaFocuserDriver()                          # from alpaca_focuser.py
+            focuser_config = config_loader.get_focuser_config()             # from loader.py
+            if focuser_config and focuser_driver.connect(focuser_config):   # from alpaca_focuser.py
+                focuser_info = focuser_driver.get_focuser_info()            # from alpaca_focuser.py
                 logger.info(f"Connected to focuser: {focuser_info.get('name', 'Unknown')}")
                 logger.info(f"    Current position: {focuser_info.get('position', 'Unknown')}")
             else:
@@ -410,15 +410,15 @@ def main():
         # Slew to target (skip if using current position)
         if not args.current_position:
             logger.info("Slewing to target coordinates...")
-            slew_success = telescope_driver.slew_to_coordinates(
+            slew_success = telescope_driver.slew_to_coordinates(    # from alpaca_telescope.py
                 target_info.ra_j2000_hours,
                 target_info.dec_j2000_deg
             )
             
             if not slew_success:
                 logger.error('Failed to slew to target')
-                telescope_driver.motor_off()
-                telescope_driver.disconnect()
+                telescope_driver.motor_off()                # from alpaca_telescope.py
+                telescope_driver.disconnect()               # from alpaca_telescope.py
                 return 1
             
             logger.info('Telescope positioned at target coordinates')
@@ -428,7 +428,7 @@ def main():
         # Open cover
         if cover_driver:
             logger.info("Opening cover...")
-            if not cover_driver.open_cover():
+            if not cover_driver.open_cover():               # from alpaca_cover.py
                 logger.error("Failed to open cover - aborting")
                 return 1
             logger.info("Cover opened successfully")
@@ -441,9 +441,9 @@ def main():
         logger.info(f"Filter: {args.filter.upper()}")
         
         # Get camera settings
-        camera_config = main_camera.config
-        binning = camera_config.get('default_binning', 4)
-        gain = camera_config.get('default_gain', 100)
+        camera_config = main_camera.config                  # from camera.py (using devices.yaml)
+        binning = camera_config.get('default_binning', 4)   # from devices.yaml
+        gain = camera_config.get('default_gain', 100)       # from devices.yaml
         
         logger.info(f"Binning: {binning}x{binning}, Gain: {gain}")
         
@@ -453,7 +453,7 @@ def main():
         for attempt in range(1, max_retries + 1):
             try:
                 logger.info(f"Capture attempt {attempt}/{max_retries}...")
-                image_array = main_camera.capture_image(
+                image_array = main_camera.capture_image(    # from camera.py
                     exposure_time=args.exposure_time,
                     binning=binning,
                     gain=gain,
@@ -484,7 +484,7 @@ def main():
         
         # Create FITS file
         logger.info("Creating FITS file...")
-        hdu = create_fits_file(
+        hdu = create_fits_file(                 # from fits_utils.py
             image_array=image_array,
             target_info=target_info,
             camera_device=main_camera,
@@ -498,15 +498,15 @@ def main():
             hdu.header['IMGTYPE'] = ('SingleImage', 'Single test image for exposure optimization')
         
         # Setup save directory structure
-        file_manager = FileManager(config_loader)
+        file_manager = FileManager(config_loader)   # from file_manager.py
         
         # Create singleimages subdirectory
-        base_dir = file_manager.create_target_directory("singleimages")
+        base_dir = file_manager.create_target_directory("singleimages") # from file_manager.py
         single_images_dir = base_dir
         single_images_dir.mkdir(parents=True, exist_ok=True)
         
         # Save the file
-        filepath = file_manager.save_fits_file(
+        filepath = file_manager.save_fits_file(     # from file_manager.py
             hdu=hdu,
             tic_id=target_info.tic_id,
             filter_code=args.filter.upper(),
@@ -570,19 +570,19 @@ def main():
         return 1
     finally:
         try:
-            # Cleanup - but don't park telescope
+            # Cleanup - but don't park telescope or close covers (save time for possible multiple single images)
             if cover_driver:
                 logger.warning("Not closing cover (You will need to manually close later)")
                 # cover_driver.close_cover()
             if filter_driver:
-                filter_driver.disconnect()
+                filter_driver.disconnect()  # from alpaca_filterwheel.py
             if focuser_driver:
-                focuser_driver.disconnect()
+                focuser_driver.disconnect() # from alpaca_focuser.py
             if telescope_driver:
                 logger.warning("Leaving telescope at target position (not parking)")
                 logger.info("Turning telescope motor off...")
-                telescope_driver.motor_off()
-                telescope_driver.disconnect()
+                telescope_driver.motor_off()    # from alpaca_telescope.py
+                telescope_driver.disconnect()   # from alpaca_telescope.py
             logger.info("="*75)
             logger.info(" "*29+"CAPTURE COMPLETE")
             logger.info("="*75)
