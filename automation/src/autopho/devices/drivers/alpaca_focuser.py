@@ -31,6 +31,7 @@ class AlpacaFocuserDriver:
         self.info: Dict[str, Any] | None = None
         
     def connect(self, config: Dict[str, Any]) -> bool:
+        '''Connect to Focuser but use is_connected() method for state, not .Connected since its unreliable'''
         self.config = config
         address = config.get('address', '127.0.0.1:11112')
         device_number = config.get('device_number', 0)
@@ -70,32 +71,39 @@ class AlpacaFocuserDriver:
             return False
         
     def get_position(self) -> int:
+        '''Get the current focus position of the Focuser'''
         if not self.is_connected():
             raise AlpacaFocuserError("Cannot get position - focuser not connected")
         
         try:
+            # Alpaca function call
             position = self.focuser.Position
             return position
         except Exception as e:
             raise AlpacaFocuserError(f"Failed to get position: {e}")
         
     def move_to_position(self, target_position):
+        '''Move the focuser to a target position'''
         if not self.is_connected():
             raise AlpacaFocuserError("Move failed - focuser not connected")
              
         try:
+            # Ensure target position is within limits
             is_safe, safety_msg = self.check_position_safety(target_position)
             if not is_safe:
+                # If not within limits, log error message and return False
                 logger.error(f"Refusing unsafe move: {safety_msg}")
                 return False
             logger.info(f"Moving focuser to position: {target_position}")
-            
+            # If save, move the Focuser to the target position via Alpaca function call
             self.focuser.Move(target_position)
             
+            # Wait while the focuser is moving to the target position
             while self.focuser.IsMoving:
                 logger.debug(f"    Moving focus position...currently at {self.focuser.Position}...")
                 time.sleep(5)
             
+            # Get and report the current (final) position of the focuser
             current_pos = self.get_position()
             logger.info(f"Focuser move complete - positioned at {current_pos}")
             return True
@@ -105,18 +113,23 @@ class AlpacaFocuserDriver:
         
     
     def halt(self) -> bool:
+        '''Immediately stop the focuser if it is currently moving'''
         if not self.is_connected():
             logger.warning("Cannot halt - focuser not connected")
             return False
         try:
+            # Skip if the Focuser is not current moving
             if not self.focuser.IsMoving:
                 logger.info("Focuser is not currently moving")
                 return False
+            # If the Focuser is moving, Halt via Alpaca function call
             else:
                 logger.warning("Halting focuser...")
                 self.focuser.Halt()
+                # Wait for Focuser to stop moving
                 while self.focuser.IsMoving:
                     time.sleep(0.5)
+                # Log the current (final) position of the Focuser
                 logger.info(f"Focuser halted at position {self.get_position()}")
                 return True
         except Exception as e:
@@ -130,11 +143,13 @@ class AlpacaFocuserDriver:
             self.info = {"connected": False, "error": "not connected"}
             return self.info
 
+        # If we know nothing about the Focuser and if we are forcing the info to update, update it
         if self.info is None or force:
+            # Get position, limits and current safety status
             current_pos = self.get_position()
             limits = self.get_limits()
             is_safe, safety_status = self.check_position_safety(current_pos)
-
+            # Populate and return the info dictionary
             self.info = {
                 "connected": True,
                 "name": self.focuser.Name,
@@ -151,15 +166,17 @@ class AlpacaFocuserDriver:
     
     
     def get_focuser_info(self, refresh: bool = False) -> Dict[str, Any]:
-        """Return cached info unless refresh=True."""
+        """Get info about the Focuser (can just return cached info unless refresh=True)."""
         if refresh or self.info is None:
             return self.refresh_info(force=True)
         return self.info
     
     def get_limits(self) -> Dict[str, Union[int, str]]:
+        '''Get the mechanical limts of the Focuser. Min is 0, Max from Alpaca function call'''
         if not self.is_connected():
             return {"error": "not connected"}
         try:
+            # Get max position from Alpaca Function call
             max_step = self.focuser.MaxStep
             return {"min": 0, "max": max_step}
         except Exception as e:
@@ -167,15 +184,18 @@ class AlpacaFocuserDriver:
         
     
     def check_position_safety(self, target_position) -> Tuple[bool, str]:
+        '''Check safety of a target Focuser position (within allowable limits)'''
+        # Collect the limits of the Focuser
         limits = self.get_limits()
         if "error" in limits:
             return False, limits["error"]
-        
+        # Ensure target_position in correct (integer format)
         try:
             target_position = int(target_position)
         except Exception as e:
             return False, f"Position must be an integer value"
         
+        # If target position is within limits, return True, otherwise False
         try:
             min_pos, max_pos = limits["min"], limits["max"]
             if min_pos <= target_position <= max_pos:
@@ -186,6 +206,7 @@ class AlpacaFocuserDriver:
             return False, f"Position check error: {e}"
         
     def disconnect(self):
+        '''Disconnect the Focuser (and update self. variables)'''
         if self.focuser:
             try:
                 self.focuser.Connected = False
@@ -199,7 +220,7 @@ class AlpacaFocuserDriver:
         self.limits = None
     
     def set_position_from_filter(self, filter_code):
-               
+        '''Change the Focuser position based on a given filter (usually initiated from the combined focuser/filterwheel driver in focus_filter_manager.py)'''       
         if not self.is_connected():
             logger.error("Cannot set position - focuser not connected")
             return False
@@ -208,6 +229,7 @@ class AlpacaFocuserDriver:
             logger.error("No focus_positions found in config")
             return False
         
+        # Get the corresponding optimal focus positions based on filters from the config file (devices.yaml)
         focus_positions = self.config.get("focus_positions", {})
         lookup = {k.lower(): v for k, v in focus_positions.items()}
         target_pos = lookup.get(filter_code.lower())
@@ -217,6 +239,7 @@ class AlpacaFocuserDriver:
             return False
         
         logger.info(f"Setting focuser for filter '{filter_code}' to position {target_pos}")
+        # Move to the target position
         return self.move_to_position(target_pos)
         
     

@@ -14,14 +14,17 @@ try:
 except ImportError:
     ALPACA_AVAILABLE = False
     
+# Set up logging
 logger = logging.getLogger(__name__)
 
 class AlpacaRotatorError(Exception):
     pass
 
+# Set up rotator driver class
 class AlpacaRotatorDriver:
     
     def __init__(self):
+        # ensure Alpyca library installed
         if not ALPACA_AVAILABLE:
             raise AlpacaRotatorError("Alpaca library not available - please install")
         
@@ -31,13 +34,13 @@ class AlpacaRotatorDriver:
         self.last_rotation_move_ts = 0.0
         self.rotator_sign = 1          # overridden from field_rotation.yaml during init
         self._platesolve_sign = 1      # overridden from field_rotation.yaml during init
-        self._platesolve_clamp_deg = 5.0  # hard default; leave as-is unless you add to YAML later
+        self._platesolve_clamp_deg = 5.0  # hard default - leave as-is unless added to YAML later
 
         
-        
     def connect(self, config: Dict[str, Any]) -> bool:
+        '''Connect to the rotator and get current position and limits'''
         try:
-            self.config = config
+            self.config = config        # from devices.yaml
             address = config.get('address', '127.0.0.1:11112')          
             device_number = config.get('device_number', 0)
             mechanical_limits = config.get('mechanical_limits', {})
@@ -46,19 +49,14 @@ class AlpacaRotatorDriver:
             
             logger.debug(f"Connecting to Alpaca Rotator at {address}, device {device_number}")
             
-            self.rotator = Rotator(
-                address=address,
-                device_number=device_number
-            )
-            
+            # initialise rotator class from Alpaca library
+            self.rotator = Rotator(address=address, device_number=device_number)
             
             if not self.is_connected():
-            # if not self.rotator.Connected:
                 self.rotator.Connected = True
                 time.sleep(0.5)
                 
             if self.is_connected():
-            # if self.rotator.Connected:
                 rotator_name = self.rotator.Name
                 logger.debug(f"Successfully connected to rotator: {rotator_name}")
                 self.connected = True
@@ -77,6 +75,7 @@ class AlpacaRotatorDriver:
             return False
         
     def disconnect(self):
+        '''Disconnect from the rotator'''
         try:
             if self.rotator and self.connected:
                 self.rotator.Connected = False
@@ -89,6 +88,7 @@ class AlpacaRotatorDriver:
             return False
         
     def is_connected(self):
+        '''Get connected status (T/F) based on a Position call (since .Connected is unreliable)'''
         try:
             if not self.rotator:
                 return False
@@ -98,86 +98,88 @@ class AlpacaRotatorDriver:
             _ = self.rotator.Position
             self.connected = True
             return True
-            
-            # OLD CODE
-            # is_hw_connected = self.rotator.Connected
-            # if not is_hw_connected:
-            #     self.connected = False
-            # else:
-            #     self.connected = True    
-            # return is_hw_connected and self.connected
+
         except Exception as e:
             logger.error(f"Rotator connection test failed: {e}")
             self.connected = False
             return False
         
     def get_position(self):
+        '''Get the current position of the rotator'''
         if not self.is_connected():
             raise AlpacaRotatorError("Cannot get position - rotator not connected")
         
         try:
+            # Alpaca function call
             position = self.rotator.Position
-            # logger.debug(f"Current rotator position: {position:.2f}°")
             return position
-        
         except Exception as e:
             raise AlpacaRotatorError(f"Failed to get position: {e}")
         
         
     def check_position_safety(self, target_position: float) -> Tuple[bool, str]:
+        '''Check the safety of a target rotator position (within mechanical limits)'''
+        # Get mechanical limits from devices.yaml
         limits_config = self.config.get('limits', {})
-        warning_margin = limits_config.get('warning_margin_deg', 30.0)
-        emergency_margin = limits_config.get('emergency_margin_deg', 10.0)
+        warning_margin = limits_config.get('warning_margin_deg', 30.0)      # when to 'warn' mechanical limit is approaching (but still process req)
+        emergency_margin = limits_config.get('emergency_margin_deg', 10.0)  # when to reject requests
         
         
+        # If target position is outside emergency limits - return False and reject requests to move to target position
         if target_position <= (self.min_limit + emergency_margin):
             return False, f"Position {target_position:.6f}° within emergency margin ({emergency_margin}°) of min limit {self.min_limit}°"
         if target_position >= (self.max_limit - emergency_margin):
             return False, f"Position {target_position:.6f}° within emergency margin ({emergency_margin}°) of max limit {self.max_limit}°"
         
+        # Otherwise, if target position is within warning limits - log a warning but still return True and process move requests
         if target_position <= (self.min_limit + warning_margin):
             return True, f"Warning: {target_position:.6f}° approaching minimum limit {self.min_limit}°"
         if target_position >= (self.max_limit - warning_margin):
             return True, f"Warning: {target_position:.6f}° approaching maximum limit {self.max_limit}°"
         
+        # Any other target position is fine
         return True, "Position is safe"
     
             
     def initialize_position(self) -> bool:
+        '''Move the rotator to a safe starting position in the middle of the min and max mechanical limits'''
         if not self.is_connected():
             logger.error("Cannot initialize - rotator not connected")
             return False
         
         try:
+            # Get config info from devices.yaml
             init_config = self.config.get('initialization', {})
+            # Get the initialisation strategy from devices.yaml (should be either 'midpoint' or 'safe_postion')
             strategy = init_config.get('strategy', 'midpoint')
-            
+            # Get the current position of the rotator
             current_pos = self.get_position()
             
+            # If the strategy is 'midpoint' set the rotator to the midpoint between the min and max mechanical limits of the rotator
             if strategy == 'midpoint':
                 mid_point = (self.min_limit + self.max_limit) / 2.0
                 target_pos = mid_point
                 logger.debug(f"Initializing to midpoint position: {target_pos:.2f}°")
-                
+            # If the strategy is 'safe_position' set the rotator to the position defined in devices.yaml (safe_position_deg)
             elif strategy == 'safe_position':
                 target_pos = init_config.get('safe_position_deg', 220.0)
                 logger.debug(f"Initializing to configured safe position: {target_pos:.2f}°")
-                
             else:
                 logger.debug(f"No initialization needed, staying at current position: {current_pos:.2f}°")
                 return True
             
+            # If the target position is within 2° of the current position - dont bother moving
             position_diff = abs(current_pos - target_pos)
-            
             if position_diff < 2.0:
                 logger.info(f"Already within 2° of target position ({current_pos:.2f}°), no movement needed")
                 return True
             
+            # Confirm safety of target position
             is_safe, safety_msg = self.check_position_safety(target_pos)
             if not is_safe:
                 logger.error(f"Cannot initialize to unsafe position: {safety_msg}")
                 return False
-        
+            # With safety confirmed, move to the target rotator position        
             return self.move_to_position(target_pos)
         
         except Exception as e:
@@ -185,11 +187,13 @@ class AlpacaRotatorDriver:
             return False
         
     def move_to_position(self, position_deg: float) -> bool:
+        '''Move the rotator to a target position'''
         if not self.is_connected():
             logger.error("Cannot move - rotator not connected")
             return False
         
         try:
+            # Confirm safety of target position
             is_safe, safety_msg = self.check_position_safety(position_deg)
             if not is_safe:
                 logger.error(f"Refusing unsafe move: {safety_msg}")
@@ -199,16 +203,19 @@ class AlpacaRotatorDriver:
                 
             logger.info(f"Moving rotator to position: {position_deg:.6f}°")
             
+            # If save, move the rotator via Alpaca function call
             self.rotator.MoveAbsolute(position_deg)
             
+            # Log movements while the rotator is still moving
             while self.rotator.IsMoving:
                 logger.debug(f"    Rotating...currently at {self.rotator.Position:.6f}°")
                 time.sleep(0.5)
                 
+            # If a settle time is set in devices.yaml - wait for that time after a rotator move
             settle_time = self.config.get('settle_time', 2.0)
             logger.info(f"Rotation complete, settling for {settle_time} s")
             time.sleep(settle_time)
-            
+            # Get and report current (final) position of the rotator
             final_pos = self.get_position()
             logger.info(f"Rotator positioned at: {final_pos:.6f}°")
             
@@ -253,8 +260,7 @@ class AlpacaRotatorDriver:
             logger.info(f"Applying platesolve de-rotation: sky Δ={rotation_offset_deg:+.6f}°, "
                         f"mech Δ={mech_delta:+.6f}° (from {current_pos:.6f}° → {target_pos:.6f}°)")
             
-            # use new call for rotator position move
-            
+            # Rotator position move
             if hasattr(self, 'field_tracker') and self.field_tracker:
                 success = self.field_tracker._execute_tracking_move(target_pos)
             else:
@@ -264,8 +270,7 @@ class AlpacaRotatorDriver:
             if not success:
                     logger.warning("Platesolve rotation correction failed")
                     return False
-            # vvvvvv orig call
-            # self.rotator.MoveAbsolute(target_pos)
+
             self.last_rotation_move_ts = time.time()
 
             # minimal settle (configurable)
@@ -288,9 +293,8 @@ class AlpacaRotatorDriver:
                         self.field_tracker._last_pa_cmd = float(pa_now)
             except Exception:
                 pass
-            # ---------------------------------------------------------
             
-            
+            # Get and log current (final) position of the rotator
             final_pos = self.get_position()
             logger.debug(f"Rotator now at {final_pos:.6f}°")
             return True
@@ -300,15 +304,18 @@ class AlpacaRotatorDriver:
             return False
         
     def is_moving(self) -> bool:
+        '''Get moving status of the rotator via Alpaca function call'''
         if not self.is_connected():
             return False
         try:
+            # Alpaca function call
             return self.rotator.IsMoving
         except Exception as e:
             logger.error(f"Cannot check moving status: {e}")
             return False
         
     def halt(self) -> bool:
+        '''Immediately stop the rotator'''
         if not self.is_connected():
             logger.warning("Cannot halt - rotator not connected")
             return False
@@ -322,13 +329,16 @@ class AlpacaRotatorDriver:
             return False
         
     def get_rotator_info(self) -> Dict[str, Any]:
+        '''Get current info about the rotator'''
         if not self.is_connected():
             return {'connected': False}
         
         try:
+            # Get current position and safety status of that position
             current_pos = self.get_position()
             is_safe, safety_status = self.check_position_safety(current_pos)
             
+            # Get and return information dictionary
             info={
                 'connected': True,
                 "name": self.rotator.Name,
@@ -336,8 +346,8 @@ class AlpacaRotatorDriver:
                 "position_deg": current_pos,
                 "is_moving": self.rotator.IsMoving,
                 'can_reverse': getattr(self.rotator, 'CanReverse', False),
-                # "step_size": getattr(self.rotator, 'StepSize', None),                 # Dont use - not implemented on driver
-                # "target_position": getattr(self.rotator, 'TargetPosition', None),     # Dont use - not implemented on driver
+                # "step_size": getattr(self.rotator, 'StepSize', None),                 # Do not use - not implemented on driver
+                # "target_position": getattr(self.rotator, 'TargetPosition', None),     # Do not use - not implemented on driver
                 "mechanical_limits": {'min': self.min_limit, 'max': self.max_limit},
                 "position_safe": is_safe,
                 "safety_status": safety_status
@@ -350,22 +360,19 @@ class AlpacaRotatorDriver:
     def initialize_field_rotation(self, observatory_config, field_rotation_config):
         """Initialize field rotation tracker"""
         try:
-            # ---- NEW: wire calibration values from field_rotation.yaml into the driver ----
+            # Get calibration values from field_rotation.yaml for the driver
             cal = field_rotation_config.get('calibration', {})
             self.rotator_sign = int(cal.get('rotator_sign', self.rotator_sign))
             self._platesolve_sign = int(cal.get('platesolve_sign', self._platesolve_sign))
-            # optional: keep a hard-coded clamp unless you later add one to YAML
+            # optional: keep a hard-coded clamp unless one is added later to YAML
             # self._platesolve_clamp_deg = float(field_rotation_config.get('platesolve', {}).get('clamp_deg', self._platesolve_clamp_deg))
-            # ------------------------------------------------------------------------------
 
-            self.field_tracker = FieldRotationTracker(
-                self, observatory_config, field_rotation_config
-            )
+            # Initialise the tracker
+            self.field_tracker = FieldRotationTracker(self, observatory_config, field_rotation_config)
             return True
         except Exception as e:
             logger.error(f"Failed to initialize field rotation: {e}")
             return False
-
 
     def set_tracking_target(self, ra_hours, dec_deg, reference_pa_deg=None):
         """Set target for field rotation tracking"""
@@ -402,20 +409,10 @@ class AlpacaRotatorDriver:
             return False
 
     def check_wrap_status(self):
-        """Check if wrap management is needed"""
+        """Check if wrap management is needed for rotator flips"""
         if hasattr(self, 'field_tracker'):
             return self.field_tracker.check_wrap_needed()
         return False
-    
-    # def tracking_notify_exposure_start(self):
-    #     if hasattr(self, 'field_tracker'):
-    #         self.field_tracker.notify_exposure_start()
-
-    # def tracking_notify_exposure_end(self):
-    #     if hasattr(self, 'field_tracker'):
-    #         self.field_tracker.notify_exposure_end()
-    
-        
 
 class FieldRotationTracker:
     """Continuous field rotation tracking with immediate 180° flip capability"""
@@ -543,6 +540,7 @@ class FieldRotationTracker:
 
     def _tracking_loop(self):
         """Main tracking loop with immediate flip capability"""
+        # Get config vals from field_rotation.yaml
         update_rate = self.fr_config['tracking']['update_rate_hz']
         move_threshold = self.fr_config['tracking']['move_threshold_deg']
         sleep_interval = 1.0 / update_rate
@@ -630,12 +628,12 @@ class FieldRotationTracker:
             time.sleep(sleep_interval)
 
     def _execute_180_flip(self) -> bool:
-        """Execute an immediate 180° flip with atomic PA update and position move"""
+        """Execute an immediate 180° flip of the rotator with atomic PA update and position move"""
         try:
             import time as _t
             
             # 1. Set extended cooldown to pause normal tracking during flip
-            flip_duration_estimate = 60.0  # Conservative estimate for 180° move + settling
+            flip_duration_estimate = 60.0  # Conservative estimate for 180° move + settling, adjust if flips take longer (based on max rotator speed setting in ASA ACC)
             self._cooldown_until = _t.time() + flip_duration_estimate
             
             # 2. Get current state
@@ -687,7 +685,7 @@ class FieldRotationTracker:
             
             # Use extended timeout for large moves (180° flips)
             if move_distance > 120.0:  # Definitely a flip move
-                timeout_duration = self.fr_config['wrap_management'].get('flip_timeout_duration', 45.0)  # timeout for 180° move
+                timeout_duration = self.fr_config['wrap_management'].get('flip_timeout_duration', 45.0)  # timeout for 180° move, from field_rotation.yaml
                 position_tolerance = 1.0  # Looser tolerance for big moves
             else:
                 # Fallback for smaller moves
@@ -696,7 +694,7 @@ class FieldRotationTracker:
             
             logger.debug(f"[field-rot] Flip move: {move_distance:.1f}° in max {timeout_duration:.0f}s")
             
-            # Start the move
+            # Start the move via Alpaca function call
             self.rotator.rotator.MoveAbsolute(target_position)
             
             # Wait for completion using position-based checking
@@ -748,12 +746,12 @@ class FieldRotationTracker:
             # Calculate reasonable timeout based on move distance
             # Assume conservative 2.5°/s + overhead
             min_timeout = 5.0
-            estimated_time = move_distance / 2.5  # Conservative 1°/s estimate
+            estimated_time = move_distance / 2.5  # Conservative 2.5°/s estimate
             timeout_duration = max(min_timeout, estimated_time + 3.0)
             
             logger.debug(f"[field-rot] Move distance: {move_distance:.3f}°, timeout: {timeout_duration:.1f} s")
             
-            # Start the move
+            # Start the move via Alapca function call
             self.rotator.rotator.MoveAbsolute(target_position)
             
             # Wait for position to stabilize near target
@@ -770,7 +768,7 @@ class FieldRotationTracker:
                     # Position reached, wait a bit more for stabilization
                     time.sleep(0.1)
                     
-                    # Apply settle time after movement completes
+                    # Apply settle time after movement completes, from field_rotation.yaml
                     settle_time = self.fr_config['tracking']['settle_time_sec']
                     if settle_time > 0:
                         time.sleep(settle_time)
