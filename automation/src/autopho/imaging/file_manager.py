@@ -10,18 +10,18 @@ try:
     FITS_AVAILABLE = True
 except ImportError:
     FITS_AVAILABLE = False
-    
+# Set up logging    
 logger = logging.getLogger(__name__)
 
 class FileManagerError(Exception):
     pass
-
+# Set up file manager class
 class FileManager:
     
     def __init__(self, config_loader):
         if not FITS_AVAILABLE:
             raise FileManagerError(f"astropy.io.fits not available - please install")
-        
+        # Default paths taken from paths.yaml config, device info from devices.yaml config
         self.config_loader = config_loader
         self.paths_config = config_loader.get_paths()
         self.raw_images_path = Path(self.paths_config['raw_images'])
@@ -33,6 +33,7 @@ class FileManager:
         logger.debug(f"Telescope ID: {self.telescope_id}")
         
     def create_target_directory(self, tic_id: str, base_path: Optional[Path] = None) -> Path:
+        '''Create the directories for the target in form: raw_images_path\YYYY\YYYYMMDD\T2\target_id'''
         try:
             root = base_path or self.raw_images_path
             clean_tic = self._clean_tic_id(tic_id)
@@ -47,6 +48,7 @@ class FileManager:
         
     def generate_filename(self, tic_id: str, filter_code: str, exposure_time: float,
                           sequence_number: int, timestamp: Optional[datetime] = None) -> str:
+        '''Generate the filename for the image files (.fits) based on target id, date, exposure time, sequence etc'''
         try:
             clean_tic = self._clean_tic_id(tic_id)
             if timestamp is None:
@@ -63,6 +65,7 @@ class FileManager:
             raise FileManagerError(f"Failed to generate filename: {e}")
         
     def get_next_sequence_number(self, target_dir: Path) -> int:
+        '''Update sequence number for files (e.g. _00001.fits, _00002.fits)'''
         try:
             if not target_dir.exists():
                 return 1
@@ -83,25 +86,26 @@ class FileManager:
         
     def save_fits_file(self, hdu: fits.PrimaryHDU, tic_id: str, filter_code: str, 
                         exposure_time: float, sequence_number: int, target_dir: Optional[Path] = None) -> Optional[Path]:
+        # Save the fits file to the target directory
         try:
             if target_dir is None:
-                target_dir = self.create_target_directory(tic_id)
+                target_dir = self.create_target_directory(tic_id)       # Create the directory if it doesnt already exist
             if sequence_number is None:
-                sequence_number = self.get_next_sequence_number(target_dir)
+                sequence_number = self.get_next_sequence_number(target_dir) # Get the next sequence number
             timestamp = datetime.now(timezone.utc)
-            filename = self.generate_filename(tic_id, filter_code, exposure_time, sequence_number, timestamp)
+            filename = self.generate_filename(tic_id, filter_code, exposure_time, sequence_number, timestamp)   # Get the filename
             filepath = target_dir / filename
-            
+            # Check if a file already exists with that exact name, if so, update the sequence number
             if filepath.exists():
                 logger.warning(f"File already exists, finding next sequence: {filepath.name}")
                 sequence_number = self.get_next_sequence_number(target_dir)
                 filename = self.generate_filename(tic_id, filter_code, exposure_time, sequence_number, timestamp)
                 filepath = target_dir / filename
-            hdu.writeto(filepath, overwrite=False)
-            
+            hdu.writeto(filepath, overwrite=False)      # Write to the filepath
+            # Ensure new file now exists
             if not filepath.exists():
                 raise FileManagerError("FITS file was not created")
-            file_size = filepath.stat().st_size
+            file_size = filepath.stat().st_size     # Get and log filesize of the new image
             logger.info(f"FITS file saved: {filepath.name} ({file_size:,} bytes)")
             
             return filepath
@@ -110,7 +114,8 @@ class FileManager:
             logger.error(f"Failed to save FITS file: {e}")
             return None
         
-    def check_disk_space(self, target_dir: Path, min_gb: float = 1.0) -> bool:
+    def check_disk_space(self, target_dir: Path, min_gb: float = 0.5) -> bool:
+        '''Check enough disk space exists for the new file (minimum set from min_gb above)'''
         try:
             if not target_dir.exists():
                 target_dir = target_dir.parent
@@ -129,6 +134,7 @@ class FileManager:
             return True
         
     def get_session_directory_info(self, tic_id: str) -> Dict[str, Any]:
+        '''For end of session reporting - get info about the  current target directory'''
         try:
             target_dir = self.create_target_directory(tic_id)
             fits_files = list(target_dir.glob("*.fits"))
@@ -150,6 +156,7 @@ class FileManager:
             return {'error': str(e)}
         
     def _clean_tic_id(self, tic_id: str) -> str:
+        '''Get just the number from imput TIC ids - e.g. user uses TIC-123456789 and we just want 123456789'''
         clean = tic_id.strip()
         clean = clean.replace('-', '')
         

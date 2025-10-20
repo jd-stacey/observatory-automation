@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 from astropy.io import fits
 import numpy as np
-
+# Set up logging
 logger = logging.getLogger(__name__)
 
 from ..config.loader import ConfigLoader
@@ -18,24 +18,24 @@ def inject_headers(hdu: fits.PrimaryHDU,
                    config_loader: ConfigLoader,
                    filter_code: str,
                    exposure_time: float) -> fits.PrimaryHDU:
-    
+    '''Inject headers into the fits file'''
     try:
-        header_config = config_loader.get_header_config()
-        camera_settings = camera_device.get_camera_settings()
-        obs_config = header_config.get('observatory', {})
+        header_config = config_loader.get_header_config()       # from headers.yaml
+        camera_settings = camera_device.get_camera_settings()   # from devices.yaml
+        obs_config = header_config.get('observatory', {})       # from observatory.yaml
         for key, value in obs_config.items():
             hdu.header[key] = value
         
         if target_info:
             if isinstance(target_info, dict):
                 hdu.header['OBJECT'] = target_info.get('object_name', 'Unknown')
-                hdu.header['RA'] = target_info.get('ra_hours', 0.0)
+                hdu.header['RA'] = target_info.get('ra_hours', 0.0)*15.0
                 hdu.header['DEC'] = target_info.get('dec_degrees', 0.0)
                 if 'magnitude' in target_info:
                     hdu.header['MAG'] = target_info['magnitude']
             else:
                 hdu.header['OBJECT'] = getattr(target_info, 'object_name', 'Unknown')
-                hdu.header['RA'] = getattr(target_info, 'ra_j2000_hours', 0.0)
+                hdu.header['RA'] = getattr(target_info, 'ra_j2000_hours', 0.0)*15.0
                 hdu.header['DEC'] = getattr(target_info, 'dec_j2000_deg', 0.0)
                 if hasattr(target_info, 'gaia_g_mag'):
                     hdu.header['MAG'] = target_info.gaia_g_mag
@@ -81,9 +81,9 @@ def create_fits_file(image_array: np.ndarray,
                      config_loader: ConfigLoader,
                      filter_code: str,
                      exposure_time: float) -> fits.PrimaryHDU:
-    
+    '''Create the fits file and inject the headers'''
     try:
-        hdu = fits.PrimaryHDU(image_array)
+        hdu = fits.PrimaryHDU(image_array)  # Alpaca function call
         hdu = inject_headers(hdu, target_info, camera_device, config_loader, filter_code, exposure_time)
         
         return hdu
