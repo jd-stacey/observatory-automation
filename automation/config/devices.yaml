@@ -5,20 +5,21 @@ telescope:
   telescope_id: "T2"
   settle_time: 2.0    # settle time after each slewing operation
 
+
 rotator:
   type: alpaca
   address: "127.0.0.1:11112"
   device_number: 0
   settle_time: 0.1
   mechanical_limits:
-    min_deg: 94.0 #-126.0           # lowest possible state of .MoveAbsolute() and becoming idle
-    max_deg: 320.0 #100.0            # highest possible state of .MoveAbsolute() and becoming idle
+    min_deg: 94.0 #-126.0           # lowest possible state of running .MoveAbsolute() and becoming idle (instead of getting stuck)
+    max_deg: 320.0 #100.0            # highest possible state of running .MoveAbsolute() and becoming idle (instead of getting stuck)
   initialization:
     strategy: "midpoint"      # "midpoint" will use (min_deg + max_deg)/2, use "safe_position" to utilize safe_position_deg
-    safe_position_deg: 220 #0.0
+    safe_position_deg: 210    # if "safe_position" used as strategy, this will be where the rotator initalises its position to
   limits:
-    warning_margin_deg: 3.0    # when to warn within limits
-    emergency_margin_deg: 1.0   # when to reject within limits
+    warning_margin_deg: 3.0    # when to warn within limits (e.g. will warn limits approaching within N degrees of max/min)
+    emergency_margin_deg: 1.0   # when to reject within limits (e.g. will reject moves within N degrees of max/min)
   
 
 cover:
@@ -28,27 +29,27 @@ cover:
   operation_timeout: 30.0     # max timeout for open/close instructions
   settle_time: 15.0           # standard time to wait for covers to open and close
 
+
 focuser:
   type: alpaca
   address: "127.0.0.1:11112"
   device_number: 0
-  # maybe Dict of nominal values for Filters: Focus Positions in here e.g.
-  focus_positions:          # starting positions for t2_focus_sweep.py testing
-    c: 15100
-    l: 15200
-    b: 15120
-    g: 15150
-    r: 15270
-    i: 15180
-    h: 15300
-  focus_sweep:              # Only for use with t2_focus_sweep.py - for testing filter/focuser positions
-    range_steps: 200        # ±N around starting pos
-    step_size: 20           # test every N steps
-    exposure_time: 3.0      # 3 seconds per image
+  # Dict of optimal/starting focus positions for each filter
+  focus_positions:          # starting focus positions for each filter (also used as starting points for t2_focus_sweep.py testing)
+    l: 15120
+    b: 15100
+    g: 15110
+    r: 15130
+    c: 15140
+    i: 15120
+    h: 15140
+  focus_sweep:             # Only for use with t2_focus_sweep.py - for testing optimal filter/focuser positions
+    range_steps: 40        # ±N around starting pos
+    step_size: 5           # test every N steps
+    exposure_time: 5.0     # N seconds per image exposure time
     filters: ['C', 'L', 'B', 'G', 'R', 'I', 'H']  # which filters to test
   spectro_focus_position:
     spectro: 18371 
-
 
 
 filter_wheel:
@@ -57,10 +58,11 @@ filter_wheel:
   device_number: 0
   settle_time: 0.1        # time to wait after filter change
 
+
 cameras:
   # main:                         
   #   type: alpaca
-  #   address: "127.0.0.1:11113"  
+  #   address: "127.0.0.1:11113"      # can use this commented out code in place of the 6200MM code below, if the main photometry cam is out
   #   name_pattern: "294MM"
   #   role: 'guide'                
   #   default_binning: 4
@@ -74,14 +76,13 @@ cameras:
     default_binning: 4
     default_gain: 100
     target_temperature: -15.0
-  
   guide:                         
     type: alpaca
     address: "127.0.0.1:11113"  
     name_pattern: "294MM"
     role: 'guide'                
     default_binning: 4
-    default_gain: 200
+    default_gain: 200     # upped this to 200
     target_temperature: -10.0
     
   
