@@ -384,25 +384,33 @@ def main():
             focuser_driver = None
         
         ###### SET FOCUS_FILTER_MANAGER HERE (uncomment below once focus positions are in)
-        # # Create coordinated focus/filter manager
-        # logger.info("Initializing filter/focus coordination...")
-        # focus_filter_mgr = FocusFilterManager(filter_driver=filter_driver, focuser_driver=focuser_driver)
+        # Create coordinated focus/filter manager - MUST come after filterwheel and focuser initialisation
+        focus_filter_mgr = None
+        logger.info("Initializing focus/filter coordination...")
+        try:
+            focus_filter_mgr = FocusFilterManager(filter_driver=filter_driver, focuser_driver=focuser_driver) # from focus_filter_manager.py
+        except FocusFilterManagerError as e:
+            logger.warning(f"Error setting up focus/filter coordination manager: {e} - continuing anyway")
+            focus_filter_mgr = None
+        except Exception as e:
+            logger.warning(f"Unexpected focus/filter coordination error: {e}")
+            focus_filter_mgr = None
         
-        # # Use manager to set filter
-        # if focus_filter_mgr:
-        #     logger.info(f"Setting filter to {args.filter.upper()} with focus adjustment...")
-        #     try:
-        #         filter_changed, focus_changed = focus_filter_mgr.change_filter_with_focus(args.filter.upper())
-        #         if filter_changed:
-        #             logger.info(f"Filter set to: {args.filter.upper()}")
-        #         if focus_changed:
-        #             logger.info(f"Focus adjusted for filter {args.filter.upper()}")
-        #         if not filter_changed and not focus_changed:
-        #             logger.info("Already at target filter/focus configuration")
-        #     except FocusFilterManagerError as e:
-        #         logger.warning(f"Filter/focus coordination failed: {e} - continuing anyway")
-        #     except Exception as e:
-        #         logger.warning(f"Unexpected Filer/focus coordination error: {e}")
+        # Use manager to set filter
+        if focus_filter_mgr:
+            logger.info(f"Setting filter to {args.filter.upper()} with focus adjustment...")
+            try:
+                filter_changed, focus_changed = focus_filter_mgr.change_filter_with_focus(args.filter.upper())    # from focus_filter_manager.py
+                if filter_changed:
+                    logger.info(f"Filter set to: {args.filter.upper()}")
+                if focus_changed:
+                    logger.info(f"Focus adjusted for filter {args.filter.upper()}")
+                if not filter_changed and not focus_changed:
+                    logger.info("Already at target focus/filter configuration")
+            except FocusFilterManagerError as e:
+                logger.warning(f"Focus/filter coordination failed: {e} - continuing anyway")
+            except Exception as e:
+                logger.warning(f"Unexpected focus/filter coordination error: {e}")
         
         
         

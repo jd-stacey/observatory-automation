@@ -4,6 +4,29 @@ title: T2 Automation Guide (Users)
 
 
 # T2 Automation Software - User Guide (Drafting...)
+
+## Contents
+### Starting up:
+ - [Start-up Procedures (on RaptorTCU)](#at-start-up-raptortcu---for-both-photometry-and-spectroscopy)
+ - [Opening the Dome (on Telcom7)](#opening-the-dome-telcom7)
+ - [Platesolving/Guiding (on guestobserver@minervaphotometry)](#platesolvingguiding-on-guestobserverminervaphotometry)
+ 
+ ### Photometry:
+ - [Taking a Single Image (Determining Exposure Time)](#taking-a-single-image-determining-exposure-time)
+ - [Automated (Continuous) Photometry](#automated-continuous-photometry)
+ 
+ ### Spectroscopy:
+ - [Automated Spectroscopy](#automated-spectroscopy)
+ 
+ ### Shutdown Procedures:
+ - [Telescope Shutdown Tool](#telescope-shutdown-tool-t2shutdownexe)
+ - [Closing the Dome (on Telcom7)](#closing-the-dome-telcom7)
+ 
+ ### Troubleshooting:
+ - [Troubleshooting](#troubleshooting)
+
+<div style="page-break-after: always;"></div>
+
 ## At Start-up (RaptorTCU) - For Both Photometry and Spectroscopy
 ### 1. Connect Wi-Fi internet to 'eduroam' network.
 <img src="img/eduroam.png" width=180/>
@@ -29,7 +52,6 @@ Then press 'Start' and wait for confirmation messages, e.g.:
 <img src="img/ascomremoteconnectmsgs2.png"/>
 
 ### 4. Open a Command Prompt from the Start Menu <img src="img/cmd.png" width="200" style="vertical-align: text-bottom;"/>
-
 
 ### 5. In the terminal window, type:
 ```bash
@@ -64,6 +86,37 @@ Your final command prompt should look like this:
 ### 2. Confirm Dome has Opened via Cam
 
 <img src="img/t7dome.png" width="600"/>
+
+<div style="page-break-after: always;"></div>
+
+## Platesolving/Guiding on guestobserver@minervaphotometry
+
+### 1. Check current Workspaces
+
+<img src="img/workspaces.png" style="float: right; width: 200px; margin-left: 5px; margin-top: -10px;">Log into guestobserver@minervaphotometry and check each of the active Workspaces, selectable from the bottom right of the window -->
+
+Look for active terminal windows, specifically one running in `~/guidercode`, e.g.:
+
+<img src="img/terminal_guest.png" width="400">
+
+The terminal should be running a program (i.e. there will be no active command prompt), likely displaying the last frame it solved, e.g.:
+
+<img src="img/fullterminal_guest.png" width="400">
+
+This terminal is running the platesolving program and no further action is required.<br>
+You may safely exit guestobserver@minervaphotometry.
+
+### 2. Start platesolver if not already running
+
+<img src="img/openguestterminal.png" style="float: right; width: 140px; margin-left: 5px; margin-top: -65px;">
+
+If the platesolver is not running in any active Workspaces, open a new terminal window by right-clicking somewhere on the empty Desktop and selecting "Open in Terminal", e.g. -->
+
+In the empty terminal window, type the following sets of commands to change directories, initialise python and start the platesolver (Note: it will immediately try to solve the most recent photometry frame, this is fine):
+
+<img src="img/gueststartplatesolver2.png" width="400">
+
+### 3. You may now safely exit guestobserver@minervaphotometry
 
 <div style="page-break-after: always;"></div>
 
@@ -104,7 +157,8 @@ Command line arguments can be used for additional customization and to override 
 |`--ignore-twilight` | Bypass twilight (Sun Altitude) checks for daytime testing | `False` |
 
 Notes:
-- Filter options: L=Lum, B=Blue, G=Green, R=Sloan-r, C=Clear, I=Sloan-i, H=H-alpha
+- Filter options: L=Lum, B=Blue, G=Green, R=Sloan-r, C=Clear, I=Sloan-i, H=H-alpha 
+- Focuser position: The focuser position will automatically change based on the filter selected and pre-defined values in `config\devices.yaml` (under focuser['focus_positions']), you may need to manually alter the focuser position based on seeing conditions (it will auto-reset to config position for each new image).
 - Observability: The program will check that the target is above 30° altitude and confirm that the Sun's altitude is low enough to allow observations. Using the `--ignore-twilight` command line argument will bypass Sun altitude checks and should only be used for daytime testing purposes with the dome closed. The program will terminate if either observability condition is not met.
 
 #### Examples
@@ -130,23 +184,23 @@ e.g., P:\Photometry\2025\20250930\T2\singleimages
 ```
 Use File Explorer <img src="img/fileexplorer.png" width="30" style="vertical-align: text-bottom;"/> to navigate to the image directory and find the .fits file (P: drive is also called 'photometryshare').
 
-<div style="page-break-after: always;"></div>
-
-Open the .fits file in MaxIm DL <img src="img/maximdl.png" width="30" style="vertical-align: text-bottom;"/> by right-clicking the file and selecting 'Open With -> MaxIm DL' <img src="img/openwithmaximdl.png" height="20" style="vertical-align: text-bottom;"/>.
+Open the .fits file in MaxIm DL <img src="img/maximdl.png" width="30" style="vertical-align: text-bottom;"/> by right-clicking the file and selecting 'Open With -> MaxIm DL': <img src="img/openwithmaximdl.png" height="40" style="vertical-align: text-bottom;"/>
 
 Enable crosshairs by right-clicking in your image and selecting 'Crosshairs -> Visible'.
 
-<img src="img/maximdlcrosshairs.png" width="350"/>
+<img src="img/maximdlcrosshairs.png" width="400"/>
 
-You will likely need to zoom out to see your full image (use mouse wheel or the zoom buttons at the top <img src="img/maximdlzoom.png" height="20" style="vertical-align: text-bottom;"/>).
+<img src="img/maximdlzoom.png" style="float: right; height: 40px; margin-left: 10px; margin-top: 2px; margin-right: 130px;"/> You will likely need to zoom out to see your full image.<br>Use mouse wheel or the zoom buttons at the top --> 
 
 Open the information window by clicking the information icon at the top <img src="img/maximdlinfo.png" height="20" style="vertical-align: text-bottom;"/>, or via 'Ctrl + I' or via 'View -> Information Window'.
 
-<img src="img/maximdlinfowindow.png" width="240"/>
+<img src="img/maximdlinfowindow.png" width="280"/>
+
+<div style="page-break-after: always;"></div>
 
 Position the aperture over your target star (make sure to select the correct star, it might not be the one at/near the crosshair centre) and measure the maximum count (ideal is around 10,000-30,000). You can adjust the size of the aperture by right-clicking the image and selecting 'Set Aperture Radius'.
 
-<img src="img/maximdlexp.png" width="600"/>
+<img src="img/maximdlexp.png" width="650"/>
 
 If counts are not appropriate, repeat procedure (take a new image) with a different exposure time. If the counts are too high, reduce the exposure time, if the counts are too low, increase the exposure time (remember a target's counts will usually increase as it rises in the sky, less atmosphere to see through). 
 
@@ -194,6 +248,7 @@ Command line arguments can be used for additional customization and to override 
 
 Notes:
 - Filter options: L=Lum, B=Blue, G=Green, R=Sloan-r, C=Clear, I=Sloan-i, H=H-alpha
+- Focuser position: The focuser position will automatically change based on the filter selected and pre-defined values in `config\devices.yaml` (under focuser['focus_positions']), you may need to manually alter the focuser position based on seeing conditions.
 - Parking: The telescope will automatically slew back to home position at the end of the session, using the `--no-park` argument will leave it at its observing position (covers will still close and camera coolers will be turned off).
 - Twilight: the telescope will automatically stop taking images once the target becomes unobservable due to either falling below 30° altitude or due to the Sun's position. Using `--ignore-twilight` will ignore the Sun's position and it will continue imaging indefinitely as long as the target remains above 30° altitude (regardless of the time of day or whether the dome is open or closed).
 #### Examples
@@ -210,32 +265,17 @@ python -u main.py 123456789 --exposure-time 30.0 --filter L
 ```python
 python -u main.py --coords "256.263748 -42.17295" --exposure-time 20.0
 ```
-- To observe a TIC target with 5 second exposure time and more detailed console logging:
+<!-- - To observe a TIC target with 5 second exposure time and more detailed console logging:
 ```python
 python -u main.py 123456789 --exposure-time 5.0 --log-level DEBUG
-```
+``` -->
 ### On Observability
 If your target is not immediately observable (hasn't risen about 30° altitude yet, or it is not quite twilight) the program will automatically keep checking for observability at regular intervals (60 seconds) and will automatically start observations once observability conditions are satisfied. E.g.:
 
 <img src="img/observability.png"/>
 
-<div style="page-break-after: always;"></div>
-
-### Files
-Directories are automatically created and files saved according to date, e.g. (images in folders with the '_acq' suffix are used for target acquisition purposes):
-```bash
-P:\Photometry\YYYY\YYYYMMDD\T2\TIC123456789
-```
-
-### Platesolving/Guiding...
-
-...
-...
-
-Gotta double-check - just run this on guestobserver@minervaphotometry?:
-```bash
-run_astrom_wrapper.sh
-```
+### Files and Directories
+Directories are automatically created and files saved according to date (images in folders with the '_acq' suffix are used for target acquisition purposes), e.g.: `P:\Photometry\YYYY\YYYYMMDD\T2\TIC123456789`
 
 <div style="page-break-after: always;"></div>
 
@@ -283,7 +323,7 @@ python -u t2_spectro.py coords "44.5 -30.2"
 python -u t2_spectro.py mirror
 ```
 
-#### Log Parsing
+#### Log Parsing (for mirror mode only)
 To enable log parsing, open Windows Powershell from the Start Menu <img src="img/powershell.png" width="200" style="vertical-align: text-bottom;"/>
 
 Change to the P: drive by typing:
@@ -323,7 +363,9 @@ Imaging during spectroscopy is only used for plate-solving and guiding (position
 
 <div style="page-break-after: always;"></div>
 
-# Telescope Shutdown Tool (T2shutdown.exe) <img src="img/shutdown.png" width="40" style="vertical-align: text-bottom;"/>
+# Telescope Shutdown Tool (T2shutdown.exe) 
+
+<!-- <img src="img/shutdown.png" width="40" style="vertical-align: text-bottom;"/> -->
 
 ### DO NOT use this tool during normal telescope operations - it will perform physical actions on telescope systems.
 
@@ -340,17 +382,13 @@ However, program errors, TCU restarts or manual observations via other programs,
 ## Using the Shutdown Tool
 
 ### 1. Open the Tool
-Open the tool by double-clicking the T2shutdown.exe file on the RaptorTCU Desktop.
-
-<img src="img/shutdownexe.png"/>
+<img src="img/shutdownexe.png" style="float: right; width: 75px; margin-left: 5px; margin-top: -45px; margin-right: 40px;"/> Open the tool by double-clicking the T2shutdown.exe file on the RaptorTCU Desktop -->
 
 <img src="img/shutdownmenu.png"/>
 
 ### 2. Initialise Connections
 
 Ideally, Autoslew <img src="img/autoslew.png" width="30" style="vertical-align: text-bottom;"/> and ASA ACC <img src="img/acc.png" width="30" style="vertical-align: text-bottom;"/> should already be running, though the tool will try to launch them if it detects they are not running.
-
-<div style="page-break-after: always;"></div>
 
 Click '1. Start Autoslew & Check Connections'
 
@@ -377,7 +415,7 @@ Click '2. TELESCOPE SHUTDOWN'.
 
 A series of warning messages will pop-up, if you continue past them the tool will stop the rotator, close the telescope covers, slew the telescope to its park position and turn off its motors.
 
-<img src="img/shutdownmsg1.png" width="350"/>  <img src="img/shutdownmsg2.png" width="350"/>  
+<p align="center"> <img src="img/shutdownmsg1.png" height="185" style="margin-right: 45px;"/><img src="img/shutdownmsg2.png" height="185"/></p>
 
 If successful, the system status for each device should update, e.g.:
 
