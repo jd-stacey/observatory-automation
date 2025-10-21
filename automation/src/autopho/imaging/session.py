@@ -132,8 +132,8 @@ class ImagingSession:
         
         if self.is_spectroscopy:
             # fixed vals for spectro
-            x0 = 1101
-            y0 = 744
+            x0 = 1091 #1101
+            y0 = 742 #744
         else:
             if self.main_camera:
                 try:
