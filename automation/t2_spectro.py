@@ -377,8 +377,8 @@ class SpectroscopyImagingSession(ImagingSession):
         # Update acquisition settings for tighter spectroscopy requirements
         if hasattr(self, 'acquisition_config'):
             # Tighten acquisition threshold for spectroscopy (fiber alignment critical)
-            self.acquisition_config['max_total_offset_arcsec'] = 1.0
-            self.logger.debug("Tightened acquisition threshold to 1.0\" for spectroscopy")
+            self.acquisition_config['max_total_offset_arcsec'] = spectro_acq_cfg['max_total_offset_arcsec']
+            self.logger.debug(f"Tightened acquisition threshold to {self.acquisition_config['max_total_offset_arcsec']}\" for spectroscopy")
         
         # Initialize session state
         self._running = False
@@ -481,7 +481,10 @@ class SpectroscopyImagingSession(ImagingSession):
             # Delete again in case one snuck through
             self.corrector.delete_platesolve_json(reason="post-transition cleanup")
     
-    
+    # ADDED TO GO WITH platesolving.yaml spectro_acquisition changes (9999999 max attempts, -1 max offset etc)
+    def _check_acquisition_complete(self) -> bool:
+        '''Completely override phase switches - always stay in ACQ mode'''
+        return False
     
     def _should_switch_to_science_from_correction(self, correction_result) -> bool:
         """Determine if correction result indicates we should switch to science phase"""
