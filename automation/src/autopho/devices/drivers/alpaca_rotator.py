@@ -749,7 +749,7 @@ class FieldRotationTracker:
             estimated_time = move_distance / 2.5  # Conservative 2.5°/s estimate
             timeout_duration = max(min_timeout, estimated_time + 3.0)
             
-            logger.debug(f"[field-rot] Move distance: {move_distance:.3f}°, timeout: {timeout_duration:.1f} s")
+            # logger.debug(f"[field-rot] Move distance: {move_distance:.3f}°, timeout: {timeout_duration:.1f} s")
             
             # Start the move via Alapca function call
             self.rotator.rotator.MoveAbsolute(target_position)
