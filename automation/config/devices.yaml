@@ -36,20 +36,20 @@ focuser:
   device_number: 0
   # Dict of optimal/starting focus positions for each filter
   focus_positions:          # starting focus positions for each filter (also used as starting points for t2_focus_sweep.py testing)
-    l: 15120
-    b: 15100
-    g: 15110
-    r: 15130
-    c: 15140
-    i: 15120
-    h: 15140
+    l: 15120 # need to re-test
+    b: 15100 # need to re-test
+    g: 15110 # need to re-test
+    r: 15130 # need to re-test
+    c: 15040 # prev-15140
+    i: 15120 # need to re-test
+    h: 15140 # need to re-test
   focus_sweep:             # Only for use with t2_focus_sweep.py - for testing optimal filter/focuser positions
     range_steps: 40        # ±N around starting pos
     step_size: 5           # test every N steps
     exposure_time: 5.0     # N seconds per image exposure time
     filters: ['C', 'L', 'B', 'G', 'R', 'I', 'H']  # which filters to test
   spectro_focus_position:
-    spectro: 18371 
+    spectro: 18800 # prev-18371 
 
 
 filter_wheel:
