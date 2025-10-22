@@ -119,8 +119,7 @@ class ObservabilityChecker:
                 if ignore_twilight and sun_alt > self.config.get('twilight_altitude', -18.0):
                     reasons.append("(twilight check ignored for testing)")
                 
-            logger.debug(f"Target: alt={target_alt:.1f}°, az={target_az:.1f}°")
-            logger.debug(f"Sun: alt={sun_alt:.1f}°, az={sun_az:.1f}°")
+            logger.debug(f"Target: alt={target_alt:.1f}°, az={target_az:.1f}° | Sun: alt={sun_alt:.1f}°, az={sun_az:.1f}°")
             logger.debug(f"Observable: {observable}, Reasons: {reasons}")
             
             return ObservabilityStatus(
