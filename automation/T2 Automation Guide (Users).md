@@ -51,30 +51,36 @@ Then press 'Start' and wait for confirmation messages, e.g.:
 
 <img src="img/ascomremoteconnectmsgs2.png"/>
 
-### 4. Open a Command Prompt from the Start Menu <img src="img/cmd.png" width="200" style="vertical-align: text-bottom;"/>
+### 4. Open an Automation Terminal from the Desktop -->
+<img src="img/vscode_terminal_shortcut.png" style="float: right; width: 70px; margin-left: 5px; margin-top: -80px; margin-right: 200px;"/>
 
-### 5. In the terminal window, type:
+### 5. Confirm Terminal Running or Start New Terminal
+
+In the window that opens, if it says `powershell` in the top left, then a terminal is already open and you can proceed to step 6, e.g.:
+
+<img src="img/vscode_open.png">
+
+If the window is empty (with some shortcut commands in the centre), then right-click in an empty space and select 'New Terminal', e.g.:
+
+<img src="img/vscode_newterminal.png" width="570"/>
+
+### 6. Activate `drivescope` Environment and Change Directories
+
+Execute the following set of commands to activate the `drivescope` conda environment and change directories to the correct folder.
 ```bash
 conda activate drivescope
+cd js\automation
 ```
-The prompt prefix should change to (drivescope), e.g.:
+The prompt prefix should change to `(drivescpope)`, you should now be in the `automation` folder and your final command prompt should look something like one of these:
 ```bash
-(drivescope) C:\Users\asa>
+(drivescope) PS C:\Users\asa\Documents\js\automation>
+(drivescope) PS C:\Users\asa\Documents\JS\automation>
 ```
+For example:
 
-### 6. Change directories to the automation folder, by either (depending on which folder you start in):
-```bash
-cd Documents\JS\automation
-cd automation
-```
-Hints: You can use 'TAB' to auto-complete. E.g. if u type 'cd doc' and hit 'TAB' it should autocomplete the rest of the folder/file name. Type 'dir' to see the contents of the folder you are currently in. Type 'cd ..' to go up a folder in the structure.
+<img src="img/vscode_terminal_setup.png"/>
 
-<!-- <div style="page-break-after: always;"></div> -->
-
-Your final command prompt should look like this:
-```bash
-(drivescope) C:\Users\asa\Documents\JS\automation>
-```
+### You are now ready to start running automation scripts.
 
 <div style="page-break-after: always;"></div>
 
@@ -93,7 +99,7 @@ Your final command prompt should look like this:
 
 ### 1. Check current Workspaces
 
-<img src="img/workspaces.png" style="float: right; width: 200px; margin-left: 5px; margin-top: -10px;">Log into guestobserver@minervaphotometry and check each of the active Workspaces, selectable from the bottom right of the window -->
+<img src="img/workspaces.png" style="float: right; width: 200px; margin-left: 5px; margin-top: -10px;"> Log into guestobserver@minervaphotometry and check each of the active Workspaces, selectable from the bottom right of the window -->
 
 Look for active terminal windows, specifically one running in `~/guidercode`, e.g.:
 
@@ -141,7 +147,7 @@ python t2_singleimage.py 123456789 [OPTIONS]
 python t2_singleimage.py TIC123456789 [OPTIONS]
 python t2_singleimage.py TIC-123456789 [OPTIONS]
 ```
-Target coordinates will be determined via TIC look-up. **The exposure time must be entered using command line arguments.**
+Target coordinates will be determined via TIC lookup. **The exposure time must be entered using command line arguments.**
 
 ### Command Line Arguments
 Command line arguments can be used for additional customization and to override program defaults.
@@ -218,18 +224,18 @@ Automated Photometry has one primary mode, where targets are resolved based on t
 
 The program is called via:
 ```bash
-python -u main.py [TARGET] [OPTIONS]
+python main.py [TARGET] [OPTIONS]
 ```
 
 ### Using TIC ID
 Any of these formats are acceptable:
 ```bash
-python -u main.py 123456789
-python -u main.py TIC123456789
-python -u main.py TIC-123456789
+python main.py 123456789
+python main.py TIC123456789
+python main.py TIC-123456789
 ```
 
-Target coordinates and magnitude will be determined via TIC look-up and default exposure time calculated based on Gaia G-mag. The exposure time can (and should) be overridden using command line arguments (use Single Image Mode above to determine optimal exposure time).
+Target coordinates and magnitude will be determined via TIC lookup and default exposure time calculated based on Gaia G-mag. The exposure time can (and should) be overridden using command line arguments (use Single Image Mode above to determine optimal exposure time).
 
 ### Command Line Arguments
 Command line arguments can be used for additional customization and to override program defaults.
@@ -255,19 +261,19 @@ Notes:
 
 - To observe a TIC target with 10 second exposure time:
 ```bash
-python -u main.py 123456789 --exposure-time 10.0
+python main.py 123456789 --exposure-time 10.0
 ```
 - To observe a TIC target with 30 second exposure time with the Lum filter:
 ```bash
-python -u main.py 123456789 --exposure-time 30.0 --filter L
+python main.py 123456789 --exposure-time 30.0 --filter L
 ```
 - To observe a target without a TIC ID via its J2000 coordinates (RA and Dec in decimal degrees) with 20 second exposure time with the Clear filter (Clear is the default):
 ```python
-python -u main.py --coords "256.263748 -42.17295" --exposure-time 20.0
+python main.py --coords "256.263748 -42.17295" --exposure-time 20.0
 ```
 <!-- - To observe a TIC target with 5 second exposure time and more detailed console logging:
 ```python
-python -u main.py 123456789 --exposure-time 5.0 --log-level DEBUG
+python main.py 123456789 --exposure-time 5.0 --log-level DEBUG
 ``` -->
 ### On Observability
 If your target is not immediately observable (hasn't risen about 30° altitude yet, or it is not quite twilight) the program will automatically keep checking for observability at regular intervals (60 seconds) and will automatically start observations once observability conditions are satisfied. E.g.:
@@ -300,27 +306,27 @@ Automated Spectroscopy has three primary operating modes:
 
 The program is called via:
 ```bash
-python -u t2_spectro.py [MODE] [TARGET] [OPTIONS]
+python t2_spectro.py [MODE] [TARGET] [OPTIONS]
 ```
 
 ### Using TIC ID
 
 Any of these formats are acceptable:
 ```bash
-python -u t2_spectro.py tic 123456789
-python -u t2_spectro.py tic TIC123456789
-python -u t2_spectro.py tic TIC-123456789
+python t2_spectro.py tic 123456789
+python t2_spectro.py tic TIC123456789
+python t2_spectro.py tic TIC-123456789
 ```
 
 ### Using Coordinates
 ```bash
-python -u t2_spectro.py coords "44.5 -30.2"
+python t2_spectro.py coords "44.5 -30.2"
 ```
 *Note: Both RA and Dec coordinates are in decimal degrees.
 
 ### Using Mirror Mode
 ```bash
-python -u t2_spectro.py mirror
+python t2_spectro.py mirror
 ```
 
 #### Log Parsing (for mirror mode only)
@@ -448,3 +454,40 @@ You can now exit the Shutdown Tool.
 
 
 <img src="img/"/>
+
+## Running scripts in Command Prompt or Powershell
+
+...
+
+### 4. Open a Command Prompt from the Start Menu <img src="img/cmd.png" width="200" style="vertical-align: text-bottom;"/>
+
+### 5. In the terminal window, type:
+```bash
+conda activate drivescope
+```
+The prompt prefix should change to (drivescope), e.g.:
+```bash
+(drivescope) C:\Users\asa>
+```
+
+### 6. Change directories to the automation folder, by either (depending on which folder you start in):
+```bash
+cd Documents\JS\automation
+cd automation
+```
+Hints: You can use 'TAB' to auto-complete. E.g. if u type 'cd doc' and hit 'TAB' it should autocomplete the rest of the folder/file name. Type 'dir' to see the contents of the folder you are currently in. Type 'cd ..' to go up a folder in the structure.
+
+<!-- <div style="page-break-after: always;"></div> -->
+
+Your final command prompt should look like this:
+```bash
+(drivescope) C:\Users\asa\Documents\JS\automation>
+```
+
+#### MUST BE RUN WITH `-u` in command
+
+E.g.:
+```bash
+python -u main.py 123456789
+python -u t2_spectro.py tic 123456789 --exposure-time 5.0
+```
