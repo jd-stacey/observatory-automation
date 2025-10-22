@@ -21,17 +21,17 @@ spectro_thresholds:
 acquisition:
   enabled: true
   exposure_time: 10.0              # exposure time during acquisition phase
-  correction_interval: 3          # checks for correction required between N frames during acquisition
+  correction_interval: 2          # checks for correction required between N frames during acquisition
   max_total_offset_arcsec: 3.0    # once total offset <= this number, switch to science frames/folder
-  max_attempts:  25              # dont acquire forever and ever and ever and ever and ever
+  max_attempts:  50              # dont acquire forever and ever and ever and ever and ever
   folder_suffix: "_acq"           
 
 spectro_acquisition:
   enabled: true
   exposure_time: 10.0                    # default initial exposure time (can be overridden using --exposure-time CLI)
   correction_interval: 1                # checks for correction after EVERY frame during acquisition
-  max_total_offset_arcsec: 1.0          # tighter threshold for spectroscopy fiber alignment
-  max_attempts: 45                      # max num of acq frames to take - change this to 1 to bypass acq phase
+  max_total_offset_arcsec: -1.0 #1.0          # tighter threshold for spectroscopy fiber alignment - ###MAYBE JUST SET THIS NEGATIVE TO PREVENT ACQ->SCI altogether
+  max_attempts: 99999999999999 #45                      # max num of acq frames to take - change this to 1 to bypass acq phase
   default_session_duration_hours: 6.0   # Default hours per imaging session (can be overridden using --duration CLI)
   folder_suffix: "_acq"
   
@@ -52,3 +52,8 @@ spectro_acquisition:
   settle_time:
     min: 1                              # Minimal settle time
     max: 5                              # Much shorter max settle for quick spectro corrections
+
+
+  # latest spectro pixel positions - 21 Oct 2025
+    # 1x1 binning - 4631, 2959
+    # 4x4 binning - 1091, 742
