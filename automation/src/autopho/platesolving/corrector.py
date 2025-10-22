@@ -233,7 +233,7 @@ class PlatesolveCorrector:
             if total_offset_arcsec < min_threshold:
                 scale_factor = 0.0
                 settle_time = 2.0
-                logger.debug("Offset below minimum threshold, no correction")
+                logger.debug(f"Offset below minimum threshold ({min_threshold}), no correction")
             elif total_offset_arcsec < small_threshold:
                 scale_factor = 0.0
                 settle_time = base_settle_time * 5.0
@@ -241,11 +241,11 @@ class PlatesolveCorrector:
             elif total_offset_arcsec > large_threshold:
                 scale_factor = 1.0  # CHANGED from 0.9 - apply full correction
                 settle_time = base_settle_time * 5.0
-                logger.debug("Large offset, full correction applied")
+                logger.debug("Large offset, apply full correction")
             else:
                 scale_factor = self.platesolve_config.get('correction_scale_factor', 1.0)
                 settle_time = base_settle_time * 7.0
-                logger.debug("Normal offset, full correction applied")
+                logger.debug("Normal offset, apply full correction")
                 
             ra_offset_deg *= scale_factor
             dec_offset_deg *= scale_factor
