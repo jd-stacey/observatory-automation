@@ -370,8 +370,21 @@ class ImagingSession:
                     data_source = f"cached ({measurement_age:.0f}s ago)"
                 
             if total_offset is not None:
+                # Check if we are within threshold to switch from acq to sci modes
                 if total_offset <= threshold:
                     logger.info(f"Target acquired! Total offset: {total_offset:.2f}\" <= {threshold}\" ({data_source})")
+                    
+                    # Apply the final correction before switching phases
+                    logger.info("Applying final acquisition correction...")
+                    try:
+                        final_result = self.corrector.apply_single_correction(latest_captured_sequence=self.acquisition_count)
+                        if final_result.applied:
+                            logger.info(f"Final correction applied: {final_result.reason}")
+                            time.sleep(final_result.settle_time)
+                        else:
+                            logger.debug(f"Final correction: {final_result.reason}")
+                    except Exception as e:
+                        logger.warning(f"Final correction failed: {e} - proceeding to science phase anyway")
                     return True
                 else:
                     logger.debug(f"Still acquiring - offset: {total_offset:.2f}\" > {threshold}\" ({data_source})")
