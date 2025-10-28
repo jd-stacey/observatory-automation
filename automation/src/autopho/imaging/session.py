@@ -666,9 +666,8 @@ class ImagingSession:
                 if latest_seq < 0:
                     latest_seq = None
             
-            # For photometry, we can pass the last frame path for validation
-            # (though less critical than spectroscopy)
-            result = self.corrector.apply_single_correction(latest_captured_sequence=latest_seq)
+            # For photometry, we can pass the last captured sequence and current frame path for validation
+            result = self.corrector.apply_single_correction(latest_captured_sequence=latest_seq, current_frame_path=last_frame_path)
             
             if result.applied:
                 logger.info(f"{phase_prefix} correction applied: {result.reason} "
