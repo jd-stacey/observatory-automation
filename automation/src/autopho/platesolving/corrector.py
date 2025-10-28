@@ -3,6 +3,7 @@ import time
 import math
 import logging
 import re
+import os
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 from dataclasses import dataclass
@@ -119,11 +120,18 @@ class PlatesolveCorrector:
     
     def check_json_file_ready(self) -> Tuple[bool, Optional[Dict[str, Any]]]:
         try:
+            # Force stat on parent directory to refresh directory cache
+            try:
+                parent_stat = os.stat(self.json_file_path.parent)
+            except:
+                pass
+            
             if not self.json_file_path.exists():
                 logger.debug(f"Platesolve JSON file not found: {self.json_file_path}")
                 return False, None
             
-            mod_time = self.json_file_path.stat().st_mtime
+            file_stat = os.stat(str(self.json_file_path))
+            mod_time = file_stat.st_mtime
             age_seconds = time.time() - mod_time
             max_age = self.platesolve_config.get('file_max_age_seconds', 200)
             
@@ -131,11 +139,21 @@ class PlatesolveCorrector:
                 logger.debug(f"Platesolve JSON file is {age_seconds}s old! (max {max_age} s)")
                 return False, None
             
-            with open(self.json_file_path, 'r') as f:
-                data = json.load(f)
+            # Open with os.open() using O_DIRECT flag to bypass cache (if supported)
+            # Fallback to regular open if O_DIRECT not available
+            try:
+                fd = os.open(str(self.json_file_path), os.O_RDONLY | getattr(os, 'O_DIRECT', 0))
+                content = os.read(fd, 1024 * 1024)  # Read up to 1MB
+                os.close(fd)
+                data = json.loads(content.decode('utf-8'))
+            except (AttributeError, OSError) as e:
+                # O_DIRECT not supported or failed, use regular open
+                logger.error(f"AttributeError or OSError: {e}")
+                with open(str(self.json_file_path), 'r') as f:
+                    content = f.read()
+                data = json.loads(content)
                 
             logger.debug(f"    JSON contents - fitsname: {data.get('fitsname', {}).get('0', 'MISSING')}")
-            logger.debug(f"    JSON file mtime: {self.json_file_path.stat().st_mtime}, current time: {time.time()}")
             logger.debug(f"Platesolve JSON file ready (age: {age_seconds:.0f} s)")
             return True, data
         
@@ -149,7 +167,8 @@ class PlatesolveCorrector:
             logger.error(f"Error reading JSON platesolve file: {e}")
             return False, None
         
-    def is_platesolve_for_current_target(self, data: Dict[str, Any]) -> bool:
+    def is_platesolve_for_current_target(self, data: Dict[str, Any],
+                                         current_frame_path: Optional[str] = None) -> bool:
         """Check if platesolve data is for the current target"""
         try:
             # If no target set, accept anything (backwards compatibility)
@@ -174,6 +193,14 @@ class PlatesolveCorrector:
             if not solved_filename:
                 logger.debug("No filename in platesolve data")
                 return False
+            
+            if current_frame_path:
+                solved_is_acq = '_acq' in str(Path(solved_filename).parent)
+                current_is_acq = '_acq' in str(Path(current_frame_path).parent)
+                
+                if solved_is_acq and not current_is_acq:
+                    logger.debug(f"Phase mismatch: platesolve from acquisition, current is science")
+                    return False
             
             solved_target = self._extract_target_from_filename(solved_filename)
             if not solved_target:
@@ -274,7 +301,8 @@ class PlatesolveCorrector:
             raise PlatesolveCorrectorError(f"Failed to process platesolve data: {e}")
         
     def apply_single_correction(self, timeout_seconds: Optional[float] = None,
-                                latest_captured_sequence: Optional[int] = None) -> CorrectionResult:
+                                latest_captured_sequence: Optional[int] = None,
+                                current_frame_path: Optional[str] = None) -> CorrectionResult:
         try:
             if not self.telescope_driver.is_connected():
                 return CorrectionResult(
@@ -310,11 +338,11 @@ class PlatesolveCorrector:
                     )
             
             # **NEW: Validate target BEFORE processing**
-            if not self.is_platesolve_for_current_target(data):
+            if not self.is_platesolve_for_current_target(data, current_frame_path):
                 return CorrectionResult(
                     applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
                     rotation_offset_deg=0.0, total_offset_arcsec=0.0, settle_time=0.0,
-                    reason="Platesolve is for different target - rejecting"
+                    reason="Platesolve is for different target or phase - rejecting"
                 )
             
             current_filename = data.get('fitsname', {}).get("0", "")
