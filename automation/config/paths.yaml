@@ -5,8 +5,13 @@ logs: "P:\\temp\\logs\\T2"                    # Where logs are saved
 target_json: "P:\\temp\\target_2.json"              # For minerva photometry to read target info
 solver_status_json : "session\\solver_status_json"  # NOT USED
 
-platesolve_json: "P:\\temp\\wcssolution_2.json"     # Where minerva photometry dumps mount correction info
-spectro_platesolve_json: "P:\\temp\\wcssolution_2.json"  # as above
+## Testing C: Drive for platesolve json
+platesolve_json: "C:\\platesolving\\jsons\\wcssolution_2.json"     # Where minerva photometry dumps mount correction info
+spectro_platesolve_json: "C:\\platesolving\\jsons\\wcssolution_2.json"  # as above, for spectro solves
+
+## Original platesolve directories vvv
+# platesolve_json: "P:\\temp\\wcssolution_2.json"     # Where minerva photometry dumps mount correction info
+# spectro_platesolve_json: "P:\\temp\\wcssolution_2.json"  # as above
 
 spectro_mirror_file: "P:\\temp\\mirror_telescope.json"  # the file T2 continuously monitors for new targets in spectro mode
 
