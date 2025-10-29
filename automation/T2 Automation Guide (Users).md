@@ -3,7 +3,7 @@ title: T2 Automation Guide (Users)
 ---
 
 
-# T2 Automation Software - User Guide (Drafting...)
+# T2 Automation Software - User Guide
 
 ## Contents
 ### Starting up:
@@ -22,7 +22,7 @@ title: T2 Automation Guide (Users)
  - [Telescope Shutdown Tool](#telescope-shutdown-tool-t2shutdownexe)
  - [Closing the Dome (on Telcom7)](#closing-the-dome-telcom7)
  
- ### Troubleshooting:
+ ### Troubleshooting/Tips:
  - [Troubleshooting](#troubleshooting)
 
 <div style="page-break-after: always;"></div>
@@ -224,15 +224,15 @@ Automated Photometry has one primary mode, where targets are resolved based on t
 
 The program is called via:
 ```bash
-python main.py [TARGET] [OPTIONS]
+python t2_photometry.py [TARGET] [OPTIONS]
 ```
 
 ### Using TIC ID
 Any of these formats are acceptable:
 ```bash
-python main.py 123456789
-python main.py TIC123456789
-python main.py TIC-123456789
+python t2_photometry.py 123456789
+python t2_photometry.py TIC123456789
+python t2_photometry.py TIC-123456789
 ```
 
 Target coordinates and magnitude will be determined via TIC lookup and default exposure time calculated based on Gaia G-mag. The exposure time can (and should) be overridden using command line arguments (use Single Image Mode above to determine optimal exposure time).
@@ -261,19 +261,19 @@ Notes:
 
 - To observe a TIC target with 10 second exposure time:
 ```bash
-python main.py 123456789 --exposure-time 10.0
+python t2_photometry.py 123456789 --exposure-time 10.0
 ```
 - To observe a TIC target with 30 second exposure time with the Lum filter:
 ```bash
-python main.py 123456789 --exposure-time 30.0 --filter L
+python t2_photometry.py 123456789 --exposure-time 30.0 --filter L
 ```
 - To observe a target without a TIC ID via its J2000 coordinates (RA and Dec in decimal degrees) with 20 second exposure time with the Clear filter (Clear is the default):
 ```python
-python main.py --coords "256.263748 -42.17295" --exposure-time 20.0
+python t2_photometry.py --coords "256.263748 -42.17295" --exposure-time 20.0
 ```
 <!-- - To observe a TIC target with 5 second exposure time and more detailed console logging:
 ```python
-python main.py 123456789 --exposure-time 5.0 --log-level DEBUG
+python t2_photometry.py 123456789 --exposure-time 5.0 --log-level DEBUG
 ``` -->
 ### On Observability
 If your target is not immediately observable (hasn't risen about 30° altitude yet, or it is not quite twilight) the program will automatically keep checking for observability at regular intervals (60 seconds) and will automatically start observations once observability conditions are satisfied. E.g.:
@@ -356,16 +356,18 @@ Command line arguments can be used for additional customization and to override 
 | Option | Description | Default |
 |--------|-------------|:-------:|
 |`--ignore-twilight` | Bypass twilight (Sun Altitude) checks for daytime testing (will also prevent shutdown) | `False` |
-|`--exposure-time` | Override exposure time (seconds) | Set in config |
+|`--exposure-time` | Override exposure time (seconds) | Set in config (adaptive) |
 |`--duration` | Session duration (hours) | Set in config |
 |`--poll-interval` | How often to check mirror file for new targets (seconds) | `10.0` |
 |`--log-level` | Terminal display logging level (DEBUG/INFO/WARNING/ERROR) | `INFO` |
 |`--dry-run` | Simulate without hardware movement or imaging | `False` |
 
-### Imaging and Plate-Solving During Spectroscopy
+### Imaging and Platesolving During Spectroscopy
 
-Imaging during spectroscopy is only used for plate-solving and guiding (positioning the star directly over the fibre), so the calculation of exposure times is adaptive, automatically adjusting based on responses from the external platesolver.
+Imaging during spectroscopy is only used for platesolving and guiding (positioning the star directly over the fibre), so the calculation of exposure times is adaptive, automatically adjusting based on responses from the external platesolver.
 
+### Files and Directories
+Directories are automatically created and files saved according to date, e.g.: `P:\Spectroscopy\YYYY\YYYYMMDD\T2\TIC123456789`
 
 <div style="page-break-after: always;"></div>
 
@@ -446,48 +448,27 @@ You can now exit the Shutdown Tool.
 
 <div style="page-break-after: always;"></div>
 
-
-
 # Troubleshooting
 
+## Automation Terminal Issues
+
+Where possible, all scripts should be run using the Automation<br>Terminal on the Desktop 'Automation Terminal T2' --> 
+<img src="img/vscode_terminal_shortcut.png" style="float: right; width: 70px; margin-left: 5px; margin-top: -60px; margin-right: 200px;"/>
+
+If this terminal is not working properly, the scripts *can* also be run in either<br>Command Prompt <img src="img/cmd.png" width="150" style="vertical-align: text-bottom;"/> or Windows Powershell <img src="img/powershell.png" width="140" style="vertical-align: text-bottom;"/>,<br>though **the program call MUST now include `-u`** (or the script will stall/hang), for example:
+```bash
+python -u t2_photometry.py 123456789
+python -u t2_spectro.py tic 123456789 --exposure-time 15.0
+```
+Note: you will likely first need to change directories via a slightly different path, e.g.:
+```bash
+conda activate drivescope
+cd Documents\JS\automation
+```
 ## Field Rotator and Rotator Flips...
 
 
+## Other troubleshooting
+
+
 <img src="img/"/>
-
-## Running scripts in Command Prompt or Powershell
-
-...
-
-### 4. Open a Command Prompt from the Start Menu <img src="img/cmd.png" width="200" style="vertical-align: text-bottom;"/>
-
-### 5. In the terminal window, type:
-```bash
-conda activate drivescope
-```
-The prompt prefix should change to (drivescope), e.g.:
-```bash
-(drivescope) C:\Users\asa>
-```
-
-### 6. Change directories to the automation folder, by either (depending on which folder you start in):
-```bash
-cd Documents\JS\automation
-cd automation
-```
-Hints: You can use 'TAB' to auto-complete. E.g. if u type 'cd doc' and hit 'TAB' it should autocomplete the rest of the folder/file name. Type 'dir' to see the contents of the folder you are currently in. Type 'cd ..' to go up a folder in the structure.
-
-<!-- <div style="page-break-after: always;"></div> -->
-
-Your final command prompt should look like this:
-```bash
-(drivescope) C:\Users\asa\Documents\JS\automation>
-```
-
-#### MUST BE RUN WITH `-u` in command
-
-E.g.:
-```bash
-python -u main.py 123456789
-python -u t2_spectro.py tic 123456789 --exposure-time 5.0
-```
