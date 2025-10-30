@@ -88,10 +88,10 @@ def setup_logging(log_level: str, log_dir: Path, log_name: str = None):
         "%(asctime)s - %(name)s:%(lineno)d - %(levelname)s - %(message)s",
         datefmt="[%Y-%m-%d %H:%M:%S]"
     ))
-    file_handler.setLevel(logging.DEBUG)
+    file_handler.setLevel(logging.DEBUG)        # set file logging level to DEBUG
         
     logging.basicConfig(
-        level=logging.DEBUG,            # set file logging level to DEBUG
+        level=logging.DEBUG,            
         handlers=[console_handler, file_handler]
     )
     

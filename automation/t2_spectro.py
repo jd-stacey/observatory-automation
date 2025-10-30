@@ -25,13 +25,14 @@ from autopho.imaging.session import ImagingSession, ImagingSessionError, Session
 logger = logging.getLogger(__name__)
 
 def extract_sequence_from_filename(filename: str) -> int:
-    '''Extract sequence number from filename like _00123.fits'''
+    '''Extract sequence number from filename e.g. extract 123 from _00123.fits'''
     import re
     match = re.search(r'_(\d+)\.fits', filename)
     return int(match.group(1)) if match else -1
 
-
 def ensure_telescope_tracking(telescope_driver, check_interval=0.5):
+    '''The .Tracking status can get turned off by itself (e.g. during cable unwraps, zenith adjustments), this checks the .Tracking status every 
+    {check_interval} seconds and sets it back to True'''
     import threading
     import time
     
@@ -42,23 +43,22 @@ def ensure_telescope_tracking(telescope_driver, check_interval=0.5):
         logger = logging.getLogger('tracking_monitor')
         while not stop_event.is_set():
             try:
+                # Confirm telescope driver exists and is connected
                 if telescope_driver and telescope_driver.is_connected():
                     if hasattr(telescope_driver.telescope, 'Tracking'):
+                        # If .tracking is false try to set it back to True
                         if not telescope_driver.telescope.Tracking:
                             logger.warning("Telescope tracking disabled - re-enabling")
                             telescope_driver.telescope.Tracking = True
                             time.sleep(0.5)
+                            # Check if it worked
                             if telescope_driver.telescope.Tracking:
                                 logger.info("Telescope tracking successfully re-enabled")
                             else:
                                 logger.error("Failed to re-enable telescope tracking")
-                        # else:
-                        #     logger.debug("Telescope tracking OK")
-                
                 # Use stop_event.wait() instead of time.sleep() for responsive shutdown
                 if stop_event.wait(timeout=check_interval):
                     break  # stop_event was set, exit cleanly
-                    
             except Exception as e:
                 logger.error(f"Tracking monitor error: {e}")
                 if stop_event.wait(timeout=check_interval):
@@ -66,11 +66,11 @@ def ensure_telescope_tracking(telescope_driver, check_interval=0.5):
     
     tracking_thread = threading.Thread(target=tracking_monitor, daemon=True)
     tracking_thread.start()
-    
     # Return both thread and stop_event so caller can shut it down properly
     return tracking_thread, stop_event
 
 def setup_logging(log_level: str, log_dir: Path, log_name: str = None):
+    '''Set up console and file logging'''
     numeric_level = getattr(logging, log_level.upper(), None)
     if not isinstance(numeric_level, int):
         raise ValueError(f"Invalid log level: {log_level}")
@@ -90,15 +90,14 @@ def setup_logging(log_level: str, log_dir: Path, log_name: str = None):
         )
     
     console_handler.setFormatter(logging.Formatter("%(message)s"))
-    console_handler.setLevel(numeric_level)
-    
+    console_handler.setLevel(numeric_level)     # set console logging level based on log_level
     
     file_handler = logging.FileHandler(logfile, encoding="utf-8")
     file_handler.setFormatter(logging.Formatter(
         "%(asctime)s - %(name)s:%(lineno)d - %(levelname)s - %(message)s",
         datefmt="[%Y-%m-%d %H:%M:%S]"
     ))
-    file_handler.setLevel(logging.DEBUG)
+    file_handler.setLevel(logging.DEBUG)        # set file logging level to DEBUG
         
     logging.basicConfig(
         level=logging.DEBUG,
