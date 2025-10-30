@@ -1,6 +1,6 @@
 '''
 Use this program to take a single image of a target, resolved by TIC ID or J2000 coordinates (or by using --current-position). 
-The --exposure-time command line argument MUST be used to sete exposure time (in seconds).
+The --exposure-time command line argument MUST be used to set exposure time (in seconds).
 Binning and Gain levels are set for each camera in the config file: devices.yaml.
 '''
 
@@ -47,14 +47,14 @@ def setup_logging(log_level: str, log_dir: Path, log_name: str = None):
     )
     
     console_handler.setFormatter(logging.Formatter("%(message)s"))
-    console_handler.setLevel(numeric_level)
+    console_handler.setLevel(numeric_level)     # set console logging level based on log_level
     
     file_handler = logging.FileHandler(logfile, encoding="utf-8")
     file_handler.setFormatter(logging.Formatter(
         "%(asctime)s - %(name)s:%(lineno)d - %(levelname)s - %(message)s",
         datefmt="[%Y-%m-%d %H:%M:%S]"
     ))
-    file_handler.setLevel(logging.DEBUG)
+    file_handler.setLevel(logging.DEBUG)    # set file logging level to DEBUG
         
     logging.basicConfig(
         level=logging.DEBUG,
@@ -128,11 +128,11 @@ def main():
     
     # Setup logging
     try:
-        config_loader = ConfigLoader(args.config_dir)
+        config_loader = ConfigLoader(args.config_dir)       # ConfigLoader from loader.py
         config_loader.load_all_configs()
         log_dir = Path(config_loader.get_config("paths")["logs"])
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        # Set up log filenames
+        # Set up log filenames (use timestamps as differentiators)
         if args.current_position:
             log_name = f"single_{timestamp}_CURRENTPOS.log"
         elif args.tic_id:    
@@ -157,6 +157,7 @@ def main():
     logger.info(" "*25+"SINGLE IMAGE CAPTURE")
     logger.info("="*75)
     
+    # initialise driver variables so finally block runs without error
     telescope_driver = None
     cover_driver = None
     filter_driver = None
@@ -172,7 +173,7 @@ def main():
         # Resolve target (unless using current position)
         if args.current_position:
             logger.info("Using telescope's current position (no target resolution)")
-            # Create a generic target_info for current position
+            # Create a generic target_info for current position - TargetInfo from resolver.py
             target_info = TargetInfo(
                 tic_id="CURRENT_POSITION",
                 ra_j2000_hours=0.0,  # Will be updated after telescope connection
@@ -194,7 +195,7 @@ def main():
                 if not (-90 <= dec_deg <= 90):
                     raise ValueError(f"Dec must be -90 to +90 degrees, got {dec_deg}")
                     
-                target_info = TargetInfo(
+                target_info = TargetInfo(           # TargetInfo from resolver.py
                     tic_id=f"MANUAL-{ra_hours:.3f}h_{dec_deg:+.3f}d",
                     ra_j2000_hours=ra_hours,
                     dec_j2000_deg=dec_deg,
@@ -271,7 +272,7 @@ def main():
                 main_camera.camera.Connected = True     # Alpaca call
                 import time
                 time.sleep(0.5)
-            main_camera.connected = main_camera.camera.Connected    # Alapca call
+            main_camera.connected = main_camera.camera.Connected    # Alpaca call
             if main_camera.connected:
                 logger.info(f"Connected to main camera: {main_camera.name} (cooler management disabled)")
             else:
@@ -295,7 +296,7 @@ def main():
         logger.info(f"Current position: RA={tel_info.get('ra_hours', 0):.6f} h ({tel_info.get('ra_hours', 0)*15.0:.6f}°), "
                     f"Dec={tel_info.get('dec_degrees', 0):.6f}°")
         
-        # Update target_info if using current position
+        # Update target_info with values from telescope, if using current position
         if args.current_position:
             target_info.ra_j2000_hours = tel_info.get('ra_hours', 0)
             target_info.dec_j2000_deg = tel_info.get('dec_degrees', 0)
@@ -309,6 +310,7 @@ def main():
                     telescope_driver.telescope.Tracking = True  # Alapca call, from alpaca_telescope.py
                     import time
                     time.sleep(0.5)
+                    # Confirm tracking
                     if telescope_driver.telescope.Tracking:
                         logger.info("Telescope tracking successfully enabled")
                     else:
@@ -340,7 +342,7 @@ def main():
             telescope_driver.disconnect()                       # from alpaca_telescope.py
             return 1
         
-        # Connect to filter wheel
+        # Connect to filter wheel and set selected filter
         filter_driver = None
         logger.info("Connecting to filter wheel...")
         try:
@@ -383,7 +385,6 @@ def main():
             logger.warning(f"Unexpected focuser error: {e} - continuing without")
             focuser_driver = None
         
-        ###### SET FOCUS_FILTER_MANAGER HERE (uncomment below once focus positions are in)
         # Create coordinated focus/filter manager - MUST come after filterwheel and focuser initialisation
         focus_filter_mgr = None
         logger.info("Initializing focus/filter coordination...")
@@ -396,7 +397,7 @@ def main():
             logger.warning(f"Unexpected focus/filter coordination error: {e}")
             focus_filter_mgr = None
         
-        # Use manager to set filter
+        # Use manager to set filter from --filter argument, focuser positions drawn from devices.yaml -> focuser -> focus positions
         if focus_filter_mgr:
             logger.info(f"Setting filter to {args.filter.upper()} with focus adjustment...")
             try:
@@ -411,8 +412,6 @@ def main():
                 logger.warning(f"Focus/filter coordination failed: {e} - continuing anyway")
             except Exception as e:
                 logger.warning(f"Unexpected focus/filter coordination error: {e}")
-        
-        
         
         
         # Slew to target (skip if using current position)
@@ -596,7 +595,6 @@ def main():
             logger.info("="*75)
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
-
 
 if __name__ == '__main__':
     sys.exit(main())
