@@ -117,7 +117,7 @@ class TelescopeMirror:
         self.script_start_time = time.time()    # Track when script starts
         self.logger = logging.getLogger(__name__)
         
-        # Define dome closure statuses that should trigger telescope shutdown
+        # Define dome closure status messages from other telescope that should trigger telescope shutdown
         self.dome_closure_statuses = [
             'weather_danger_closing', 
             'closing_both_panels', 
@@ -189,14 +189,13 @@ class TelescopeMirror:
         return False, None
     
     def check_for_new_target(self) -> Optional[Dict[str, Any]]:
-        """Check for new target - relies on atomic writes from writer"""
+        """Check for new target on the mirrored telescope - relies on atomic writes from writer"""
         self.logger.debug(f"=== check_for_new_target() called, checking file: {self.mirror_file} ===")
         try:
             if not self.mirror_file.exists():
                 self.logger.warning(f"Mirror file {self.mirror_file} does not exist")
                 return None
                 
-            # Simple read - writer should use atomic .tmp -> rename pattern
             # self.logger.debug("Reading mirror file...")
             with open(self.mirror_file, 'r') as f:
                 data = json.load(f)
@@ -211,9 +210,7 @@ class TelescopeMirror:
                 self.logger.debug("No timestamp in latest_move")
                 return None
             
-            # self.logger.debug(f"Raw timestamp from file: '{timestamp_str}'")
             timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-            # self.logger.debug(f"Parsed timestamp: {timestamp}")
             
             # Skip if we've already processed this timestamp or it failed
             target_key = f"{timestamp.isoformat()}"
@@ -230,6 +227,7 @@ class TelescopeMirror:
             #     self.logger.debug(f"SKIPPING: Target {target_key} previously failed")
             #     return None
                 
+            # Get coords for new target
             ra_deg = latest_move.get('ra_deg')
             dec_deg = latest_move.get('dec_deg')
             
@@ -243,7 +241,7 @@ class TelescopeMirror:
                 self.failed_targets.add(target_key)
                 return None
             
-            ra_hours = ra_deg / 15.0
+            ra_hours = ra_deg / 15.0        # conv RA degrees to hours
             new_target = {
                 'timestamp': timestamp,
                 'ra_hours': ra_hours,
@@ -278,6 +276,7 @@ class TelescopeMirror:
             self.failed_targets = set(list(self.failed_targets)[-50:])
 
     def get_current_target(self) -> Optional[Dict[str, Any]]:
+        '''Get details of current target (if we have one)'''
         if self.last_coordinates:
             return {
                 'ra_hours': self.last_coordinates[0],
@@ -288,7 +287,7 @@ class TelescopeMirror:
 
 
 class SpectroscopyImagingSession(ImagingSession):
-    """Imaging session using only the guide camera for spectroscopy"""
+    """Imaging session using only the guide camera for spectroscopy, inherits from ImagingSession class within session.py"""
 
     def __init__(self, camera_manager, corrector, config_loader, target_info: TargetInfo,
          ignore_twilight: bool = False, exposure_override: Optional[float] = None,
@@ -327,7 +326,7 @@ class SpectroscopyImagingSession(ImagingSession):
         # Store the final exposure time
         exposure_override = final_exposure
         
-        # For spectroscopy, filter to only use 294MM cameras
+        # For spectroscopy, filter to only use the 294MM camera
         if camera_manager and not dry_run:
             cameras_to_remove = []
             for name, camera in camera_manager.cameras.items():
@@ -373,7 +372,7 @@ class SpectroscopyImagingSession(ImagingSession):
             self.acquisition_config['exposure'] = self.exposure_override
             self.logger.debug(f"Acquisition exposure set to {self.exposure_override}")
         
-        # Update acquisition settings for tighter spectroscopy requirements
+        # Update acquisition settings for tighter spectroscopy requirements (from platesolving.yaml)
         if hasattr(self, 'acquisition_config'):
             # Tighten acquisition threshold for spectroscopy (fiber alignment critical)
             self.acquisition_config['max_total_offset_arcsec'] = spectro_acq_cfg['max_total_offset_arcsec']
@@ -391,13 +390,10 @@ class SpectroscopyImagingSession(ImagingSession):
         self._set_target_in_corrector()
         logger.debug(f"SpectroscopyImagingSession initialized with immediate correction checking")
 
-        
-
     def run_simulated_acquisition(self):
-        """Simulate acquisition + science frames for testing"""
+        """Simulate acquisition + science frames for testing purposes only - just prints output"""
         self.logger.info("Starting simulated spectroscopy sequence...")
         self._running = True
-        
         try:
             # Simulate acquisition phase
             if self.acquisition_enabled:
@@ -407,9 +403,7 @@ class SpectroscopyImagingSession(ImagingSession):
                         break
                     self.logger.info(f"  ACQ Frame {i+1}/3, exposure 3s")
                     time.sleep(0.1)  # fast-forward in simulation
-                
                 self.logger.info("Acquisition complete, switching to science...")
-                
             # Simulate science phase  
             self.logger.info("Phase: science")
             for i in range(5):
@@ -418,28 +412,27 @@ class SpectroscopyImagingSession(ImagingSession):
                 exposure_time = self.exposure_override or 30.0
                 self.logger.info(f"  SCI Frame {i+1}/5, exposure {exposure_time:.1f}s")
                 time.sleep(0.1)  # fast-forward in simulation
-                
         finally:
             self._running = False
             
     
     def _should_apply_correction(self):
-        """Spectroscopy uses synchronous corrections only - disable periodic checks"""
+        """Spectroscopy uses synchronous corrections only - disable periodic checks - overrides method of same name from session.py"""
         return False
 
     def _apply_periodic_correction(self):
-        """No-op for spectroscopy - corrections happen synchronously"""
+        """Spectroscopy uses synchronous corrections only - disable periodic checks - overrides method of same name from session.py"""
         pass
     
     
     def capture_single_exposure(self, telescope_driver=None) -> Optional[str]:
-        """Override to use synchronous corrections for spectroscopy"""
+        """Override method of same name from session.py to use synchronous corrections for spectroscopy - checks for corrections after every frame"""
         # Check stop event BEFORE capture
         if self._stop_event.is_set():
             return None
         
         # Capture image using parent method
-        image_filepath = super().capture_single_exposure(telescope_driver=telescope_driver)
+        image_filepath = super().capture_single_exposure(telescope_driver=telescope_driver)     # uses method from session.py
         
         # Check stop event BEFORE waiting for correction
         if self._stop_event.is_set() or not image_filepath:
@@ -447,12 +440,11 @@ class SpectroscopyImagingSession(ImagingSession):
         
         if image_filepath and self.corrector:
             # For spectroscopy: ALWAYS wait for correction synchronously (both ACQ and SCI)
-            solver_wait_time = self.acquisition_config.get('solver_wait_time', 30.0)
+            solver_wait_time = self.acquisition_config.get('solver_wait_time', 45.0)        # get time to wait for platesolver solution from platesolving.yaml
             logger.debug(f"Spectroscopy mode - waiting up to {solver_wait_time:.1f} s for platesolve correction...")
             
             try:
                 correction_applied = self.corrector.wait_for_correction_with_timeout(solver_wait_time, current_frame_path=image_filepath)
-                
                 if not correction_applied:
                     logger.warning("No correction applied within timeout - proceeding")
                 else:
@@ -464,7 +456,7 @@ class SpectroscopyImagingSession(ImagingSession):
         return image_filepath
 
     def _switch_to_science_phase(self):
-        '''Override to reset corrector tracking when switching phases'''
+        '''Override to reset corrector tracking when switching phases - if spectroscopy uses phases in future (currently just remains in one phase)'''
         
         # Call parent implementation (from session.py) to do normal phase switching stuff
         super()._switch_to_science_phase()
@@ -486,17 +478,15 @@ class SpectroscopyImagingSession(ImagingSession):
         return False
     
     def _should_switch_to_science_from_correction(self, correction_result) -> bool:
-        """Determine if correction result indicates we should switch to science phase"""
+        """Determine if correction result indicates we should switch to science phase - if spectroscopy uses phases in future (currently just remains in one phase)"""
+        # If we are already out of acq, no need to switch
         if self.current_phase != SessionPhase.ACQUISITION:
             return False
-        
+        # Switch if total offset is within threshold from config
         max_offset = self.acquisition_config.get('max_total_offset_arcsec', 2.0)
-        
-        # Switch if total offset is within threshold
         if correction_result.total_offset_arcsec <= max_offset:
             logger.debug(f"Offset {correction_result.total_offset_arcsec:.2f}\" = {max_offset}\" threshold")
             return True
-        
         return False
 
     def _set_target_in_corrector(self):
@@ -506,11 +496,10 @@ class SpectroscopyImagingSession(ImagingSession):
             self.corrector.set_current_target(target_id, self.exposure_override)
             logger.debug(f"Set corrector target: {target_id} with base exposure: {self.exposure_override}")
     
-    
     def start_imaging_loop(self, max_exposures: Optional[int] = None,
                        duration_hours: Optional[float] = None,
                        telescope_driver = None) -> bool:
-        
+        '''Begin full, continuous imaging loop for spectroscopy'''
         # Call parent initialization
         logger.info("="*75)
         logger.info(" "*25+"STARTING IMAGING SESSION")
@@ -531,7 +520,7 @@ class SpectroscopyImagingSession(ImagingSession):
         self.exposure_count = 0
         self.consecutive_failures = 0
         
-        # Field rotation setup (same as parent)
+        # Field rotation setup (same as parent) - will be ignored in spectro as rotator_driver will be set to None. There will not be any rotator actions during spectro.
         try:
             if self.rotator_driver:
                 fr_cfg = self.config_loader.get_config('field_rotation')
@@ -633,8 +622,6 @@ class SpectroscopyImagingSession(ImagingSession):
             except Exception:
                 pass
     
-    
-    
     def start_imaging_loop_async(self, duration_hours: float = 1.0):
         """Start imaging loop in separate thread"""
         def imaging_worker():
@@ -694,13 +681,11 @@ class SpectroscopyImagingSession(ImagingSession):
     def is_running(self) -> bool:
         return self._running
 
-
-
 class SpectroscopyCorrector(PlatesolveCorrector):
-    """Enhanced platesolve corrector for spectroscopy with immediate corrections and adaptive exposure"""
+    """Enhanced platesolve corrector for spectroscopy with immediate corrections after every imaging frame and adaptive exposure times, inherits from corrector.py"""
     
     def __init__(self, telescope_driver, config_loader):
-        # Initialize with memory enabled for spectroscopy
+        # Initialize with memory enabled for spectroscopy, from correctpr.py
         super().__init__(telescope_driver, config_loader, rotator_driver=None, store_last_measurements=True)
         
         # Use spectro-specific platesolve path if configured
@@ -718,9 +703,9 @@ class SpectroscopyCorrector(PlatesolveCorrector):
         self.base_exposure_time = self.spectro_config.get('exposure_time', 10.0)
     
         self.current_exposure_time = self.spectro_config.get('exposure_time', 10.0)
-        self.max_exposure_time = self.spectro_config.get('max_exposure_time', 120.0)  # 2 minutes
+        self.max_exposure_time = self.spectro_config.get('max_exposure_time', 120.0)  
         self.exposure_increase_factor = self.spectro_config.get('exposure_increase_factor', 2.0)
-        self.max_zero_attempts = self.spectro_config.get('max_zero_attempts', 4)  # 2 attempts at max exposure
+        self.max_zero_attempts = self.spectro_config.get('max_zero_attempts', 4)  # attempts at max exposure
         
         self.last_applied_sequence = -1
         self.last_processed_filename = None
@@ -812,7 +797,7 @@ class SpectroscopyCorrector(PlatesolveCorrector):
     def is_platesolve_current_for_frame(self, data: Dict[str, Any], current_frame_path: str) -> bool:
         """Check if platesolve is valid and not yet processed"""
         try:
-            # NEW: First check if platesolve file is from current session
+            # First check if platesolve file is from current session
             if self.session_start_time is not None:
                 try:
                     json_mtime = self.json_file_path.stat().st_mtime
@@ -821,17 +806,17 @@ class SpectroscopyCorrector(PlatesolveCorrector):
                         return False
                 except Exception as e:
                     logger.warning(f"Could not check platesolve file time: {e}")
-            
+            # Get file name from the platesolved json file
             solved_filename = data.get('fitsname', {}).get("0", "")
             if not solved_filename:
                 return False
             
             solved_basename = Path(solved_filename).name
             current_basename = Path(current_frame_path).name
-            
+            # Check if the current frame path and the latest solved frame contain "_acq" in their file directories
             solved_is_acq = '_acq' in str(Path(solved_filename).parent)  # Check directory, not filename
             current_is_acq = '_acq' in str(Path(current_frame_path).parent)
-
+            # If they both dont match, there is a phase mismatch, so we should reject the solve and NOT apply the solution
             if solved_is_acq != current_is_acq:
                 phase_mismatch = "acquisition->science" if solved_is_acq else "science->acquisition"
                 logger.debug(f"Platesolve phase mismatch ({phase_mismatch}) - rejecting")
@@ -839,65 +824,63 @@ class SpectroscopyCorrector(PlatesolveCorrector):
                 logger.debug(f"    solvedbase={solved_basename}, currentbase={current_basename}")
                 return False
             
-            # Extract sequences
+            # Extract sequence numbers from both the current frame and the solved frame filenames
             solved_seq = extract_sequence_from_filename(solved_basename)
             current_seq = extract_sequence_from_filename(current_basename)
-            
+            # Reject invalid sequences
             if solved_seq < 0 or current_seq < 0:
                 logger.debug("Could not extract sequence numbers")
                 return False
             
-            # NEW: Reject solves for frames we haven't captured yet
+            # Reject solves for frames we haven't captured yet - if the solver returns a solve for a frame with a larger sequence than the current frame
+            # something is wrong (either a missed phase mismatch, still solving acq phase or solving from wrong directory), reject the solve
             if solved_seq > current_seq:
                 logger.debug(f"Platesolve is for future frame: solved seq {solved_seq} > current seq {current_seq}")
                 return False
             
-            
             import re
             def extract_target_id(filename):
+                '''Extract target id from the filename'''
                 match = re.match(r'^(.+?)_[A-Z]?_\d{8}_', filename)
                 if match:
                     return match.group(1)
                 match = re.match(r'^(.+?)_\d{8}_', filename)
                 return match.group(1) if match else None
-            
                         
             def normalize_target_id(tid: str) -> str:
+                '''normalise the target id for comparisons'''
                 return tid.replace('-', '').replace('+', '') if tid else tid
-
+            # extract target ids from both the current frame and the solved frame
             solved_target = extract_target_id(solved_basename)
             current_target = extract_target_id(current_basename)
-
             # Normalize both forms before any comparisons
             solved_target_norm  = normalize_target_id(solved_target)
             current_id_norm     = normalize_target_id(self.current_target_id)
             current_target_norm = normalize_target_id(current_target)
-
+            # If the target ids dont match - reject the solve
             if solved_target_norm != current_id_norm:
                 logger.debug(f"Platesolve is for different target: {solved_target} vs current {self.current_target_id}")
                 return False
-
+            # If the target ids dont match - reject the solve
             if solved_target_norm != current_target_norm:
                 logger.debug(f"Platesolve is for different target: {solved_target} vs {current_target}")
                 return False
-
-            
-            # Check if platesolve is from acquisition directory when we're in science mode
+            # Failsafe check if platesolve is from acquisition directory when we're in science mode
             if '_acq' in solved_basename and '_acq' not in current_basename:
                 logger.debug(f"Platesolve is from acquisition phase, current frame is science - rejecting")
                 return False
-            
             solved_seq = extract_sequence_from_filename(solved_basename)
-            
             if solved_seq < 0:
                 logger.debug("Could not extract sequence number from platesolve")
                 return False
-            
+            # Reject solve if the solution is for a frame prior to the last solved frame for which we applied a solution (irrespective of current frame)
+            # e.g. solution is for frame 50 but we previously applied a solution for frame 52.
             if solved_seq <= self.last_applied_sequence:
                 logger.debug(f"Platesolve already processed: solved seq {solved_seq} <= last applied {self.last_applied_sequence}")
                 return False
-            
-            # Check against the gate: only accept solves for frames captured after last correction
+            # Reject solve if the solution is for a frame prior to the next frame we take immediately after applying a solve (particularly important for short exp time obs)
+            # e.g. solution is for frame 50 but the last time we applied a solution the very next frame we took was frame 55. We must wait for the solver to 'catch up' and only
+            # apply solutions from that next frame onwards - prevents jumping past/over target star by applying multiple solves.
             if solved_seq < self.min_acceptable_sequence:
                 logger.debug(f"Platesolve too old: solved seq {solved_seq} < min acceptable {self.min_acceptable_sequence}")
                 return False
@@ -908,7 +891,6 @@ class SpectroscopyCorrector(PlatesolveCorrector):
         except KeyboardInterrupt as e:
             logger.debug(f"Interrupted by user: {e}")
             return False
-        
         except Exception as e:
             logger.warning(f"Error checking frame currency: {e}")
             return False  # Default to assuming it's current to avoid blocking corrections
@@ -959,7 +941,7 @@ class SpectroscopyCorrector(PlatesolveCorrector):
                 else:
                     self.current_exposure_retries += 1
                 
-                max_retries = self.spectro_config.get('retries_per_exposure_level', 2)
+                max_retries = self.spectro_config.get('retries_per_exposure_level', 2)  # get max retries per exp. time from config
                 
                 if self.current_exposure_retries < max_retries:
                     # Stay at current exposure, just retry
@@ -980,7 +962,7 @@ class SpectroscopyCorrector(PlatesolveCorrector):
                         logger.warning(f"Already at maximum exposure time ({self.max_exposure_time}s), retry {self.current_exposure_retries}/{max_retries}")
                         return self.current_exposure_time
             
-            # Successful platesolve - clear failure tracking
+            # If a successful platesolve (i.e. not exact zeroes) - clear failure tracking
             if ra_offset_deg != 0.0 or dec_offset_deg != 0.0:
                 self.last_failed_filename = None
                 if hasattr(self, 'current_exposure_retries'):
@@ -995,7 +977,6 @@ class SpectroscopyCorrector(PlatesolveCorrector):
         except KeyboardInterrupt as e:
             logger.debug(f"Interrupted by user: {e}")
             return None
-        
         except (KeyError, ValueError, TypeError) as e:
             logger.warning(f"Could not check for platesolve failure: {e}")
             return None
@@ -1003,15 +984,10 @@ class SpectroscopyCorrector(PlatesolveCorrector):
     def get_current_exposure_time(self) -> float:
         """Get the current adaptive exposure time"""
         return self.current_exposure_time
-
     
     def process_platesolve_data(self, data: Dict[str, Any]) -> Tuple[float, float, float, float]:
-        """Override to use immediate full corrections for spectroscopy"""
+        """Override same method from corrector.py to use immediate and full corrections for spectroscopy"""
         try:
-            # First check if data is current for our target
-            # if not self.is_platesolve_data_current(data):
-            #     raise PlatesolveCorrectorError("Platesolve data is stale for current target")
-            
             # Check for platesolve failure and handle adaptive exposure
             new_exposure = self.detect_platesolve_failure(data)
             if new_exposure is not None:
@@ -1019,34 +995,31 @@ class SpectroscopyCorrector(PlatesolveCorrector):
             
             ra_offset_deg = float(data['ra_offset']["0"])
             dec_offset_deg = float(data['dec_offset']["0"])
-            # Ignore rotation offset for spectroscopy
-            rot_offset_deg = 0.0  
+            rot_offset_deg = 0.0  # !!! Ignore rotation offset for spectroscopy
             base_settle_time = float(data['exptime']["0"])
-            
+            # arcsec calcs just for logging/displaying and threshold comparisons
             ra_offset_arcsec = ra_offset_deg * 3600.0
             dec_offset_arcsec = dec_offset_deg * 3600.0
             total_offset_arcsec = (ra_offset_arcsec**2 + dec_offset_arcsec**2)**0.5
-            
             logger.debug(f"Spectro offsets: RA={ra_offset_arcsec:.2f}\", Dec={dec_offset_arcsec:.2f}\", "
                         f"Total={total_offset_arcsec:.2f}\" (rotation ignored)")
             
-            # Use spectro-specific thresholds - much tighter for fiber alignment
+            # Use spectro-specific thresholds from platesolving.yaml config
             spectro_thresholds = self.platesolve_config.get('spectro_thresholds', {})
-            min_threshold = spectro_thresholds.get('min_arcsec', 0.01)  # Very tight for spectroscopy
-            
+            min_threshold = spectro_thresholds.get('min_arcsec', 0.01)
+            # Check against thresholds
             if total_offset_arcsec < min_threshold:
-                scale_factor = 0.0
-                settle_time = 1.0  # Minimal settle time for spectroscopy
+                scale_factor = 0.0  # Dont apply any correction if below min threshold
+                settle_time = 0.1  
                 logger.debug(f"Offset below spectro minimum threshold ({min_threshold:.2f}\"), no correction")
             else:
                 # Always apply full correction for spectroscopy - no scaling down
-                scale_factor = 1.0
+                scale_factor = 1.0  # Apply full correction
                 settle_time = 2.0  # Quick settle for spectroscopy
                 logger.debug(f"Spectro offset above threshold, applying full correction")
-                
+            # set new offsets based on scale factors - i.e. none or full    
             ra_offset_deg *= scale_factor
             dec_offset_deg *= scale_factor
-            
             # Minimal settle time for spectroscopy
             settle_limits = self.spectro_config.get('settle_time', {})
             min_settle = settle_limits.get('min', 1)
@@ -1064,9 +1037,9 @@ class SpectroscopyCorrector(PlatesolveCorrector):
     
     def apply_immediate_correction_if_available(self, current_phase: str = None, current_frame_path: str = None, 
                                            latest_captured_sequence: Optional[int] = None) -> CorrectionResult:
-        """Apply correction immediately if fresh platesolve data is available"""
+        """Apply spectro correction immediately if fresh platesolve data is available"""
         try:
-            # Safety check: don't apply corrections while telescope is slewing
+            # Safety check: don't apply corrections while telescope is slewing - will mess with target tracking
             if self.telescope_driver and hasattr(self.telescope_driver.telescope, 'Slewing'):
                 if self.telescope_driver.telescope.Slewing:
                     return CorrectionResult(
@@ -1077,7 +1050,6 @@ class SpectroscopyCorrector(PlatesolveCorrector):
             
             # Check for fresh data without waiting
             file_ready, data = self.check_json_file_ready()
-            
             if not file_ready:
                 return CorrectionResult(
                     applied=False,
@@ -1097,7 +1069,7 @@ class SpectroscopyCorrector(PlatesolveCorrector):
                     reason="Platesolve is for older frame"
                 )
             
-            # Check if we've already processed this exact solution
+            # Check if we've already processed this exact solution - filename comparisons
             current_filename = data.get('fitsname', {}).get("0", "")
             if current_filename and current_filename == self.last_processed_file:
                 return CorrectionResult(
@@ -1110,7 +1082,7 @@ class SpectroscopyCorrector(PlatesolveCorrector):
                     reason="Already processed this solution"
                 )
             
-            # Process the correction
+            # Otherwise process the correction
             return self._apply_correction_from_data(data, current_filename, current_phase, current_frame_path, latest_captured_sequence)
             
         except PlatesolveCorrectorError:
@@ -1123,8 +1095,8 @@ class SpectroscopyCorrector(PlatesolveCorrector):
     def _apply_correction_from_data(self, data: Dict[str, Any], filename: str, 
                                     current_phase: str = None, current_frame_path: str = None,
                                     latest_captured_sequence: Optional[int] = None) -> CorrectionResult:
-        """Apply correction from platesolve data"""
-        
+        """Apply the correction from platesolve data"""
+        # ensure current, otherwise reject - failsafe
         if current_frame_path and not self.is_platesolve_current_for_frame(data, current_frame_path):
             return CorrectionResult(
                 applied=False, ra_offset_arcsec=0.0, dec_offset_arcsec=0.0,
@@ -1132,7 +1104,7 @@ class SpectroscopyCorrector(PlatesolveCorrector):
                 reason="Platesolve not current for this frame"
             )
         
-        # Check if we already processed this exact file
+        # Check if we already processed this exact file - failsafe
         solved_filename = data.get('fitsname', {}).get("0", "")
         if solved_filename == self.last_processed_filename:
             return CorrectionResult(
@@ -1165,14 +1137,14 @@ class SpectroscopyCorrector(PlatesolveCorrector):
         new_exposure = self.detect_platesolve_failure(data, current_phase, current_frame_path)
         if new_exposure is not None:
             raise PlatesolveCorrectorError(f"Platesolve failed, try exposure time {new_exposure:.1f} s")
-        
+        # process the data
         ra_offset_deg, dec_offset_deg, rot_offset_deg, settle_time = self.process_platesolve_data(data)
-        
+        # arcsec calcs for logging and threshold comparisons
         ra_offset_arcsec = ra_offset_deg * 3600.0
         dec_offset_arcsec = dec_offset_deg * 3600.0
         total_offset_arcsec = (ra_offset_arcsec**2 + dec_offset_arcsec**2)**0.5
         
-        # Store last measurements
+        # Store last set of measurements
         if self.store_last_measurements:
             self.last_total_offset_arcsec = total_offset_arcsec
             self.last_ra_offset_arcsec = ra_offset_arcsec
@@ -1208,9 +1180,9 @@ class SpectroscopyCorrector(PlatesolveCorrector):
                 settle_time=settle_time, 
                 reason="Telescope not connected"
             )
-        
+        # Run the slew from alpaca_telescope.py method
         success = self.telescope_driver.apply_coordinate_correction(ra_offset_deg, dec_offset_deg)
-        
+        # update trackers for a successful application of a solve
         if success:
             self.last_processed_filename = solved_filename
             self.last_applied_sequence = solved_seq
@@ -1225,7 +1197,6 @@ class SpectroscopyCorrector(PlatesolveCorrector):
                 logger.debug("Tried, but could not delete platesolve JSON (permission error)")
             except Exception as e:
                 logger.debug(f"Tried, but could not delete JSON: {e}")
-            
             
             # Set gate based on what frame we're actually at NOW (not the solved frame)
             if latest_captured_sequence is not None:
@@ -1358,7 +1329,7 @@ class SpectroscopyCorrector(PlatesolveCorrector):
         return False
     
     def reset_for_new_sequence(self, reason: str = 'phase change'):
-        '''Reset tracking state when starting a new sequence (e.g. from acq to sci phases)'''
+        '''Reset tracking states when starting a new sequence (e.g. from acq to sci phases)'''
         self.last_applied_sequence = -1
         self.last_processed_filename = None
         self.last_target_id = None
@@ -1424,15 +1395,13 @@ class SpectroscopySession:
             else:
                 # Use a reference point (doesn't matter for sun altitude check)
                 ra_hours, dec_deg = 12.0, 0.0
-            
+            # check observability status from observability.py
             obs_status = self.obs_checker.check_target_observability(
                 ra_hours, dec_deg, ignore_twilight=False
             )
-            
-            # Check if sun is too high (above twilight limit)
+            # Check if sun is too high (above twilight limit, set in observatory.yaml config)
             observatory_config = self.config_loader.get_config('observatory')
-            twilight_limit = observatory_config.get('twilight_altitude', -18.0)
-            
+            twilight_limit = observatory_config.get('twilight_altitude', -9.0)
             if obs_status.sun_altitude > twilight_limit:
                 sun_condition = "daylight" if obs_status.sun_altitude > 0 else "twilight"
                 self.shutdown_reason = f"Sun too high for observations: {obs_status.sun_altitude:.1f}° > {twilight_limit}° ({sun_condition})"
@@ -1446,6 +1415,7 @@ class SpectroscopySession:
             return False
 
     def start_monitoring(self, poll_interval: float = 10.0):
+        '''Start monitoring the mirror file for new targets and dome closure messages'''
         self.logger.info("="*60)
         self.logger.info(" "*15+"STARTING SPECTROSCOPY MONITORING")
         self.logger.info("="*60)
@@ -1454,7 +1424,6 @@ class SpectroscopySession:
             self.logger.info("Dome closure monitoring: ENABLED")
         if self.dry_run:
             self.logger.info("DRY RUN MODE - No telescope movement")
-
         if self.ignore_twilight:
             self.logger.info("Automatic twilight checks DISABLED due to --ignore-twilight flag")
         else:
@@ -1464,7 +1433,7 @@ class SpectroscopySession:
                 try:
                     # Check sun altitude using dummy RA/Dec
                     obs_status = self.obs_checker.check_target_observability(12.0, 0.0, ignore_twilight=False)
-                    twilight_limit = self.config_loader.get_config("observatory").get("twilight_altitude", -18.0)
+                    twilight_limit = self.config_loader.get_config("observatory").get("twilight_altitude", -9.0)
                     if obs_status.sun_altitude <= twilight_limit:
                         self.logger.info(
                             f"Sun below twilight limit ({obs_status.sun_altitude:.1f}° <= {twilight_limit}°). Proceeding..."
@@ -1497,9 +1466,8 @@ class SpectroscopySession:
                                 self.logger.warning(f"Error aborting exposure: {e}")
                     
                     break
-
+                # otherwise check for new targets
                 self.logger.debug(f"Polling for new targets... (poll interval: {poll_interval}s)")
-
                 if self.mirror:
                     new_target = self.mirror.check_for_new_target()
                     if new_target:
@@ -1524,7 +1492,7 @@ class SpectroscopySession:
                                 self.current_session = None
                                 self.current_target = None
 
-                        # Start new session
+                        # Start new session with new target
                         if not self._start_new_session(new_target):
                             self.mirror.mark_target_failed(new_target['target_key'])
                     else:
@@ -1564,14 +1532,13 @@ class SpectroscopySession:
             self.logger.info("Spectroscopy monitoring ended - hardware cleanup will follow")
 
     def _validate_target_observability(self, target_data: Dict[str, Any]) -> bool:
-        """Check if target is observable before attempting to use it"""
+        """Check if target is observable before attempting to use it, using method from observability.py"""
         try:
             obs_status = self.obs_checker.check_target_observability(
                 target_data['ra_hours'],
                 target_data['dec_deg'],
                 ignore_twilight=self.ignore_twilight
             )
-            
             if obs_status.observable:
                 self.logger.debug(f"Target is observable (alt={obs_status.target_altitude:.1f}°)")
                 return True
@@ -1579,7 +1546,6 @@ class SpectroscopySession:
                 reasons = "; ".join(obs_status.reasons)
                 self.logger.info(f"Target not observable: {reasons}")
                 return False
-                
         except Exception as e:
             self.logger.error(f"Error checking target observability: {e}")
             return False
@@ -1589,7 +1555,7 @@ class SpectroscopySession:
         try:
             timestamp_suffix = target_data['timestamp'].strftime('%H%M%S')
             target_info = TargetInfo(
-                tic_id=f"MIRROR_{target_data['ra_hours']*15.0:.3f}r_{target_data['dec_deg']:+.3f}d_{timestamp_suffix}",  # NO _C here!
+                tic_id=f"MIRROR_{target_data['ra_hours']*15.0:.3f}r_{target_data['dec_deg']:+.3f}d_{timestamp_suffix}",  
                 ra_j2000_hours=target_data['ra_hours'],
                 dec_j2000_deg=target_data['dec_deg'],
                 gaia_g_mag=12.0,
@@ -1601,7 +1567,7 @@ class SpectroscopySession:
                 self.corrector.set_current_target(target_info.tic_id, self.exposure_override)
                 self.logger.debug(f"Set corrector target to {target_info.tic_id} before slew")
 
-            # Slew telescope (with safety checks)
+            # Slew telescope (with safety checks) using alpaca_telescope.py method
             if not self.dry_run:
                 self.logger.info("Slewing telescope to target...")
                 if not self.telescope_driver or not self.telescope_driver.slew_to_coordinates(
@@ -1611,7 +1577,7 @@ class SpectroscopySession:
                     return False
             else:
                 self.logger.info(f"DRY RUN: Would slew to RA={target_info.ra_j2000_hours:.6f} h ({target_info.ra_j2000_hours*15.0:.6f}°), Dec={target_info.dec_j2000_deg:.6f}°")
-
+            # Begint the spectro imaging session
             self.logger.info("Starting spectroscopy imaging session...")
             session = SpectroscopyImagingSession(
                 camera_manager=self.camera_manager,
@@ -1630,16 +1596,13 @@ class SpectroscopySession:
             default_duration = spectro_config.get("default_session_duration_hours", 1.0)
             duration_hours = self.duration_override or default_duration
             session.start_imaging_loop_async(duration_hours=duration_hours)
-
             self.current_session = session
             self.current_target = target_data
-            # self.logger.info("Session started successfully")
             return True
             
         except Exception as e:
             self.logger.error(f"Failed to start new session: {e}")
             return False
-
 
 def main():
     parser = argparse.ArgumentParser(description="Automated Spectroscopy")
@@ -1658,20 +1621,18 @@ def main():
 
     if args.target_mode in ['tic', 'coords'] and not args.target_value:
         parser.error(f"Target mode '{args.target_mode}' requires a target value")
-
+    # Load configs (loader.py)
     config_loader = ConfigLoader(args.config_dir)
     config_loader.load_all_configs()
-    
+    # set up logging info and paths
     log_dir = Path(config_loader.get_config("paths")["logs"])
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-
     if args.target_mode == "tic":
         log_name = f"{timestamp}_{args.target_value}_spec.log"
     elif args.target_mode == "coords":
         log_name = f"{timestamp}_MANUAL_spec.log"
     else:  # mirror mode
         log_name = f"{timestamp}_MIRROR_spec.log"
-        
     logfile = setup_logging(args.log_level, log_dir, log_name)
     logger = logging.getLogger(__name__)
     logger.info(f"Logging to {logfile}")
@@ -1686,23 +1647,22 @@ def main():
     focuser_driver = None
 
     try:
-
+        # Discover cameras
         if not args.dry_run:
             logger.info("Discovering cameras...")
-            camera_manager = CameraManager()
+            camera_manager = CameraManager()    # from camera.py
             if not camera_manager.discover_cameras(config_loader.get_camera_configs()):
                 logger.warning("Full camera discovery failed, checking if guide camera available for spectroscopy...")
                 
-                # For spectroscopy, we only need the guide camera
-                guide_camera = camera_manager.get_guide_camera()
+                # For spectroscopy, we only need the 294mm guide camera
+                guide_camera = camera_manager.get_guide_camera()    # from camera.py
                 if not guide_camera or '294MM' not in guide_camera.name:
                     logger.error("294MM guide camera not found - required for spectroscopy")
                     return 1
-                
                 logger.info(f"Continuing with guide camera only for spectroscopy: {guide_camera.name}")
-            
+            # Connect to the telescope
             logger.info("Connecting to telescope...")
-            telescope_driver = AlpacaTelescopeDriver()
+            telescope_driver = AlpacaTelescopeDriver()  # from alpaca_telescope.py
             if not telescope_driver.connect(config_loader.get_telescope_config()):
                 logger.error("Failed to connect to telescope")
                 return 1
@@ -1711,19 +1671,19 @@ def main():
             focuser_driver = None
             logger.info("Connecting to focuser for spectroscopy...")
             try:
-                focuser_driver = AlpacaFocuserDriver()
-                focuser_config = config_loader.get_focuser_config()
-                
+                focuser_driver = AlpacaFocuserDriver()      # from alpaca_focuser.py
+                focuser_config = config_loader.get_focuser_config()     # from loader.py
+                # Get and report focuser info if connected
                 if focuser_config and focuser_driver.connect(focuser_config):
                     focuser_info = focuser_driver.get_focuser_info()
                     logger.info(f"Connected to focuser: {focuser_info.get('name', 'Unknown')}")
                     logger.info(f"    Current position: {focuser_info.get('position', 'Unknown')}")
                     
-                    # Get spectro focus position from config
-                    spectro_pos = focuser_config.get('spectro_focus_position', {}).get('spectro')
+                    # Get spectro focus position from devices.yaml config
+                    spectro_pos = focuser_config.get('spectro_focus_position', {}).get('spectro', 18800)
                     if spectro_pos:
                         logger.info(f"Moving focuser to spectroscopy position: {spectro_pos}")
-                        if focuser_driver.move_to_position(spectro_pos):
+                        if focuser_driver.move_to_position(spectro_pos):        # move focuser to this position, alpaca_focuser.py
                             logger.info(f"Focuser positioned for spectroscopy at {spectro_pos}")
                         else:
                             logger.warning("Failed to move focuser to spectro position - continuing anyway")
@@ -1743,20 +1703,20 @@ def main():
             tel_info = telescope_driver.get_telescope_info()
             if tel_info.get('at_park', False):
                 logger.info("Telescope is parked - unparking...")
-                if not telescope_driver.unpark():
+                if not telescope_driver.unpark():   # unpark if its parked, alpaca_telescope.py
                     logger.error("Failed to unpark telescope")
                     return 1
-            
+            # Turn on the motors
             if not telescope_driver.motor_on():
                 logger.error("Failed to turn telescope motor on")
                 return 1
             
             logger.info(f"Telescope connected: RA={tel_info.get('ra_hours', 0):.6f} h ({tel_info.get('ra_hours', 0)*15.0:.6f}°), Dec={tel_info.get('dec_degrees', 0):.6f}°")
-
+            # Start tracking monitor to ensure .Tracking stays True
             logger.info("Starting telescope tracking monitor...")
             tracking_thread, tracking_stop_event = ensure_telescope_tracking(telescope_driver, check_interval=0.5)
 
-            # Initialize spectroscopy platesolve corrector (no rotator)
+            # Initialize spectroscopy platesolve corrector (no rotator!)
             logger.info("Initializing platesolve corrector for spectroscopy...")
             try:
                 corrector = SpectroscopyCorrector(telescope_driver, config_loader)
@@ -1765,10 +1725,9 @@ def main():
                 logger.warning(f"Corrector initialization failed: {e} - continuing without")
                 corrector = None
             
-            
-            # Connect and open the covers
+            # Connect and open the covers, using alpaca_cover.py
             try:
-                cover_driver = AlpacaCoverDriver()
+                cover_driver = AlpacaCoverDriver()  
                 if cover_driver.connect(config_loader.get_cover_config()):
                     cover_info = cover_driver.get_cover_info()
                     if cover_info.get('cover_state') != 'Open':
@@ -1784,11 +1743,11 @@ def main():
                 
         else:
             logger.info("DRY RUN MODE - Simulating hardware initialization")
-
+        # === Mirroring Mode ===
         if args.target_mode == "mirror":
             mirror_file = args.target_value or config_loader.get_config("paths")["spectro_mirror_file"]
             logger.info(f"Starting mirror mode with file: {mirror_file}")
-                        
+            # Start the spectro session            
             spectro_session = SpectroscopySession(
                 camera_manager, corrector, config_loader, telescope_driver,
                 mirror_file=mirror_file,
@@ -1797,7 +1756,7 @@ def main():
                 exposure_override=args.exposure_time,
                 duration_override=args.duration
             )
-            
+            # Being monitoring for new targets, dome closure messages, shutdown conditions (observability) etc
             try:
                 spectro_session.start_monitoring(args.poll_interval)
             except KeyboardInterrupt:
@@ -1808,7 +1767,7 @@ def main():
             # Single target mode
             if args.target_mode == "tic":
                 logger.info(f"Resolving TIC target: {args.target_value}")
-                resolver = TICTargetResolver(config_loader)
+                resolver = TICTargetResolver(config_loader) # resolve target and get info using resolver.py
                 target_info = resolver.resolve_tic_id(args.target_value)
             else:
                 logger.info(f"Using manual coordinates: {args.target_value}")
@@ -1822,7 +1781,7 @@ def main():
                     # Validate coordinates
                     if not (0 <= ra <= 24) or not (-90 <= dec <= 90):
                         raise ValueError(f"Invalid coordinates: RA={float(coords[0])}, Dec={dec}")
-                    
+                    # Set manual coords target info
                     target_info = TargetInfo(
                         tic_id=f"MANUAL_{ra:.3f}h_{dec:+.3f}d",
                         ra_j2000_hours=ra,
@@ -1834,7 +1793,7 @@ def main():
                     logger.error(f"Invalid coordinates format: {e}")
                     return 1
 
-            # Check observability for single targets
+            # Check observability for single targets, uses observability.py
             logger.info("Checking target observability...")
             obs_checker = ObservabilityChecker(config_loader.get_config("observatory"))
             obs_status = obs_checker.check_target_observability(
@@ -1846,18 +1805,17 @@ def main():
             if not obs_status.observable and not args.dry_run:
                 logger.error("Target not observable")
                 return 1
-
             
             # Slew to target for single target mode
             if not args.dry_run and telescope_driver:
                 logger.info("Slewing to target...")
-                if not telescope_driver.slew_to_coordinates(
+                if not telescope_driver.slew_to_coordinates(            # from alpaca_telescope.py
                     target_info.ra_j2000_hours, target_info.dec_j2000_deg
                 ):
                     logger.error("Failed to slew to target")
                     return 1
                 else:
-                    # Cover handling with error recovery
+                    # Cover handling with error recovery, from alpaca_cover.py
                     logger.info("Connecting to cover...")
                     try:
                         cover_driver = AlpacaCoverDriver()
@@ -1876,14 +1834,14 @@ def main():
                         logger.warning(f"Cover error: {e} - continuing without")
                         cover_driver = None
 
-            # Start single session
+            # Start single imaging session
             session = SpectroscopyImagingSession(
                 camera_manager, corrector, config_loader, target_info,
                 ignore_twilight=args.ignore_twilight,
                 dry_run=args.dry_run,
                 exposure_override=args.exposure_time
             )
-            
+            # Just simulate images (print to console) if dry run mode, otherwise begin the imaging loop
             if args.dry_run:
                 session.run_simulated_acquisition()
             else:
@@ -1895,15 +1853,12 @@ def main():
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received - initiating shutdown")
         # Fall through to finally block for cleanup
-        
     except Exception as e:
         logger.error(f"Critical error: {e}")
         logger.debug("Full traceback:", exc_info=True)
-
     finally:
         # Critical cleanup - ensure hardware is safe
         logger.info("Cleaning up...")
-        
         # First: stop any background threads that might spam logs
         try:
             if 'tracking_thread' in locals() and tracking_thread.is_alive():
@@ -1921,7 +1876,7 @@ def main():
         try:
             if camera_manager:
                 logger.info("Shutting down camera coolers...")
-                camera_manager.shutdown_all_coolers()
+                camera_manager.shutdown_all_coolers()       # from camera.py
         except KeyboardInterrupt:
             logger.warning("Interrupted during camera cleanup - skipping")
         except Exception as e:
@@ -1931,9 +1886,9 @@ def main():
         try:
             if cover_driver:
                 logger.info("Closing cover...")
-                cover_driver.close_cover()
+                cover_driver.close_cover()      # from alpaca_cover.py
             if focuser_driver:
-                focuser_driver.disconnect()
+                focuser_driver.disconnect()     # from alpaca_focuser.py
         except KeyboardInterrupt:
             logger.warning("Interrupted during cover closure - skipping")
         except Exception as e:
@@ -1943,9 +1898,9 @@ def main():
         try:
             if telescope_driver:
                 logger.info("Parking telescope...")
-                telescope_driver.park()
-                telescope_driver.motor_off()
-                telescope_driver.disconnect()
+                telescope_driver.park()         # from alpaca_telescope.py
+                telescope_driver.motor_off()    # from alpaca_telescope.py
+                telescope_driver.disconnect()   # from alpaca_telescope.py
         except KeyboardInterrupt:
             logger.warning("Interrupted during telescope cleanup - telescope may not be parked!")
         except Exception as e:
