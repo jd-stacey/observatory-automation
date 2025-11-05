@@ -649,14 +649,17 @@ class ImagingSession:
             
         current_interval = self._get_current_correction_interval()
         current_count = self.acquisition_count if self.current_phase == SessionPhase.ACQUISITION else self.science_count
+        logger.debug(f"  DEBUG: count={current_count} & count%interval={current_count % current_interval}")
         
-        if current_count > 0 and (current_count % current_interval) == 0:
+        if current_count > 0 and (current_count % current_interval) == 0:    
             # Make sure we don't repeat corrections
             if self.current_phase == SessionPhase.ACQUISITION:
+                logger.debug(f"    Should this correction be applied?: {current_count != self.last_correction_exposure}")
                 return current_count != self.last_correction_exposure
             else:
+                logger.debug(f"    Should this correction be applied?: {self.exposure_count != self.last_correction_exposure}")
                 return self.exposure_count != self.last_correction_exposure
-                
+        logger.debug(f"    Should this correction be applied?: False")        
         return False
     
     def _apply_periodic_correction(self, last_frame_path: str = None) -> bool:
