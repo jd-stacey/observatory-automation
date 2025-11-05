@@ -373,18 +373,6 @@ class ImagingSession:
                 # Check if we are within threshold to switch from acq to sci modes
                 if total_offset <= threshold:
                     logger.info(f"Target acquired! Total offset: {total_offset:.2f}\" <= {threshold}\" ({data_source})")
-                    
-                    # Apply the final correction before switching phases
-                    logger.info("Applying final acquisition correction...")
-                    try:
-                        final_result = self.corrector.apply_single_correction(latest_captured_sequence=self.acquisition_count)
-                        if final_result.applied:
-                            logger.info(f"Final correction applied: {final_result.reason}")
-                            time.sleep(final_result.settle_time)
-                        else:
-                            logger.debug(f"Final correction: {final_result.reason}")
-                    except Exception as e:
-                        logger.warning(f"Final correction failed: {e} - proceeding to science phase anyway")
                     return True
                 else:
                     logger.debug(f"Still acquiring - offset: {total_offset:.2f}\" > {threshold}\" ({data_source})")
@@ -484,7 +472,25 @@ class ImagingSession:
                 if (self.current_phase == SessionPhase.ACQUISITION and 
                     self.acquisition_count > 0 and  # At least one acquisition frame
                     self._check_acquisition_complete()):
+                    
+                    # Apply final acquisition correction before switching
+                    logger.info("Applying final acquisition correction...")
+                    try:
+                        final_result = self.corrector.apply_single_correction(
+                            latest_captured_sequence=self.acquisition_count,
+                            current_frame_path=image_filepath
+                        )
+                        if final_result.applied:
+                            logger.info(f"Final correction applied: {final_result.reason}")
+                            time.sleep(final_result.settle_time)
+                        else:
+                            logger.debug(f"Final correction: {final_result.reason}")
+                    except Exception as e:
+                        logger.warning(f"Final correction failed: {e} - proceeding to science phase anyway")
+                    
+                    # Now switch phases
                     self._switch_to_science_phase()
+                    continue
                 
                 # Check general termination conditions
                 should_terminate, reason = self.check_termination_conditions(max_exposures, duration_hours)
