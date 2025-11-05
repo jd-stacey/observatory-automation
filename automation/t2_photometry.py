@@ -204,7 +204,7 @@ def main():
         '--correction-interval', 
         type=int, 
         default=5,
-        help="Apply correction every N exposures (default: 5)"
+        help="Apply corrections every N exposures during science mode (default: 5)"
     )
     
     parser.add_argument(

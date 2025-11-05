@@ -162,6 +162,7 @@ def main():
     cover_driver = None
     filter_driver = None
     camera_manager = None
+    focuser_driver = None
     
     try:
         # Load configuration files
