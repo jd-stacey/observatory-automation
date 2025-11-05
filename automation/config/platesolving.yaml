@@ -20,19 +20,19 @@ spectro_thresholds:
 
 acquisition:
   enabled: true
-  exposure_time: 10.0              # exposure time during acquisition phase
-  correction_interval: 2          # checks for correction required between N frames during acquisition
-  max_total_offset_arcsec: 3.0    # once total offset <= this number, switch to science frames/folder
-  max_attempts:  50              # dont acquire forever and ever and ever and ever and ever
+  exposure_time: 10.0            # exposure time during acquisition phase
+  correction_interval: 1         # checks for correction required between N frames during acquisition
+  max_total_offset_arcsec: 3.0   # once total offset <= this number, switch to science frames/folder
+  max_attempts:  40              # dont acquire forever and ever and ever and ever and ever
   folder_suffix: "_acq"           
 
 spectro_acquisition:
   enabled: true
-  exposure_time: 10.0                    # default initial exposure time (can be overridden using --exposure-time CLI)
+  exposure_time: 10.0                   # default initial exposure time (can be overridden using --exposure-time CLI)
   correction_interval: 1                # checks for correction after EVERY frame during acquisition
-  max_total_offset_arcsec: -1.0 #1.0          # tighter threshold for spectroscopy fiber alignment - ###MAYBE JUST SET THIS NEGATIVE TO PREVENT ACQ->SCI altogether
-  max_attempts: 99999999999999 #45                      # max num of acq frames to take - change this to 1 to bypass acq phase
-  default_session_duration_hours: 6.0   # Default hours per imaging session (can be overridden using --duration CLI)
+  max_total_offset_arcsec: -1.0 #1.0    # tighter threshold for spectroscopy fiber alignment - ###MAYBE JUST SET THIS NEGATIVE TO PREVENT ACQ->SCI altogether
+  max_attempts: 99999999999999 #45      # max num of acq frames to take - change this to 1 to bypass acq phase
+  default_session_duration_hours: 10.0  # Default hours per imaging session (can be overridden using --duration CLI)
   folder_suffix: "_acq"
   
   # New: Adaptive exposure settings for handling platesolve failures
