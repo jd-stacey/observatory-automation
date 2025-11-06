@@ -49,6 +49,8 @@ class PlatesolveCorrector:
         self.cumulative_zero_time = 0
         self.rotator_driver = rotator_driver
         
+        self.raw_total_offset_arcsec = None # store raw total offset from corrector for acq->sci determination
+        
         # NEW: Add these fields for acquisition memory
         self.store_last_measurements = store_last_measurements
         if store_last_measurements:
@@ -249,6 +251,8 @@ class PlatesolveCorrector:
             dec_offset_arcsec = dec_offset_deg * 3600.0
             total_offset_arcsec = math.sqrt(ra_offset_arcsec**2 + dec_offset_arcsec**2)
             
+            self.raw_total_offset_arcsec = total_offset_arcsec      # update raw total offset value for acq->sci checks
+            
             logger.debug(f"Raw offsets: RA={ra_offset_arcsec:.2f}\" ({ra_offset_deg:.8f}°), Dec={dec_offset_arcsec:.2f}\" ({dec_offset_deg:.8f}°), "
                         f"Rot={rot_offset_deg:.6f}°, Total={total_offset_arcsec:.4f}\"")
             
@@ -260,19 +264,19 @@ class PlatesolveCorrector:
             if total_offset_arcsec < min_threshold:
                 scale_factor = 0.0
                 settle_time = 2.0
-                logger.debug(f"Offset below minimum threshold ({min_threshold}), no correction")
+                logger.debug(f"Offset below minimum threshold ({min_threshold}\"), no correction should be applied")
             elif total_offset_arcsec < small_threshold:
                 scale_factor = 0.0
-                settle_time = base_settle_time * 5.0
-                logger.debug("Small offset, no correction applied")
+                settle_time = base_settle_time * 1.0
+                logger.debug(f"Small offset (<{small_threshold}\"), no correction should be applied")
             elif total_offset_arcsec > large_threshold:
                 scale_factor = 1.0  # CHANGED from 0.9 - apply full correction
-                settle_time = base_settle_time * 5.0
-                logger.debug("Large offset, apply full correction")
+                settle_time = base_settle_time * 2.0
+                logger.debug("Large offset, full correction should be applied")
             else:
                 scale_factor = self.platesolve_config.get('correction_scale_factor', 1.0)
-                settle_time = base_settle_time * 7.0
-                logger.debug("Normal offset, apply full correction")
+                settle_time = base_settle_time * 2.0
+                logger.debug("Normal offset, full correction should be applied")
                 
             ra_offset_deg *= scale_factor
             dec_offset_deg *= scale_factor
@@ -614,6 +618,7 @@ class PlatesolveCorrector:
                         'pending_ra_offset_arcsec': ra_offset_arcsec,
                         'pending_dec_offset_arcsec': dec_offset_arcsec,
                         'pending_total_offset_arcsec': total_offset_arcsec,
+                        'pending_raw_total_offset_arcsec': self.raw_total_offset_arcsec,
                         'pending_rotation_offset_deg': rot_offset_deg,
                         'calculated_settle_time': settle_time
                     })
