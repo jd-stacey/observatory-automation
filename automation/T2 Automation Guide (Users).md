@@ -329,25 +329,34 @@ python t2_spectro.py coords "44.5 -30.2"
 python t2_spectro.py mirror
 ```
 
-#### Log Parsing (for mirror mode only)
-To enable log parsing, open Windows Powershell from the Start Menu <img src="img/powershell.png" width="200" style="vertical-align: text-bottom;"/>
+#### Enable T5 Logging (for mirror mode only, on Telcom 5)
 
-Change to the P: drive by typing:
+Log into Telcom5 and confirm that an instance of Windows Powershell is running in the taskbar, e.g.: <img src="img/t5loggingcheck.PNG" width="375" style="vertical-align: text-bottom;"/>
+
+If it's running and showing that it is copying lines, no further action is required and you can exit Telcom 5, e.g.: 
+
+<img src="img/t5logging.PNG" width="300" style="vertical-align: text-bottom;"/>
+
+Otherwise, open Windows Powershell and type the following set of commands to start T5 logging:
+
 ```bash
 P:
-```
-
-Change directories to the temp folder by typing:
-```bash
 cd temp
+powershell -ExecutionPolicy Bypass -File "P:\temp\copylog_T5.ps1"
 ```
 
-Run the log parser by typing:
+<img src="img/t5loggingsetup.PNG" width="350" style="vertical-align: text-bottom;"/>
+
+#### Log Parsing (for mirror mode only, on RaptorTCU)
+To enable log parsing, open Windows Powershell from the Start Menu <img src="img/powershell.png" width="200" style="vertical-align: text-bottom;"/>
+
+Run the following set of commands to change directories and start the log parser:
 ```bash
+P:
+cd temp
 python parse_telcom_log.py
 ```
 Leave Powershell running - it will continuously check for new spectroscopy targets and monitor dome closure messages from the other telescope.
-<div style="page-break-after: always;"></div>
 
 ### Command Line Arguments
 
@@ -364,7 +373,7 @@ Command line arguments can be used for additional customization and to override 
 
 ### Imaging and Platesolving During Spectroscopy
 
-Imaging during spectroscopy is only used for platesolving and guiding (positioning the star directly over the fibre), so the calculation of exposure times is adaptive, automatically adjusting based on responses from the external platesolver.
+Imaging during spectroscopy is only used for platesolving and guiding (positioning the star directly over the fibre), so the calculation of exposure times is adaptive, automatically adjusting based on responses from the external platesolver. 
 
 ### Files and Directories
 Directories are automatically created and files saved according to date, e.g.: `P:\Spectroscopy\YYYY\YYYYMMDD\T2\TIC123456789`
