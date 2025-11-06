@@ -342,31 +342,21 @@ class ImagingSession:
             total_offset = None
             data_source = None
             
+            # New check to solve issue of skipping small solves under min threshold instead of changing phases
             # First priority: fresh platesolve data
             if correction_status.get('json_file_ready', False):
-                pending_offset = correction_status.get('pending_total_offset_arcsec')
-                pending_ra = correction_status.get('pending_ra_offset_arcsec', 0.0)
-                pending_dec = correction_status.get('pending_dec_offset_arcsec', 0.0)
-                
-                # Skip if this is a failed solve (exact zeros)
-                if pending_ra == 0.0 and pending_dec == 0.0:
-                    logger.debug("Skipping 0,0 platesolve result (failed solve)")
-                    total_offset = None  # Ignore this result
-                else:
-                    total_offset = pending_offset
+                raw_pending_offset = correction_status.get('pending_raw_total_offset_arcsec')
+                if raw_pending_offset is not None and raw_pending_offset > 0:
+                    total_offset = raw_pending_offset
                     data_source = "fresh platesolve"
             
             # Second priority: last known measurement (if recent enough)
             if total_offset is None and correction_status.get('last_total_offset_arcsec') is not None:
                 measurement_age = correction_status.get('last_measurement_age_seconds')
-                last_ra = correction_status.get('last_ra_offset_arcsec', 0.0)
-                last_dec = correction_status.get('last_dec_offset_arcsec', 0.0)
+                cached_total = correction_status.get('last_total_offset_arcsec')
                 
-                # Skip if cached measurement was also a failed solve
-                if last_ra == 0.0 and last_dec == 0.0:
-                    logger.debug("Skipping cached 0,0 measurement (was a failed solve)")
-                elif measurement_age is not None and measurement_age < 300:  # 5 minutes
-                    total_offset = correction_status.get('last_total_offset_arcsec')
+                if measurement_age is not None and measurement_age < 300:   # 5 minutes
+                    total_offset = cached_total
                     data_source = f"cached ({measurement_age:.0f}s ago)"
                 
             if total_offset is not None:
