@@ -55,7 +55,7 @@ class TICTargetResolver:
                         self.config['gaia_magnitude'].update(target_config['gaia_magnitude'])
                         logger.debug("Loaded target resolution config from exposures.yaml")
                     else:
-                        logger.debug("No gaia_magnitude config found, using defaults and tic lookup")
+                        logger.debug("No gaia_magnitude config found (this is normal), using defaults and tic lookup")
                 else:
                     logger.debug("No target_resolution config found, using defaults and tic lookup")
                     
