@@ -99,7 +99,8 @@ def setup_logging(log_level: str, log_dir: Path, log_name: str = None):
 
 def wait_for_observing_conditions(target_info, obs_checker, ignore_twilight=False, poll_interval=60.0):
     """Simple waiting function for observing conditions, ensures Sun and target altitudes meet conditions, 
-    checks every poll_interval seconds and then proceeds with observations. Can set up to max_wait_hours hours in advance"""
+    checks every poll_interval seconds and then proceeds with observations. Can set up to max_wait_hours hours in advance.
+    Will immediately return True if ignore_twilight is set to True."""
     logger = logging.getLogger(__name__)
     
     if ignore_twilight:
@@ -212,21 +213,14 @@ def main():
         help="Manual coordinates: 'RA_DEGREES DEC_DEGREES (overrides TIC lookup)"
     )
     
-    # TESTING WITHOUT TEST_ACQUISITION  
-    # parser.add_argument(
-    #     '--test-acquisition',
-    #     action='store_true',
-    #     help="Test acquisition flow without taking images (for daytime testing)"
-    # )
-    
     parser.add_argument(
         '--no-park',
         action='store_true',
         help="Skip parking telescope at end of session (default: auto-park)"
     )
-    
     args = parser.parse_args()
     
+    # Ensure either a TIC ID or coordinates (but not both) are entered during program call
     if not args.tic_id and not args.coords:
         parser.error("Must provide either tic_id or --coords")
     if args.tic_id and args.coords:
@@ -275,7 +269,7 @@ def main():
         config_loader = ConfigLoader(args.config_dir)   # from loader.py
         config_loader.load_all_configs()                # from loader.py
         logger.info('Configuration loaded successfully')
-        
+        # If coordinates are entered, parse them and update target info, otherwise resolve target using TIC ID
         if args.coords:
             logger.info(f"Using manual coordinates: {args.coords}")
             # Parse coordinates
@@ -283,7 +277,7 @@ def main():
                 coords_parts = args.coords.strip().split()
                 if len(coords_parts) != 2:
                     raise ValueError("Expected 'RA_DEGREES DEC_DEGREES'")
-                ra_hours = float(coords_parts[0]) / 15.0
+                ra_hours = float(coords_parts[0]) / 15.0        # RA degs to hours
                 dec_deg = float(coords_parts[1])
                 
                 # Validate ranges
@@ -306,25 +300,24 @@ def main():
                 logger.error(f"Invalid coordinates format '{args.coords}': {e}")
                 logger.error("Use format: --coords 'RA_HOURS DEC_DEGREES' (e.g., '12.345 -67.890')")
                 return 1
-        else:
+        else:   # otherwise use TIC ID and resolve target and get target info
             logger.info(f"Resolving target: {args.tic_id}")
             target_resolver = TICTargetResolver(config_loader)          # from resolver.py
             target_info = target_resolver.resolve_tic_id(args.tic_id)   # from resolver.py
-        
-        exposure_time = config_loader.get_exposure_time(target_info.gaia_g_mag, args.filter.upper())
+        # Set base exposure time
+        exposure_time = config_loader.get_exposure_time(target_info.gaia_g_mag, args.filter.upper())    # from loader.py
         logger.info(f"Calculated exposure time: {exposure_time} s for G={target_info.gaia_g_mag:.2f}, filter={args.filter.upper()}")
         logger.info("Checking target observability...")
-        try:
+        try:    # confirm target is observable, otherwise wait for conditions to be met
             observatory_config = config_loader.get_config('observatory')    # from loader.py
             checker = ObservabilityChecker(observatory_config)      # from observability.py
-            obs_status = checker.check_target_observability(
+            obs_status = checker.check_target_observability(        # from observability.py
                 target_info.ra_j2000_hours,
                 target_info.dec_j2000_deg,
                 ignore_twilight=args.ignore_twilight
             )
         
-            logger.info(f"Current target altitude: {obs_status.target_altitude:.1f}°")
-            logger.info(f"Current sun altitude: {obs_status.sun_altitude:.1f}°")
+            logger.info(f"Target altitude: {obs_status.target_altitude:.1f}°, Sun altitude: {obs_status.sun_altitude:.1f}°")
             if obs_status.airmass:
                 logger.debug(f"Airmass: {obs_status.airmass:.2f}")  # airmass just for logging
                 
@@ -332,7 +325,7 @@ def main():
             if obs_status.observable:
                 logger.info("Target is immediately observable")
             else:
-                # Show what conditions are not met
+                # Otherwise, show what conditions are not met
                 logger.info("Current observability status:")
                 for reason in obs_status.reasons:
                     logger.info(f"  {reason}")
@@ -341,7 +334,7 @@ def main():
                 if args.dry_run:
                     logger.warning("Target not currently observable, but continuing with dry run")
                 else:
-                    # Wait for conditions
+                    # If not dry run, Wait for observability conditions to be met before continuing
                     logger.info("Waiting for observing conditions...")
                     if not wait_for_observing_conditions(target_info, checker, args.ignore_twilight):
                         logger.error("Target will not be observable - aborting")
@@ -459,8 +452,8 @@ def main():
                 filter_driver = AlpacaFilterWheelDriver()                   # from alpaca_filterwheel.py
                 filter_config = config_loader.get_filter_wheel_config()     # from loader.py
                 # Get and report filter information
-                if filter_config and filter_driver.connect(filter_config):
-                    filter_info = filter_driver.get_filter_info()
+                if filter_config and filter_driver.connect(filter_config):  # from alpaca_filterwheel.py
+                    filter_info = filter_driver.get_filter_info()           # from alpaca_filterwheel.py
                     logger.info(f"Connected to filter wheel: {filter_info.get('total_filters', 0)} filters")
                     logger.info(f"Filters: {filter_info.get('all_filters', [])}")
                     logger.info(f"Current filter: {filter_info.get('filter_name', 'Unknown')}")
@@ -506,7 +499,7 @@ def main():
                 target_info.ra_j2000_hours,
                 target_info.dec_j2000_deg
             )
-            
+            # if the slew didnt work, log error and shut down
             if not slew_success:
                 logger.error('Failed to slew to target')
                 telescope_driver.motor_off()
@@ -548,7 +541,7 @@ def main():
                     ignore_twilight=args.ignore_twilight,
                     exposure_override=args.exposure_time
                 )
-                session.correction_interval = args.correction_interval
+                session.correction_interval = args.correction_interval  # set session correctional interval from CLI argument
                 session_success = session.start_imaging_loop(   # from session.py
                     max_exposures=args.max_exposures,
                     duration_hours=args.duration,
@@ -602,7 +595,7 @@ def main():
         logger.info(" "*30+"SESSION COMPLETE")
         logger.info("="*75)
         return 0
-    
+    # manager errors and exceptions
     except ConfigurationError as e:
         logger.error(f"Configuration error: {e}")
         return 1
@@ -639,29 +632,29 @@ def main():
         try:
             if camera_manager:
                 logger.info("Shutting down camera coolers...")
-                camera_manager.shutdown_all_coolers()
+                camera_manager.shutdown_all_coolers()   # from camera.py
             if cover_driver:
                 logger.info("Closing cover...")
-                cover_driver.close_cover()
-            if filter_driver:
-                filter_driver.disconnect()
+                cover_driver.close_cover()  # from alpaca_cover.py
+            if filter_driver:   
+                filter_driver.disconnect()  # from alpaca_filterwheel.py
             if focuser_driver:
-                focuser_driver.disconnect()
+                focuser_driver.disconnect() # from alpaca_focuser.py
             if 'tracking_thread' in locals():
                 logger.info("Stopping telescope tracking monitor...")
                 tracking_stop_event.set()
                 tracking_thread.join(timeout=2.0)
-                if tracking_thread.is_alive():
+                if tracking_thread.is_alive():  # confirm it shut down
                     logger.warning("Tracking monitor did not shut down cleanly")
             if telescope_driver:
-                if not args.no_park:
+                if not args.no_park:        # park telescope (unless --no-park was entered)
                     logger.info("Parking telescope...")
-                    telescope_driver.park()
+                    telescope_driver.park() # from alpaca_telescope.py
                 else:
                     logger.info("Skipping telescope parking (--no-park specified)")    
                 logger.info("Turning telescope motor off...")
-                telescope_driver.motor_off()
-                telescope_driver.disconnect()
+                telescope_driver.motor_off()    # from alpaca_telescope.py
+                telescope_driver.disconnect()   # from alpaca_telescope.py
             logger.info("="*75)
             logger.info(" "*29+"PROGRAM TERMINATED")
             logger.info("="*75)
