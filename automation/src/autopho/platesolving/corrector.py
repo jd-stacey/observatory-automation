@@ -155,8 +155,11 @@ class PlatesolveCorrector:
                     content = f.read()
                 data = json.loads(content)
                 
-            logger.debug(f"    JSON contents - fitsname: {data.get('fitsname', {}).get('0', 'MISSING')}")
-            logger.debug(f"Platesolve JSON file ready (age: {age_seconds:.0f} s)")
+            logger.debug(f"  PS JSON file ready (age: {age_seconds:.0f} s)")
+            logger.debug(f"   - fitsname: {data.get('fitsname', {}).get('0', 'MISSING')}")
+            logger.debug(f"   - ra_offset: {data.get('ra_offset', {}).get('0', 'MISSING')}°")
+            logger.debug(f"   - dec_offset: {data.get('dec_offset', {}).get('0', 'MISSING')}°")
+            
             return True, data
         
         except json.JSONDecodeError as e:
