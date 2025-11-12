@@ -561,7 +561,7 @@ class ImagingSession:
         # Get the current interval and the current frame counts based on phase    
         current_interval = self._get_current_correction_interval()
         current_count = self.acquisition_count if self.current_phase == SessionPhase.ACQUISITION else self.science_count
-        logger.debug(f"  DEBUG: count={current_count} & count%interval={current_count % current_interval}")
+        logger.debug(f"  DEBUG: count={current_count} & count%corrinterval={current_count % current_interval} (only apply corr. if 0)")
         # Check if we have at least one frame and if we are at the required interval
         if current_count > 0 and (current_count % current_interval) == 0:    
             # Make sure we don't repeat corrections
