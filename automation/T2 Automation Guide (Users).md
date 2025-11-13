@@ -247,10 +247,10 @@ Command line arguments can be used for additional customization and to override 
 |`--filter` | Selects the filter to use (L/B/G/R/C/I/H) | `C` |
 |`--exposure-time` (Recommended) | Override exposure time calculations (seconds) | `-` |
 |`--log-level` | Terminal display logging level (DEBUG/INFO/WARNING/ERROR) | `INFO` |
-|`--duration` | Session duration (hours) | `-` |
-|`--max-exposures` | Maximum number of exposures to take | `-` |
+|`--duration` | Set max session duration (hours) | `-` |
 |`--ignore-twilight` | Bypass twilight (Sun Altitude) checks for daytime testing | `False` |
 |`--no-park` | Skip telescope parking at end of session | `False` |
+<div style="page-break-after: always;"></div>
 
 Notes:
 - Filter options: L=Lum, B=Blue, G=Green, R=Sloan-r, C=Clear, I=Sloan-i, H=H-alpha
@@ -278,7 +278,7 @@ python t2_photometry.py 123456789 --exposure-time 5.0 --log-level DEBUG
 ### On Observability
 If your target is not immediately observable (hasn't risen about 30° altitude yet, or it is not quite twilight) the program will automatically keep checking for observability at regular intervals (60 seconds) and will automatically start observations once observability conditions are satisfied. E.g.:
 
-<img src="img/observability.png"/>
+<img src="img/observability.png" height="75px"/>
 
 ### Files and Directories
 Directories are automatically created and files saved according to date (images in folders with the '_acq' suffix are used for target acquisition purposes), e.g.: `P:\Photometry\YYYY\YYYYMMDD\T2\TIC123456789`
