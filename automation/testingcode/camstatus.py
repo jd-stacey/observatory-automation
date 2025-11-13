@@ -14,6 +14,7 @@ def get_camera_status(camera_id):
     
     try:
         C = Camera(ALPACA_ADDRESS, camera_id)
+        C.Connected = True
         
         properties = {
         'Connected': lambda: C.Connected,
@@ -37,8 +38,13 @@ def get_camera_status(camera_id):
         'ExposureResolution': lambda: C.ExposureResolution,
         'ImageReady': lambda: C.ImageReady,
         'CanAbortExposure': lambda: C.CanAbortExposure,
+        'CanStopExposure': lambda: C.CanStopExposure,
         'PixelSizeX': lambda: C.PixelSizeX,
         'PixelSizeY': lambda: C.PixelSizeY,       
+        'HasShutter': lambda: C.HasShutter,   
+        'FullWellCapacity': lambda: C.FullWellCapacity,   
+        'MaxADU': lambda: C.MaxADU,   
+        'ElectronsPerADU': lambda: C.ElectronsPerADU,   
         }
         
         for prop_name, prop_func in properties.items():
@@ -108,6 +114,10 @@ def format_camera_status(status):
     'MaxBinY': 'Max Bin Y',
     'PixelSizeX': 'Pixel Size X',
     'PixelSizeY': 'Pixel Size Y',
+    'MaxADU': 'Max ADU',
+    'FullWellCapacity': 'Full Well Cap.',
+    'ElectronsPerADU': 'Electrons/ADU',
+    'HasShutter': 'Has Shutter',
     }
     
     print(f"\nIMAGING:")
@@ -122,6 +132,7 @@ def format_camera_status(status):
     'ExposureResolution': 'Exp. Increment',
     'ImageReady': 'Image Ready',
     'CanAbortExposure': 'Can Abort',
+    'CanStopExposure' : 'Can Stop',
     }
     
     print(f"\nEXPOSURE:")
