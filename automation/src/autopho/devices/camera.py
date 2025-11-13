@@ -162,19 +162,82 @@ class CameraDevice:
                 logger.debug(f"CCD Temperature: {temp:.1f} C")
             except:
                 pass
+            
+            ### DEBUGGING CAMERA STATE IN VARIOUS PLACES ###
+            try: 
+                camstate = cam.CameraState.name if hasattr(cam.CameraState, 'name') else str(cam.CameraState) 
+                logger.debug(f"  -- Cam State before exp start: {camstate}") 
+            except: 
+                pass 
+            ###
+            
+            
             # Start the exposure via Alpaca function call
             cam.StartExposure(exposure_time, light)
+            time.sleep(0.05)
+            
+            ### DEBUGGING CAMERA STATE IN VARIOUS PLACES ###
+            try: 
+                camstate = cam.CameraState.name if hasattr(cam.CameraState, 'name') else str(cam.CameraState) 
+                logger.debug(f"  -- Cam State after exp start: {camstate}") 
+            except: 
+                pass 
+            ###
+            
             start_time = time.time()
-            # Log progress (likely bypassed but here as a failsafe - so shouldnt actually show up in logs)
-            while not cam.ImageReady:
+            image_timeout = max(10.0, exposure_time * 3)
+            image_poll_interval = min(0.05, max(0.01, exposure_time / 20.0))
+            # Wait for exposure to finish
+            while True:
                 try:
-                    percent = cam.PercentCompleted
-                    elapsed = time.time() - start_time
-                    if elapsed % 5 < 0.5:
-                        logger.info(f"Exposure progress: {percent:.1f}% ({elapsed:.1f} s)")
-                except:
-                    pass
-                time.sleep(min(0.5, exposure_time / 10))
+                    image_ready = bool(cam.ImageReady)
+                except Exception as e:
+                    logger.debug(f"ImageReady read error: {e}")
+                    image_ready = False
+                    
+                if image_ready:
+                    break
+                
+                # also try camera state
+                try:
+                    cs = cam.CameraState
+                    state_name = cs.name if hasattr(cs, 'Name') else str(cs)
+                except Exception as e:
+                    state_name = None
+                    
+                if state_name and any(kw in state_name.lower() for kw in ("idle", "reading", "download")):
+                    break
+            
+                if (time.time() - start_time) > image_timeout:
+                    logger.error(f"Exposure timeout after {(time.time()-start_time):.1f} s (timeout={image_timeout} s). Attempting AbortExposure.")
+                    try:
+                        cam.AbortExposure()
+                    except Exception as e:
+                        logger.warning(f"AbortExposure failed: {e}")
+                    raise CameraError(f"Exposure timeout after {(time.time()-start_time):.1f} s")
+                time.sleep(image_poll_interval)
+            
+            ### DEBUGGING CAMERA STATE IN VARIOUS PLACES ###
+            try: 
+                camstate = cam.CameraState.name if hasattr(cam.CameraState, 'name') else str(cam.CameraState) 
+                logger.debug(f"  -- Cam State after exp end: {camstate}") 
+            except: 
+                pass 
+            ###
+            
+            
+            # Old code - note PercentCompleted isnt implement on our driver.
+            # start_time = time.time()
+            # Log progress (likely bypassed but here as a failsafe - so shouldnt actually show up in logs)
+            # while not cam.ImageReady:
+                # try:
+                #     percent = cam.PercentCompleted
+                #     elapsed = time.time() - start_time
+                #     if elapsed % 5 < 0.5:
+                #         logger.info(f"Exposure progress: {percent:.1f}% ({elapsed:.1f} s)")
+                # except:
+                #     pass
+                # time.sleep(min(0.5, exposure_time / 10))
                 
             logger.debug('Exposure complete, reading image...')
             image_array = np.array(cam.ImageArray).transpose()      # Convert image array to numpy array for summary statistics
