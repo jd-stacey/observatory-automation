@@ -192,7 +192,7 @@ def main():
     parser.add_argument(
         '--max-exposures', 
         type=int, 
-        help="Maximum exposures to take"
+        help="Maximum exposures to take (NOT IMPLEMENT DON'T USE)"
     )
     
     parser.add_argument(
