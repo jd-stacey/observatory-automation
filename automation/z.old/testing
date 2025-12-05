@@ -41,7 +41,7 @@ The system handles telescope slewing, guide camera imaging, platesolving correct
 - External platesolving software (e.g., Minerva Photometry)
 - Required Python packages (see imports in script)
 
-## Configuration Files
+## Configuration Files.
 
 The system requires several YAML configuration files in a `config/` directory:
 
