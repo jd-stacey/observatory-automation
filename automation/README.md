@@ -1,7 +1,3 @@
----
-title: T2 Automation Guide (Users)
----
-
 
 # T2 Automation Software - User Guide (Drafting...)
 ## At Start-up (RaptorTCU) - For Both Photometry and Spectroscopy
@@ -375,3 +371,4 @@ You can now exit the Shutdown Tool.
 
 
 <img src="img/"/>
+
