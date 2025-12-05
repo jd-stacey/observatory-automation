@@ -553,11 +553,6 @@ class FieldRotationTracker:
                     time.sleep(sleep_interval)
                     continue
 
-                # Skip if we're in cooldown period (after flip or regular move)
-                if _t.time() < getattr(self, "_cooldown_until", 0.0):
-                    time.sleep(sleep_interval)
-                    continue
-
                 # Skip if rotator is currently moving
                 if self.rotator.is_moving():
                     time.sleep(sleep_interval)
@@ -572,6 +567,11 @@ class FieldRotationTracker:
                     else:
                         logger.error("[field-rot] Flip failed, will retry next cycle")
                     continue  # Skip normal tracking this cycle
+                
+                # Skip if we're in cooldown period (after flip or regular move)
+                if _t.time() < getattr(self, "_cooldown_until", 0.0):
+                    time.sleep(sleep_interval)
+                    continue
 
                 # Normal tracking logic
                 required_pa = self.calculate_required_pa()
