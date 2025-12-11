@@ -458,31 +458,31 @@ def main():
                     logger.info(f"Filters: {filter_info.get('all_filters', [])}")
                     logger.info(f"Current filter: {filter_info.get('filter_name', 'Unknown')}")
                     # Set filter to required position (delete once filter/focus coordination implemented)
-                    if filter_driver.change_filter(args.filter.upper()):
-                        logger.info(f"Filter set to: {args.filter.upper()}")
-                    else:
-                        logger.warning(f"Failed to change to filter {args.filter.upper()} - continuing with current filter")
+                    # if filter_driver.change_filter(args.filter.upper()):
+                    #     logger.info(f"Filter set to: {args.filter.upper()}")
+                    # else:
+                    #     logger.warning(f"Failed to change to filter {args.filter.upper()} - continuing with current filter")
                         
-                    
                     ##### #FILTER/FOCUS COORDINATION HERE - (Uncomment when optimal focus positions are in devices.yaml)
                     ##### #Also delete/comment the small if/else block above (containing change_filter)
+                    
                     # Initialise Focuser/Filter coordination
-                    # logger.info("Initializing filter/focus coordination...")
-                    # focus_filter_mgr = FocusFilterManager(filter_driver=filter_driver, focuser_driver=focuser_driver)
+                    logger.info("Initializing filter/focus coordination...")
+                    focus_filter_mgr = FocusFilterManager(filter_driver=filter_driver, focuser_driver=focuser_driver)
                     
                     # Use manager to set filter position and focus position
-                    # if focus_filter_mgr:
-                    #     logger.info(f"Setting filter to {args.filter.upper()} with focus adjustment...")
-                    #     try:
-                    #         filter_changed, focus_changed = focus_filter_mgr.change_filter_with_focus(args.filter.upper())
-                    #         if filter_changed:
-                    #             logger.info(f"Filter set to: {args.filter.upper()}")
-                    #         if focus_changed:
-                    #             logger.info(f"Focus adjusted for filter {args.filter.upper()}")
-                    #         if not filter_changed and not focus_changed:
-                    #             logger.info("Already at target filter/focus configuration")
-                    #     except FocusFilterManagerError as e:
-                    #         logger.warning(f"Filter/focus coordination failed: {e} - continuing anyway")
+                    if focus_filter_mgr:
+                        logger.info(f"Setting filter to {args.filter.upper()} with focus adjustment...")
+                        try:
+                            filter_changed, focus_changed = focus_filter_mgr.change_filter_with_focus(args.filter.upper())
+                            if filter_changed:
+                                logger.info(f"Filter set to: {args.filter.upper()}")
+                            if focus_changed:
+                                logger.info(f"Focus adjusted for filter {args.filter.upper()}")
+                            if not filter_changed and not focus_changed:
+                                logger.info("Already at target filter/focus configuration")
+                        except FocusFilterManagerError as e:
+                            logger.warning(f"Filter/focus coordination failed: {e} - continuing anyway")
                     
                 else:
                     logger.warning(f"Failed to connect to filter wheel - continuing with current filter")
