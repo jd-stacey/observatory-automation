@@ -13,7 +13,7 @@ calibration:
 wrap_management:
   enabled: true
   lookahead_minutes: 5.0        # How far ahead to check for limits
-  flip_margin_deg: 1.0          # Margin from limits to trigger 180° flip
+  flip_margin_deg: 1.25          # Margin from rotator mechanical limits to trigger 180° flip
   flip_timeout_duration: 45.0   # Timeout duration in seconds for rotator during 180° flip (at mech limits)
                               
 

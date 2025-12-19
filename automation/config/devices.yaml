@@ -19,7 +19,7 @@ rotator:
     safe_position_deg: 210    # if "safe_position" used as strategy, this will be where the rotator initalises its position to
   limits:
     warning_margin_deg: 3.0    # when to warn within limits (e.g. will warn limits approaching within N degrees of max/min)
-    emergency_margin_deg: 1.0   # when to reject within limits (e.g. will reject moves within N degrees of max/min)
+    emergency_margin_deg: 0.5   # when to reject within limits (e.g. will reject moves within N degrees of max/min)
   
 
 cover:
@@ -36,13 +36,13 @@ focuser:
   device_number: 0
   # Dict of optimal/starting focus positions for each filter
   focus_positions:          # starting focus positions for each filter (also used as starting points for t2_focus_sweep.py testing)
-    l: 15120 # need to re-test
-    b: 15100 # need to re-test
-    g: 15110 # need to re-test
-    r: 15130 # need to re-test
-    c: 15040 # prev-15140
-    i: 15120 # need to re-test
-    h: 15140 # need to re-test
+    l: 15080 #15120 # !!need to re-test
+    b: 15080 #15100 # !!need to re-test
+    g: 15080 #15110 # !!need to re-test
+    r: 15080 #15130 # !!need to re-test
+    c: 15080 
+    i: 15080 #15120 # !!need to re-test
+    h: 15080 #15140 # !!need to re-test
   focus_sweep:             # Only for use with t2_focus_sweep.py - for testing optimal filter/focuser positions
     range_steps: 40        # ±N around starting pos
     step_size: 5           # test every N steps
