@@ -497,6 +497,7 @@ class FieldRotationTracker:
     def check_wrap_needed(self):
         """Check if immediate 180° flip is needed"""
         if not self.fr_config['wrap_management']['enabled']:
+            logger.debug("Wrap management not enabled in field rotation config file - ignoring flip checks")
             return False
             
         # Don't trigger flip if we're in cooldown (already flipping or just finished)
@@ -507,9 +508,20 @@ class FieldRotationTracker:
         current_pos = self.rotator.get_position()
         margin = self.fr_config['wrap_management']['flip_margin_deg']
         
+        # Calculate distances from limits
+        dist_from_min = current_pos - self.rotator.min_limit
+        dist_from_max = self.rotator.max_limit - current_pos
+        
         # Simple proximity check - flip if we're within margin of either limit
-        near_min_limit = current_pos < (self.rotator.min_limit + margin)
-        near_max_limit = current_pos > (self.rotator.max_limit - margin)
+        near_min_limit = dist_from_min < margin
+        near_max_limit = dist_from_max < margin
+        
+        # DEBUG LOGGING - Log every check with current state
+        logger.debug(f"[wrap-check] pos={current_pos:.2f}°, "
+                    f"min_dist={dist_from_min:.2f}°, max_dist={dist_from_max:.2f}°, "
+                    f"margin={margin:.1f}°, "
+                    f"near_min={near_min_limit}, near_max={near_max_limit}, "
+                    f"flip_needed={near_min_limit or near_max_limit}")
         
         if near_min_limit or near_max_limit:
             logger.info(f"[wrap-check] Immediate flip needed: pos={current_pos:.1f}°, "
