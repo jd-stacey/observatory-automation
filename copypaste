@@ -1,225 +1,489 @@
-#!/usr/bin/env python3
-"""
-Simple test script for rotator flip logic
-Tests: safety rejection, flip trigger, and 180° flip execution
-"""
-
-import sys
-import logging
-from pathlib import Path
-from rich.logging import RichHandler
 import time
+import logging
+import requests
+from typing import Optional, Dict, Any
 
-sys.path.insert(0, str(Path(__file__).parent / 'src'))
+# Set up logging
+logger = logging.getLogger(__name__)
 
-from autopho.config.loader import ConfigLoader
-from autopho.devices.drivers.alpaca_rotator import AlpacaRotatorDriver
 
-def setup_logging():
-    """Set up simple console logging"""
-    console_handler = RichHandler(rich_tracebacks=True, markup=True, show_path=True)
-    console_handler.setFormatter(logging.Formatter("%(message)s"))
-    console_handler.setLevel(logging.DEBUG)
-    
-    logging.basicConfig(level=logging.DEBUG, handlers=[console_handler])
-    return logging.getLogger(__name__)
+class DomeError(Exception):
+    pass
 
-def test_safety_rejection(rotator_driver, logger):
-    """Test that moves within emergency margin are rejected"""
-    logger.info("\n" + "="*60)
-    logger.info("TEST 1: SAFETY REJECTION (Emergency Margin)")
-    logger.info("="*60)
-    
-    current_pos = rotator_driver.get_position()
-    logger.info(f"Current position: {current_pos:.2f}°")
-    logger.info(f"Min limit: {rotator_driver.min_limit}°")
-    logger.info(f"Emergency margin: 0.5°")
-    logger.info(f"Safety rejection should occur at: {rotator_driver.min_limit + 0.5}° = 94.5°")
-    
-    # Try to move to 94.7° (should be rejected - within 0.5° of 94.0°)
-    test_position = 94.7
-    logger.info(f"\nAttempting move to {test_position}° (should be REJECTED)...")
-    
-    is_safe, msg = rotator_driver.check_position_safety(test_position)
-    if not is_safe:
-        logger.info(f"✓ PASS: Move rejected as expected")
-        logger.info(f"  Reason: {msg}")
-    else:
-        logger.error(f"✗ FAIL: Move was not rejected (safety margin too small?)")
-    
-    # Try to move to 95.0° (should be accepted - outside 0.5° margin)
-    test_position = 95.0
-    logger.info(f"\nAttempting move to {test_position}° (should be ACCEPTED)...")
-    
-    is_safe, msg = rotator_driver.check_position_safety(test_position)
-    if is_safe:
-        logger.info(f"✓ PASS: Move accepted as expected")
-        logger.info(f"  Status: {msg}")
-    else:
-        logger.error(f"✗ FAIL: Move was rejected (emergency margin too large?)")
-        logger.error(f"  Reason: {msg}")
 
-def test_flip_trigger(rotator_driver, logger):
-    """Test that flip triggers at correct margin"""
-    logger.info("\n" + "="*60)
-    logger.info("TEST 2: FLIP TRIGGER (Flip Margin)")
-    logger.info("="*60)
+class DomeDriver:
+    """
+    Driver for dome control via Node-RED HTTP endpoints.
     
-    if not hasattr(rotator_driver, 'field_tracker'):
-        logger.error("Field tracker not initialized - skipping flip trigger test")
+    Communicates with the Node-RED instance running on the dome TCU over the
+    observatory network. Node-RED translates HTTP commands to serial commands
+    on COM3 (9600-8N1) to the dome hardware.
+    
+    Serial state characters from dome hardware:
+        "0" = both panels closed
+        "1" = right open, left closed
+        "2" = left open, right closed
+        "3" = both panels open
+        "a" = left panel opening
+        "A" = left panel closing
+        "b" = right panel opening
+        "B" = right panel closing
+        "x" = left already open
+        "X" = left already closed
+        "y" = right already open
+        "Y" = right already closed
+
+    Known HTTP endpoints (all require HTTP response nodes - request from team):
+        GET  /dome/state            - read-only status (custom addition)
+        PUT  /dome/true             - open both panels
+        PUT  /dome/false            - close both panels
+        PUT  /dome/left/true        - open left panel
+        PUT  /dome/left/false       - close left panel
+        PUT  /dome/right/true       - open right panel
+        PUT  /dome/right/false      - close right panel
+        PUT  /dome/abort            - set abort flag (clears after 10s)
+        PUT  /dome/locked           - lock dome (TBC - confirm with team)
+        PUT  /dome/reset            - reset motor (TBC - confirm with team)
+    """
+
+    # Panel state constants (as returned by Node-RED global.dome)
+    # These are defined by the dome hardware serial protocol - not configurable
+    STATE_OPEN = "open"
+    STATE_CLOSED = "closed"
+    STATE_OPENING = "opening"
+    STATE_CLOSING = "closing"
+    STATE_ALREADY_OPEN = "already_open"
+    STATE_ALREADY_CLOSED = "already_closed"
+    STATE_UNKNOWN = "unknown"
+
+    def __init__(self):
+        self.config = None
+        self.base_url = None
+        self.connected = False
+        self.dome_id = None
+
+        # Timeouts - set from devices.yaml in connect(), defaults provided here
+        self.timeout_status = 5         # status reads (s)
+        self.timeout_abort = 15         # abort has 10s delay in Node-RED flow (s)
+        self.timeout_move = 60          # max wait for panel movement to complete (s)
+        self.timeout_command = 5        # general command timeout (s)
+        self.poll_interval = 2.0        # polling interval during movement waits (s)
+        self.max_retries = 3            # retries on failed status reads
+
+    # ------------------------------------------------------------------
+    # Connection
+    # ------------------------------------------------------------------
+
+    def connect(self, config: Dict[str, Any]) -> bool:
+        """Connect to the dome TCU Node-RED instance and verify reachability."""
+        try:
+            self.config = config
+
+            # Network
+            host = config.get('host', '192.168.249.27')
+            port = config.get('port', 1880)
+            self.base_url = f"http://{host}:{port}"
+            self.dome_id = config.get('dome_id', 'DOME')
+
+            # Timeouts and polling - all from devices.yaml with safe defaults
+            self.timeout_status  = config.get('timeout_status',  5)
+            self.timeout_abort   = config.get('timeout_abort',   15)
+            self.timeout_move    = config.get('timeout_move',    60)
+            self.timeout_command = config.get('timeout_command', 5)
+            self.poll_interval   = config.get('poll_interval',   2.0)
+            self.max_retries     = config.get('max_retries',     3)
+
+            logger.info(f"Connecting to dome {self.dome_id} via Node-RED at {self.base_url}")
+
+            # Verify reachability by reading dome state
+            state = self._get_raw_state()
+            if state is not None:
+                self.connected = True
+                logger.info(f"Successfully connected to dome TCU. "
+                            f"Left: {state.get('left', '?')} | "
+                            f"Right: {state.get('right', '?')}")
+                return True
+            else:
+                logger.error("Dome TCU reachable but returned no state data")
+                self.connected = False
+                return False
+
+        except Exception as e:
+            logger.error(f"Dome connection error: {e}")
+            self.connected = False
+            return False
+
+    def disconnect(self):
+        """Disconnect from the dome TCU."""
+        try:
+            self.connected = False
+            self.base_url = None
+            logger.info("Dome driver disconnected")
+            return True
+        except Exception as e:
+            logger.error(f"Dome disconnect error: {e}")
+            return False
+
+    def is_connected(self) -> bool:
+        """Check whether the dome TCU is reachable and returning valid state."""
+        if not self.connected or not self.base_url:
+            return False
+        try:
+            state = self._get_raw_state()
+            return state is not None
+        except Exception as e:
+            logger.error(f"Dome connection check error: {e}")
+            return False
+
+    # ------------------------------------------------------------------
+    # Status / State
+    # ------------------------------------------------------------------
+
+    def _get_raw_state(self) -> Optional[Dict[str, Any]]:
+        """
+        Internal - fetch raw dome state dict from Node-RED /dome/state endpoint.
+        Returns None on failure.
+        
+        Expected response:
+            {
+                "left": "closed",
+                "right": "closed",
+                "closed": true,
+                "lastChars": ["0", "0", ...]
+            }
+        """
+        try:
+            r = requests.get(
+                f"{self.base_url}/dome/state",
+                timeout=self.timeout_status
+            )
+            r.raise_for_status()
+            return r.json()
+        except requests.exceptions.Timeout:
+            logger.error("Dome state request timed out")
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.error("Dome state connection error - TCU unreachable")
+            return None
+        except requests.exceptions.JSONDecodeError:
+            logger.error("Dome state returned invalid JSON")
+            return None
+        except Exception as e:
+            logger.error(f"Dome state request failed: {e}")
+            return None
+
+    def get_state(self) -> Dict[str, Any]:
+        """
+        Get current dome state. Returns a dict with left, right, closed fields.
+        Returns a safe default dict with STATE_UNKNOWN values on failure.
+        """
+        if not self.connected:
+            raise DomeError("Cannot get state - dome not connected")
+
+        state = self._get_raw_state()
+        if state is None:
+            return {
+                "left": self.STATE_UNKNOWN,
+                "right": self.STATE_UNKNOWN,
+                "closed": False,
+                "lastChars": []
+            }
+        return state
+
+    def get_left_state(self) -> str:
+        """Get the current state of the left panel."""
+        return self.get_state().get('left', self.STATE_UNKNOWN)
+
+    def get_right_state(self) -> str:
+        """Get the current state of the right panel."""
+        return self.get_state().get('right', self.STATE_UNKNOWN)
+
+    def is_closed(self) -> bool:
+        """Returns True only if both panels are confirmed closed."""
+        return self.get_state().get('closed', False)
+
+    def is_open(self) -> bool:
+        """Returns True only if both panels are confirmed open."""
+        state = self.get_state()
+        return (state.get('left') == self.STATE_OPEN and
+                state.get('right') == self.STATE_OPEN)
+
+    def is_moving(self) -> bool:
+        """Returns True if either panel is currently opening or closing."""
+        state = self.get_state()
+        moving_states = {self.STATE_OPENING, self.STATE_CLOSING}
+        return (state.get('left') in moving_states or
+                state.get('right') in moving_states)
+
+    def get_dome_info(self) -> Dict[str, Any]:
+        """Get full dome status info dict, matching telescope driver pattern."""
+        if not self.connected:
+            return {'connected': False}
+        try:
+            state = self.get_state()
+            return {
+                "connected": True,
+                "left": state.get('left', self.STATE_UNKNOWN),
+                "right": state.get('right', self.STATE_UNKNOWN),
+                "closed": state.get('closed', False),
+                "is_open": self.is_open(),
+                "is_moving": self.is_moving(),
+                "last_serial_chars": state.get('lastChars', [])
+            }
+        except Exception as e:
+            logger.error(f"Failed to get dome info: {e}")
+            return {"connected": True, "error": str(e)}
+
+    # ------------------------------------------------------------------
+    # Internal HTTP command helper
+    # ------------------------------------------------------------------
+
+    def _send_command(self, endpoint: str, timeout: Optional[int] = None) -> bool:
+        """
+        Internal - send a PUT command to a Node-RED dome endpoint.
+        Returns True on HTTP 200, False on any failure.
+        
+        NOTE: Command endpoints currently have no HTTP response nodes wired
+        in Node-RED - they will hang until response nodes are added by the team.
+        Do not call movement commands until this is confirmed resolved.
+        """
+        if not self.connected:
+            raise DomeError(f"Cannot send command {endpoint} - dome not connected")
+        if timeout is None:
+            timeout = self.timeout_command
+        try:
+            r = requests.put(
+                f"{self.base_url}{endpoint}",
+                timeout=timeout
+            )
+            r.raise_for_status()
+            logger.debug(f"Command {endpoint} → {r.status_code}")
+            return r.status_code == 200
+        except requests.exceptions.Timeout:
+            logger.error(f"Command {endpoint} timed out after {timeout}s")
+            return False
+        except requests.exceptions.ConnectionError:
+            logger.error(f"Command {endpoint} connection error")
+            return False
+        except Exception as e:
+            logger.error(f"Command {endpoint} failed: {e}")
+            return False
+
+    # ------------------------------------------------------------------
+    # Polling helper
+    # ------------------------------------------------------------------
+
+    def _wait_for_state(
+        self,
+        target_left: str,
+        target_right: str,
+        timeout: Optional[int] = None,
+        poll_interval: Optional[float] = None
+    ) -> bool:
+        """
+        Poll dome state until both panels reach target states or timeout.
+        Used after issuing movement commands to confirm completion.
+        """
+        if timeout is None:
+            timeout = self.timeout_move
+        if poll_interval is None:
+            poll_interval = self.poll_interval
+        logger.info(f"Waiting for dome state: left={target_left}, right={target_right}")
+        start = time.time()
+        while time.time() - start < timeout:
+            state = self.get_state()
+            left = state.get('left')
+            right = state.get('right')
+            logger.debug(f"  Dome state: left={left} | right={right}")
+            if left == target_left and right == target_right:
+                logger.info("Target dome state reached")
+                return True
+            time.sleep(poll_interval)
+        logger.warning(f"Dome state timeout after {timeout}s - "
+                       f"left={left}, right={right}")
         return False
-    
-    tracker = rotator_driver.field_tracker
-    logger.info(f"Min limit: {rotator_driver.min_limit}°")
-    logger.info(f"Flip margin: 1.25°")
-    logger.info(f"Flip should trigger at: {rotator_driver.min_limit + 1.25}° = 95.25°")
-    
-    # Move rotator to test positions and check if flip triggers
-    test_positions = [
-        (98.0, False, "well above flip trigger"),
-        (96.0, False, "just above flip trigger"),
-        (95.5, False, "approaching flip trigger"),
-        (95.2, True, "AT flip trigger point"),
-        (95.0, True, "PAST flip trigger point")
-    ]
-    
-    for pos, should_trigger, description in test_positions:
-        logger.info(f"\nTesting position {pos}° ({description})...")
-        
-        # Manually set rotator position for testing (simulate being at that position)
-        logger.debug(f"  Simulating rotator at {pos}°")
-        
-        # Temporarily override get_position to return test value
-        original_get_pos = rotator_driver.get_position
-        rotator_driver.get_position = lambda: pos
-        
-        flip_needed = tracker.check_wrap_needed()
-        
-        # Restore original method
-        rotator_driver.get_position = original_get_pos
-        
-        if flip_needed == should_trigger:
-            logger.info(f"  ✓ PASS: Flip trigger = {flip_needed} (expected {should_trigger})")
-        else:
-            logger.error(f"  ✗ FAIL: Flip trigger = {flip_needed} (expected {should_trigger})")
-    
-    return True
 
-def test_actual_flip(rotator_driver, logger):
-    """Test actual 180° flip execution"""
-    logger.info("\n" + "="*60)
-    logger.info("TEST 3: ACTUAL 180° FLIP EXECUTION")
-    logger.info("="*60)
-    
-    if not hasattr(rotator_driver, 'field_tracker'):
-        logger.error("Field tracker not initialized - cannot test flip")
-        return False
-    
-    current_pos = rotator_driver.get_position()
-    logger.info(f"Current position: {current_pos:.2f}°")
-    
-    # Ask user if they want to proceed
-    logger.warning("\nThis will move the rotator ~180°!")
-    response = input("Proceed with actual flip test? (yes/no): ").strip().lower()
-    
-    if response != 'yes':
-        logger.info("Flip test skipped by user")
-        return False
-    
-    logger.info("\nExecuting 180° flip...")
-    logger.info(f"Expected new position: ~{(current_pos + 180) % 360:.1f}°")
-    
-    tracker = rotator_driver.field_tracker
-    success = tracker._execute_180_flip()
-    
-    final_pos = rotator_driver.get_position()
-    
-    if success:
-        logger.info(f"✓ Flip completed successfully")
-        logger.info(f"  Start: {current_pos:.2f}°")
-        logger.info(f"  End: {final_pos:.2f}°")
-        logger.info(f"  Delta: {abs(final_pos - current_pos):.2f}°")
-        
-        # Check if it's approximately 180°
-        delta = abs(final_pos - current_pos)
-        if 170 < delta < 190:
-            logger.info(f"  ✓ PASS: Delta is approximately 180°")
-        else:
-            logger.warning(f"  ⚠ WARNING: Delta is not close to 180°")
-    else:
-        logger.error(f"✗ Flip failed")
-    
-    return success
+    # ------------------------------------------------------------------
+    # Dome commands
+    # NOTE: These will hang until HTTP response nodes are added to Node-RED.
+    #       Confirm with team before calling any of these methods.
+    #       Pre/post state checks are included for safety.
+    # ------------------------------------------------------------------
 
-def main():
-    logger = setup_logging()
-    
-    logger.info("="*60)
-    logger.info("ROTATOR FLIP LOGIC TEST SCRIPT")
-    logger.info("="*60)
-    
-    rotator_driver = None
-    
-    try:
-        # Load config
-        logger.info("\nLoading configuration...")
-        config_loader = ConfigLoader("config")
-        config_loader.load_all_configs()
-        
-        # Connect to rotator
-        logger.info("Connecting to rotator...")
-        rotator_driver = AlpacaRotatorDriver()
-        rotator_config = config_loader.get_rotator_config()
-        
-        if not rotator_driver.connect(rotator_config):
-            logger.error("Failed to connect to rotator")
-            return 1
-        
-        rot_info = rotator_driver.get_rotator_info()
-        logger.info(f"Connected: {rot_info.get('name', 'Unknown')}")
-        logger.info(f"Position: {rot_info.get('position_deg', 0):.2f}°")
-        logger.info(f"Limits: [{rotator_driver.min_limit}°, {rotator_driver.max_limit}°]")
-        
-        # Initialize field rotation (needed for flip logic)
-        logger.info("\nInitializing field rotation tracker...")
-        observatory_config = config_loader.get_config('observatory')
-        field_rotation_config = config_loader.get_config('field_rotation')
-        
-        if rotator_driver.initialize_field_rotation(observatory_config, field_rotation_config):
-            logger.info("Field rotation tracker initialized")
-        else:
-            logger.error("Failed to initialize field rotation tracker")
-            return 1
-        
-        # Set a dummy target (needed for field tracker)
-        logger.info("Setting dummy target (for field tracker)...")
-        rotator_driver.set_tracking_target(ra_hours=4.0, dec_deg=-38.0)
-        
-        # Run tests
-        test_safety_rejection(rotator_driver, logger)
-        time.sleep(1)
-        
-        test_flip_trigger(rotator_driver, logger)
-        time.sleep(1)
-        
-        test_actual_flip(rotator_driver, logger)
-        
-        logger.info("\n" + "="*60)
-        logger.info("TESTS COMPLETE")
-        logger.info("="*60)
-        
-        return 0
-        
-    except KeyboardInterrupt:
-        logger.info("\nTest interrupted by user")
-        return 0
-    except Exception as e:
-        logger.error(f"Test failed: {e}", exc_info=True)
-        return 1
-    finally:
-        if rotator_driver:
-            logger.info("\nDisconnecting rotator...")
-            rotator_driver.disconnect()
+    def open(self) -> bool:
+        """
+        Open both dome panels.
+        Checks current state before commanding and polls for completion.
+        """
+        if not self.is_connected():
+            logger.error("Cannot open dome - not connected")
+            return False
+        try:
+            state = self.get_state()
+            if state.get('closed') is False and self.is_open():
+                logger.info("Dome already open - no action taken")
+                return True
 
-if __name__ == '__main__':
-    sys.exit(main())
+            logger.info("Opening dome (both panels)...")
+            success = self._send_command("/dome/true")
+            if not success:
+                return False
+            return self._wait_for_state(self.STATE_OPEN, self.STATE_OPEN)
+
+        except Exception as e:
+            logger.error(f"Dome open failed: {e}")
+            return False
+
+    def close(self) -> bool:
+        """
+        Close both dome panels.
+        Checks current state before commanding and polls for completion.
+        """
+        if not self.is_connected():
+            logger.error("Cannot close dome - not connected")
+            return False
+        try:
+            if self.is_closed():
+                logger.info("Dome already closed - no action taken")
+                return True
+
+            logger.info("Closing dome (both panels)...")
+            success = self._send_command("/dome/false")
+            if not success:
+                return False
+            return self._wait_for_state(self.STATE_CLOSED, self.STATE_CLOSED)
+
+        except Exception as e:
+            logger.error(f"Dome close failed: {e}")
+            return False
+
+    def open_left(self) -> bool:
+        """Open left panel only."""
+        if not self.is_connected():
+            logger.error("Cannot open left panel - not connected")
+            return False
+        try:
+            if self.get_left_state() == self.STATE_OPEN:
+                logger.info("Left panel already open - no action taken")
+                return True
+
+            logger.info("Opening left panel...")
+            success = self._send_command("/dome/left/true")
+            if not success:
+                return False
+            right_state = self.get_right_state()    # right panel unchanged
+            return self._wait_for_state(self.STATE_OPEN, right_state)
+
+        except Exception as e:
+            logger.error(f"Open left panel failed: {e}")
+            return False
+
+    def close_left(self) -> bool:
+        """Close left panel only."""
+        if not self.is_connected():
+            logger.error("Cannot close left panel - not connected")
+            return False
+        try:
+            if self.get_left_state() == self.STATE_CLOSED:
+                logger.info("Left panel already closed - no action taken")
+                return True
+
+            logger.info("Closing left panel...")
+            success = self._send_command("/dome/left/false")
+            if not success:
+                return False
+            right_state = self.get_right_state()    # right panel unchanged
+            return self._wait_for_state(self.STATE_CLOSED, right_state)
+
+        except Exception as e:
+            logger.error(f"Close left panel failed: {e}")
+            return False
+
+    def open_right(self) -> bool:
+        """Open right panel only."""
+        if not self.is_connected():
+            logger.error("Cannot open right panel - not connected")
+            return False
+        try:
+            if self.get_right_state() == self.STATE_OPEN:
+                logger.info("Right panel already open - no action taken")
+                return True
+
+            logger.info("Opening right panel...")
+            success = self._send_command("/dome/right/true")
+            if not success:
+                return False
+            left_state = self.get_left_state()      # left panel unchanged
+            return self._wait_for_state(left_state, self.STATE_OPEN)
+
+        except Exception as e:
+            logger.error(f"Open right panel failed: {e}")
+            return False
+
+    def close_right(self) -> bool:
+        """Close right panel only."""
+        if not self.is_connected():
+            logger.error("Cannot close right panel - not connected")
+            return False
+        try:
+            if self.get_right_state() == self.STATE_CLOSED:
+                logger.info("Right panel already closed - no action taken")
+                return True
+
+            logger.info("Closing right panel...")
+            success = self._send_command("/dome/right/false")
+            if not success:
+                return False
+            left_state = self.get_left_state()      # left panel unchanged
+            return self._wait_for_state(left_state, self.STATE_CLOSED)
+
+        except Exception as e:
+            logger.error(f"Close right panel failed: {e}")
+            return False
+
+    def abort(self) -> bool:
+        """
+        Send abort command to dome.
+        Sets dome_abort global flag in Node-RED for 10 seconds, blocking movement.
+        Note: Node-RED flow has a 10s delay before returning 200.
+        """
+        if not self.is_connected():
+            logger.error("Cannot abort - dome not connected")
+            return False
+        try:
+            logger.warning("Sending dome abort command...")
+            return self._send_command("/dome/abort", timeout=self.timeout_abort)
+        except Exception as e:
+            logger.error(f"Dome abort failed: {e}")
+            return False
+
+    def reset_motor(self) -> bool:
+        """
+        Reset dome motor.
+        NOTE: Confirm exact hardware behaviour with team before using.
+        """
+        if not self.is_connected():
+            logger.error("Cannot reset motor - dome not connected")
+            return False
+        try:
+            logger.warning("Sending dome motor reset command...")
+            return self._send_command("/dome/reset")
+        except Exception as e:
+            logger.error(f"Dome motor reset failed: {e}")
+            return False
+
+    def set_locked(self, locked: bool = True) -> bool:
+        """
+        Set dome locked state.
+        NOTE: Exact behaviour of /dome/locked endpoint TBC - confirm with team.
+        """
+        if not self.is_connected():
+            logger.error("Cannot set lock - dome not connected")
+            return False
+        try:
+            logger.info(f"Setting dome locked = {locked}")
+            # TODO: confirm endpoint and method with team
+            return self._send_command("/dome/locked")
+        except Exception as e:
+            logger.error(f"Dome lock command failed: {e}")
+            return False
