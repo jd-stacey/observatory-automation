@@ -1,6 +1,4 @@
 """
-test_dome_actions.py
---------------------
 Comprehensive end-to-end test script for dome operations.
 Covers status checks and physical movement tests with user confirmation
 at each step. Always attempts to leave the dome closed at the end.
@@ -8,15 +6,14 @@ at each step. Always attempts to leave the dome closed at the end.
 !! IMPORTANT: This script commands REAL hardware. Read each prompt carefully !!
 
 Usage:
-    python test_dome_actions.py
+    python testraptordome.py
 
 Configuration:
     Change TEST_DOME_KEY below to test a different dome.
     Key must match an entry in devices.yaml.
 
 Location:
-    testingcode/actions/test_dome_actions.py
-    Run from within the actions/ folder or from testingcode/ folder.
+    testingcode/actions/testraptordome.py
 """
 
 from pathlib import Path
@@ -83,10 +80,12 @@ def print_state(driver: DomeDriver):
         print(f"  ERROR reading state: {e}")
 
 def wait_with_progress(driver: DomeDriver, target_left: str, target_right: str,
-                       timeout: int, poll_interval: float = 2.0) -> bool:
+                       timeout: int, poll_interval: float = 2.0) -> tuple[bool, float]:
     """
     Poll dome state with printed progress until target reached or timeout.
-    Returns True if target state reached.
+    Returns (success, elapsed_seconds).
+    Used for status read timing test and ensure_closed only.
+    Movement steps use driver methods directly which handle polling internally.
     """
     print(f"\n  Waiting for: left={target_left}, right={target_right}")
     print(f"  Timeout: {timeout}s  |  Polling every {poll_interval}s")
@@ -101,38 +100,23 @@ def wait_with_progress(driver: DomeDriver, target_left: str, target_right: str,
             elapsed = int(time.time() - start)
             print(f"  [{elapsed:>3}s]  Left: {left:<16}  Right: {right}", end='\r')
             if left == target_left and right == target_right:
-                print()  # clear the \r line
-                print(f"\n  Target state reached after {elapsed}s")
-                return True
+                elapsed_final = time.time() - start
+                print()
+                print(f"\n  Target state reached after {elapsed_final:.1f}s")
+                return True, elapsed_final
         except DomeError as e:
             print(f"\n  ERROR polling state: {e}")
         time.sleep(poll_interval)
-    print()  # clear the \r line
+    elapsed_final = time.time() - start
+    print()
     print(f"\n  TIMEOUT after {timeout}s  |  Last: left={left}, right={right}")
-    return False
-
-def run_test(label: str, fn, *args) -> bool:
-    """
-    Run a single test function, print result, return success bool.
-    fn should return True on success.
-    """
-    print(f"\n  Running: {label}...")
-    try:
-        result = fn(*args)
-        if result:
-            print(f"  PASSED: {label}")
-        else:
-            print(f"  FAILED: {label}")
-        return result
-    except Exception as e:
-        print(f"  ERROR: {label} raised exception: {e}")
-        return False
+    return False, elapsed_final
 
 # ---------------------------------------------------------------------------
 # Test sections
 # ---------------------------------------------------------------------------
 
-def test_status_checks(driver: DomeDriver) -> bool:
+def test_status_checks(driver: DomeDriver, timings: dict) -> bool:
     """Run all read-only status checks. Returns True if all pass."""
     section("SECTION 1: STATUS CHECKS (read-only, no movement)")
 
@@ -196,10 +180,28 @@ def test_status_checks(driver: DomeDriver) -> bool:
         print(f"  FAILED: {e}")
         all_passed = False
 
+    step("1.6  Status read response time")
+    try:
+        times = []
+        for i in range(5):
+            t_start = time.time()
+            driver.get_state()
+            times.append(time.time() - t_start)
+        avg = sum(times) / len(times)
+        print(f"  5 consecutive reads: {[f'{t:.2f}s' for t in times]}")
+        print(f"  Average            : {avg:.2f}s")
+        print(f"  Max                : {max(times):.2f}s")
+        timings['status_read_avg'] = avg
+        timings['status_read_max'] = max(times)
+        print("  PASSED")
+    except Exception as e:
+        print(f"  FAILED: {e}")
+        all_passed = False
+
     return all_passed
 
 
-def test_left_panel(driver: DomeDriver) -> bool:
+def test_left_panel(driver: DomeDriver, timings: dict) -> bool:
     """Test left panel open and close. Returns True if all pass."""
     section("SECTION 2: LEFT PANEL TESTS")
 
@@ -216,66 +218,53 @@ def test_left_panel(driver: DomeDriver) -> bool:
 
     # --- Open left ---
     step("2.1  Open left panel")
-    print("\n  Sending open left command...")
-    try:
-        success = driver._send_command("/dome/left/true")
-        if not success:
-            print("  Command returned failure")
-            all_passed = False
-            if not ask_continue_after_failure():
-                return False
-        else:
-            print("  Command accepted, polling for state change...")
-            reached = wait_with_progress(
-                driver,
-                target_left=DomeDriver.STATE_OPEN,
-                target_right=driver.get_right_state(),
-                timeout=driver.timeout_move
-            )
-            if reached:
-                print("  PASSED: Left panel opened")
+    print("\n  Current dome state:")
+    print_state(driver)
+    if not ask_proceed("Send open left panel command?"):
+        print("  Skipped by user.")
+    else:
+        print("\n  Calling driver.open_left()...")
+        try:
+            t_cmd = time.time()
+            success = driver.open_left()
+            elapsed = time.time() - t_cmd
+            if success:
+                print(f"  PASSED: Left panel opened in {elapsed:.1f}s")
+                timings['open_left'] = elapsed
             else:
-                print("  FAILED: Left panel did not reach open state")
+                print(f"  FAILED: Left panel did not reach open state ({elapsed:.1f}s)")
                 all_passed = False
                 if not ask_continue_after_failure():
                     return False
-    except Exception as e:
-        print(f"  ERROR: {e}")
-        all_passed = False
-        if not ask_continue_after_failure():
-            return False
+        except Exception as e:
+            print(f"  ERROR: {e}")
+            all_passed = False
+            if not ask_continue_after_failure():
+                return False
 
     print("\n  Current dome state:")
     print_state(driver)
 
     # --- Close left ---
     step("2.2  Close left panel")
-    if not ask_proceed("Proceed with closing left panel?"):
+    print("\n  Current dome state:")
+    print_state(driver)
+    if not ask_proceed("Send close left panel command?"):
         print("  Skipped by user.")
     else:
-        print("\n  Sending close left command...")
+        print("\n  Calling driver.close_left()...")
         try:
-            success = driver._send_command("/dome/left/false")
-            if not success:
-                print("  Command returned failure")
+            t_cmd = time.time()
+            success = driver.close_left()
+            elapsed = time.time() - t_cmd
+            if success:
+                print(f"  PASSED: Left panel closed in {elapsed:.1f}s")
+                timings['close_left'] = elapsed
+            else:
+                print(f"  FAILED: Left panel did not reach closed state ({elapsed:.1f}s)")
                 all_passed = False
                 if not ask_continue_after_failure():
                     return False
-            else:
-                print("  Command accepted, polling for state change...")
-                reached = wait_with_progress(
-                    driver,
-                    target_left=DomeDriver.STATE_CLOSED,
-                    target_right=driver.get_right_state(),
-                    timeout=driver.timeout_move
-                )
-                if reached:
-                    print("  PASSED: Left panel closed")
-                else:
-                    print("  FAILED: Left panel did not reach closed state")
-                    all_passed = False
-                    if not ask_continue_after_failure():
-                        return False
         except Exception as e:
             print(f"  ERROR: {e}")
             all_passed = False
@@ -288,7 +277,7 @@ def test_left_panel(driver: DomeDriver) -> bool:
     return all_passed
 
 
-def test_right_panel(driver: DomeDriver) -> bool:
+def test_right_panel(driver: DomeDriver, timings: dict) -> bool:
     """Test right panel open and close. Returns True if all pass."""
     section("SECTION 3: RIGHT PANEL TESTS")
 
@@ -305,66 +294,53 @@ def test_right_panel(driver: DomeDriver) -> bool:
 
     # --- Open right ---
     step("3.1  Open right panel")
-    print("\n  Sending open right command...")
-    try:
-        success = driver._send_command("/dome/right/true")
-        if not success:
-            print("  Command returned failure")
-            all_passed = False
-            if not ask_continue_after_failure():
-                return False
-        else:
-            print("  Command accepted, polling for state change...")
-            reached = wait_with_progress(
-                driver,
-                target_left=driver.get_left_state(),
-                target_right=DomeDriver.STATE_OPEN,
-                timeout=driver.timeout_move
-            )
-            if reached:
-                print("  PASSED: Right panel opened")
+    print("\n  Current dome state:")
+    print_state(driver)
+    if not ask_proceed("Send open right panel command?"):
+        print("  Skipped by user.")
+    else:
+        print("\n  Calling driver.open_right()...")
+        try:
+            t_cmd = time.time()
+            success = driver.open_right()
+            elapsed = time.time() - t_cmd
+            if success:
+                print(f"  PASSED: Right panel opened in {elapsed:.1f}s")
+                timings['open_right'] = elapsed
             else:
-                print("  FAILED: Right panel did not reach open state")
+                print(f"  FAILED: Right panel did not reach open state ({elapsed:.1f}s)")
                 all_passed = False
                 if not ask_continue_after_failure():
                     return False
-    except Exception as e:
-        print(f"  ERROR: {e}")
-        all_passed = False
-        if not ask_continue_after_failure():
-            return False
+        except Exception as e:
+            print(f"  ERROR: {e}")
+            all_passed = False
+            if not ask_continue_after_failure():
+                return False
 
     print("\n  Current dome state:")
     print_state(driver)
 
     # --- Close right ---
     step("3.2  Close right panel")
-    if not ask_proceed("Proceed with closing right panel?"):
+    print("\n  Current dome state:")
+    print_state(driver)
+    if not ask_proceed("Send close right panel command?"):
         print("  Skipped by user.")
     else:
-        print("\n  Sending close right command...")
+        print("\n  Calling driver.close_right()...")
         try:
-            success = driver._send_command("/dome/right/false")
-            if not success:
-                print("  Command returned failure")
+            t_cmd = time.time()
+            success = driver.close_right()
+            elapsed = time.time() - t_cmd
+            if success:
+                print(f"  PASSED: Right panel closed in {elapsed:.1f}s")
+                timings['close_right'] = elapsed
+            else:
+                print(f"  FAILED: Right panel did not reach closed state ({elapsed:.1f}s)")
                 all_passed = False
                 if not ask_continue_after_failure():
                     return False
-            else:
-                print("  Command accepted, polling for state change...")
-                reached = wait_with_progress(
-                    driver,
-                    target_left=driver.get_left_state(),
-                    target_right=DomeDriver.STATE_CLOSED,
-                    timeout=driver.timeout_move
-                )
-                if reached:
-                    print("  PASSED: Right panel closed")
-                else:
-                    print("  FAILED: Right panel did not reach closed state")
-                    all_passed = False
-                    if not ask_continue_after_failure():
-                        return False
         except Exception as e:
             print(f"  ERROR: {e}")
             all_passed = False
@@ -377,7 +353,7 @@ def test_right_panel(driver: DomeDriver) -> bool:
     return all_passed
 
 
-def test_full_dome(driver: DomeDriver) -> bool:
+def test_full_dome(driver: DomeDriver, timings: dict) -> bool:
     """Test full dome open and close. Returns True if all pass."""
     section("SECTION 4: FULL DOME TESTS")
 
@@ -393,66 +369,53 @@ def test_full_dome(driver: DomeDriver) -> bool:
 
     # --- Full open ---
     step("4.1  Open both panels")
-    print("\n  Sending full dome open command...")
-    try:
-        success = driver._send_command("/dome/true")
-        if not success:
-            print("  Command returned failure")
-            all_passed = False
-            if not ask_continue_after_failure():
-                return False
-        else:
-            print("  Command accepted, polling for state change...")
-            reached = wait_with_progress(
-                driver,
-                target_left=DomeDriver.STATE_OPEN,
-                target_right=DomeDriver.STATE_OPEN,
-                timeout=driver.timeout_move
-            )
-            if reached:
-                print("  PASSED: Both panels opened")
+    print("\n  Current dome state:")
+    print_state(driver)
+    if not ask_proceed("Send open both panels command?"):
+        print("  Skipped by user.")
+    else:
+        print("\n  Calling driver.open()...")
+        try:
+            t_cmd = time.time()
+            success = driver.open()
+            elapsed = time.time() - t_cmd
+            if success:
+                print(f"  PASSED: Both panels opened in {elapsed:.1f}s")
+                timings['open_full'] = elapsed
             else:
-                print("  FAILED: Dome did not reach fully open state")
+                print(f"  FAILED: Dome did not reach fully open state ({elapsed:.1f}s)")
                 all_passed = False
                 if not ask_continue_after_failure():
                     return False
-    except Exception as e:
-        print(f"  ERROR: {e}")
-        all_passed = False
-        if not ask_continue_after_failure():
-            return False
+        except Exception as e:
+            print(f"  ERROR: {e}")
+            all_passed = False
+            if not ask_continue_after_failure():
+                return False
 
     print("\n  Current dome state:")
     print_state(driver)
 
     # --- Full close ---
     step("4.2  Close both panels")
-    if not ask_proceed("Proceed with closing both panels?"):
+    print("\n  Current dome state:")
+    print_state(driver)
+    if not ask_proceed("Send close both panels command?"):
         print("  Skipped by user.")
     else:
-        print("\n  Sending full dome close command...")
+        print("\n  Calling driver.close()...")
         try:
-            success = driver._send_command("/dome/false")
-            if not success:
-                print("  Command returned failure")
+            t_cmd = time.time()
+            success = driver.close()
+            elapsed = time.time() - t_cmd
+            if success:
+                print(f"  PASSED: Both panels closed in {elapsed:.1f}s")
+                timings['close_full'] = elapsed
+            else:
+                print(f"  FAILED: Dome did not reach fully closed state ({elapsed:.1f}s)")
                 all_passed = False
                 if not ask_continue_after_failure():
                     return False
-            else:
-                print("  Command accepted, polling for state change...")
-                reached = wait_with_progress(
-                    driver,
-                    target_left=DomeDriver.STATE_CLOSED,
-                    target_right=DomeDriver.STATE_CLOSED,
-                    timeout=driver.timeout_move
-                )
-                if reached:
-                    print("  PASSED: Both panels closed")
-                else:
-                    print("  FAILED: Dome did not reach fully closed state")
-                    all_passed = False
-                    if not ask_continue_after_failure():
-                        return False
         except Exception as e:
             print(f"  ERROR: {e}")
             all_passed = False
@@ -475,21 +438,13 @@ def ensure_closed(driver: DomeDriver):
         print("\n  Dome is already closed. Nothing to do.")
         return
 
-    print("\n  Dome is not fully closed. Sending close command...")
+    print("\n  Dome is not fully closed. Calling driver.close()...")
     try:
-        success = driver._send_command("/dome/false")
-        if not success:
-            print("  WARNING: Close command returned failure - check dome manually!")
-            return
-        print("  Waiting for dome to close...")
-        reached = wait_with_progress(
-            driver,
-            target_left=DomeDriver.STATE_CLOSED,
-            target_right=DomeDriver.STATE_CLOSED,
-            timeout=driver.timeout_move
-        )
-        if reached:
-            print("  Dome confirmed closed.")
+        t_cmd = time.time()
+        success = driver.close()
+        elapsed = time.time() - t_cmd
+        if success:
+            print(f"  Dome confirmed closed in {elapsed:.1f}s")
         else:
             print("  WARNING: Dome did not confirm closed state - check dome manually!")
     except Exception as e:
@@ -543,11 +498,12 @@ def main():
         sys.exit(1)
     print(f"  Connected to {dome_id}")
 
-    # Track results
+    # Track results and timings
     results = {}
+    timings = {}
 
     # --- Status checks (always run) ---
-    results['status'] = test_status_checks(driver)
+    results['status'] = test_status_checks(driver, timings)
 
     # --- Movement tests ---
     section("MOVEMENT TESTS")
@@ -558,9 +514,9 @@ def main():
     if not ask_proceed("Proceed to movement tests?"):
         print("\n  Movement tests skipped by user.")
     else:
-        results['left_panel']  = test_left_panel(driver)
-        results['right_panel'] = test_right_panel(driver)
-        results['full_dome']   = test_full_dome(driver)
+        results['left_panel']  = test_left_panel(driver, timings)
+        results['right_panel'] = test_right_panel(driver, timings)
+        results['full_dome']   = test_full_dome(driver, timings)
 
     # --- Always close at end ---
     ensure_closed(driver)
@@ -579,6 +535,31 @@ def main():
         print(f"  {test_name:<20} : {status}")
         if not passed:
             all_passed = False
+
+    if timings:
+        print()
+        separator()
+        print("  STATUS READ TIMINGS")
+        separator()
+        for k in ['status_read_avg', 'status_read_max']:
+            if k in timings:
+                print(f"  {k:<25} : {timings[k]:.2f}s")
+        print(f"\n  Note: timeout_status in devices.yaml is currently {driver.timeout_status}s")
+
+        move_keys = [k for k in timings if k in
+                     ('open_left', 'close_left', 'open_right',
+                      'close_right', 'open_full', 'close_full')]
+        if move_keys:
+            print()
+            separator()
+            print("  MOVEMENT TIMINGS  (includes full open/close sequence)")
+            separator()
+            for k in move_keys:
+                print(f"  {k:<25} : {timings[k]:.1f}s")
+            slowest = max(timings[k] for k in move_keys)
+            print(f"\n  Note: timeout_move in devices.yaml is currently {driver.timeout_move}s")
+            print(f"  Recommend setting to at least {slowest * 1.5:.0f}s based on observed times")
+
     print()
     separator("=")
     if all_passed:
