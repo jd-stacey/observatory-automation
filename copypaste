@@ -1,489 +1,592 @@
+"""
+test_dome_actions.py
+--------------------
+Comprehensive end-to-end test script for dome operations.
+Covers status checks and physical movement tests with user confirmation
+at each step. Always attempts to leave the dome closed at the end.
+
+!! IMPORTANT: This script commands REAL hardware. Read each prompt carefully !!
+
+Usage:
+    python test_dome_actions.py
+
+Configuration:
+    Change TEST_DOME_KEY below to test a different dome.
+    Key must match an entry in devices.yaml.
+
+Location:
+    testingcode/actions/test_dome_actions.py
+    Run from within the actions/ folder or from testingcode/ folder.
+"""
+
+from pathlib import Path
+import sys
+import yaml
 import time
-import logging
-import requests
-from typing import Optional, Dict, Any
 
-# Set up logging
-logger = logging.getLogger(__name__)
+# ---------------------------------------------------------------------------
+# Path setup - actions/ is inside testingcode/, src is three levels up
+# ---------------------------------------------------------------------------
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
+from autopho.devices.drivers.nodered_dome import DomeDriver, DomeError
 
+# ---------------------------------------------------------------------------
+# Configuration - change this to test a different dome
+# ---------------------------------------------------------------------------
+TEST_DOME_KEY = "dome_t2"
 
-class DomeError(Exception):
-    pass
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
+def separator(char="-", width=60):
+    print(char * width)
 
-class DomeDriver:
-    """
-    Driver for dome control via Node-RED HTTP endpoints.
-    
-    Communicates with the Node-RED instance running on the dome TCU over the
-    observatory network. Node-RED translates HTTP commands to serial commands
-    on COM3 (9600-8N1) to the dome hardware.
-    
-    Serial state characters from dome hardware:
-        "0" = both panels closed
-        "1" = right open, left closed
-        "2" = left open, right closed
-        "3" = both panels open
-        "a" = left panel opening
-        "A" = left panel closing
-        "b" = right panel opening
-        "B" = right panel closing
-        "x" = left already open
-        "X" = left already closed
-        "y" = right already open
-        "Y" = right already closed
+def section(title: str):
+    print()
+    separator("=")
+    print(f"  {title}")
+    separator("=")
 
-    Known HTTP endpoints (all require HTTP response nodes - request from team):
-        GET  /dome/state            - read-only status (custom addition)
-        PUT  /dome/true             - open both panels
-        PUT  /dome/false            - close both panels
-        PUT  /dome/left/true        - open left panel
-        PUT  /dome/left/false       - close left panel
-        PUT  /dome/right/true       - open right panel
-        PUT  /dome/right/false      - close right panel
-        PUT  /dome/abort            - set abort flag (clears after 10s)
-        PUT  /dome/locked           - lock dome (TBC - confirm with team)
-        PUT  /dome/reset            - reset motor (TBC - confirm with team)
-    """
+def step(title: str):
+    print()
+    separator()
+    print(f"  {title}")
+    separator()
 
-    # Panel state constants (as returned by Node-RED global.dome)
-    # These are defined by the dome hardware serial protocol - not configurable
-    STATE_OPEN = "open"
-    STATE_CLOSED = "closed"
-    STATE_OPENING = "opening"
-    STATE_CLOSING = "closing"
-    STATE_ALREADY_OPEN = "already_open"
-    STATE_ALREADY_CLOSED = "already_closed"
-    STATE_UNKNOWN = "unknown"
-
-    def __init__(self):
-        self.config = None
-        self.base_url = None
-        self.connected = False
-        self.dome_id = None
-
-        # Timeouts - set from devices.yaml in connect(), defaults provided here
-        self.timeout_status = 5         # status reads (s)
-        self.timeout_abort = 15         # abort has 10s delay in Node-RED flow (s)
-        self.timeout_move = 60          # max wait for panel movement to complete (s)
-        self.timeout_command = 5        # general command timeout (s)
-        self.poll_interval = 2.0        # polling interval during movement waits (s)
-        self.max_retries = 3            # retries on failed status reads
-
-    # ------------------------------------------------------------------
-    # Connection
-    # ------------------------------------------------------------------
-
-    def connect(self, config: Dict[str, Any]) -> bool:
-        """Connect to the dome TCU Node-RED instance and verify reachability."""
-        try:
-            self.config = config
-
-            # Network
-            host = config.get('host', '192.168.249.27')
-            port = config.get('port', 1880)
-            self.base_url = f"http://{host}:{port}"
-            self.dome_id = config.get('dome_id', 'DOME')
-
-            # Timeouts and polling - all from devices.yaml with safe defaults
-            self.timeout_status  = config.get('timeout_status',  5)
-            self.timeout_abort   = config.get('timeout_abort',   15)
-            self.timeout_move    = config.get('timeout_move',    60)
-            self.timeout_command = config.get('timeout_command', 5)
-            self.poll_interval   = config.get('poll_interval',   2.0)
-            self.max_retries     = config.get('max_retries',     3)
-
-            logger.info(f"Connecting to dome {self.dome_id} via Node-RED at {self.base_url}")
-
-            # Verify reachability by reading dome state
-            state = self._get_raw_state()
-            if state is not None:
-                self.connected = True
-                logger.info(f"Successfully connected to dome TCU. "
-                            f"Left: {state.get('left', '?')} | "
-                            f"Right: {state.get('right', '?')}")
-                return True
-            else:
-                logger.error("Dome TCU reachable but returned no state data")
-                self.connected = False
-                return False
-
-        except Exception as e:
-            logger.error(f"Dome connection error: {e}")
-            self.connected = False
-            return False
-
-    def disconnect(self):
-        """Disconnect from the dome TCU."""
-        try:
-            self.connected = False
-            self.base_url = None
-            logger.info("Dome driver disconnected")
+def ask_proceed(prompt: str = "Proceed?") -> bool:
+    """Ask user yes/no. Returns True if yes."""
+    while True:
+        response = input(f"\n  {prompt} [y/n]: ").strip().lower()
+        if response in ('y', 'yes'):
             return True
-        except Exception as e:
-            logger.error(f"Dome disconnect error: {e}")
+        if response in ('n', 'no'):
             return False
+        print("  Please enter y or n.")
 
-    def is_connected(self) -> bool:
-        """Check whether the dome TCU is reachable and returning valid state."""
-        if not self.connected or not self.base_url:
-            return False
+def ask_continue_after_failure() -> bool:
+    """Ask user whether to continue after a test failure."""
+    print("\n  !! TEST STEP FAILED !!")
+    return ask_proceed("Continue to next test anyway?")
+
+def print_state(driver: DomeDriver):
+    """Print current dome state in a readable format."""
+    try:
+        state = driver.get_state()
+        print(f"  Left panel  : {state.get('left',  '???')}")
+        print(f"  Right panel : {state.get('right', '???')}")
+        print(f"  Closed      : {state.get('closed', '???')}")
+        last = "".join(state.get('lastChars', []))[-10:]
+        if last:
+            print(f"  Last chars  : {last}")
+    except DomeError as e:
+        print(f"  ERROR reading state: {e}")
+
+def wait_with_progress(driver: DomeDriver, target_left: str, target_right: str,
+                       timeout: int, poll_interval: float = 2.0) -> bool:
+    """
+    Poll dome state with printed progress until target reached or timeout.
+    Returns True if target state reached.
+    """
+    print(f"\n  Waiting for: left={target_left}, right={target_right}")
+    print(f"  Timeout: {timeout}s  |  Polling every {poll_interval}s")
+    print()
+    start = time.time()
+    left = right = "unknown"
+    while time.time() - start < timeout:
         try:
-            state = self._get_raw_state()
-            return state is not None
-        except Exception as e:
-            logger.error(f"Dome connection check error: {e}")
-            return False
-
-    # ------------------------------------------------------------------
-    # Status / State
-    # ------------------------------------------------------------------
-
-    def _get_raw_state(self) -> Optional[Dict[str, Any]]:
-        """
-        Internal - fetch raw dome state dict from Node-RED /dome/state endpoint.
-        Returns None on failure.
-        
-        Expected response:
-            {
-                "left": "closed",
-                "right": "closed",
-                "closed": true,
-                "lastChars": ["0", "0", ...]
-            }
-        """
-        try:
-            r = requests.get(
-                f"{self.base_url}/dome/state",
-                timeout=self.timeout_status
-            )
-            r.raise_for_status()
-            return r.json()
-        except requests.exceptions.Timeout:
-            logger.error("Dome state request timed out")
-            return None
-        except requests.exceptions.ConnectionError:
-            logger.error("Dome state connection error - TCU unreachable")
-            return None
-        except requests.exceptions.JSONDecodeError:
-            logger.error("Dome state returned invalid JSON")
-            return None
-        except Exception as e:
-            logger.error(f"Dome state request failed: {e}")
-            return None
-
-    def get_state(self) -> Dict[str, Any]:
-        """
-        Get current dome state. Returns a dict with left, right, closed fields.
-        Returns a safe default dict with STATE_UNKNOWN values on failure.
-        """
-        if not self.connected:
-            raise DomeError("Cannot get state - dome not connected")
-
-        state = self._get_raw_state()
-        if state is None:
-            return {
-                "left": self.STATE_UNKNOWN,
-                "right": self.STATE_UNKNOWN,
-                "closed": False,
-                "lastChars": []
-            }
-        return state
-
-    def get_left_state(self) -> str:
-        """Get the current state of the left panel."""
-        return self.get_state().get('left', self.STATE_UNKNOWN)
-
-    def get_right_state(self) -> str:
-        """Get the current state of the right panel."""
-        return self.get_state().get('right', self.STATE_UNKNOWN)
-
-    def is_closed(self) -> bool:
-        """Returns True only if both panels are confirmed closed."""
-        return self.get_state().get('closed', False)
-
-    def is_open(self) -> bool:
-        """Returns True only if both panels are confirmed open."""
-        state = self.get_state()
-        return (state.get('left') == self.STATE_OPEN and
-                state.get('right') == self.STATE_OPEN)
-
-    def is_moving(self) -> bool:
-        """Returns True if either panel is currently opening or closing."""
-        state = self.get_state()
-        moving_states = {self.STATE_OPENING, self.STATE_CLOSING}
-        return (state.get('left') in moving_states or
-                state.get('right') in moving_states)
-
-    def get_dome_info(self) -> Dict[str, Any]:
-        """Get full dome status info dict, matching telescope driver pattern."""
-        if not self.connected:
-            return {'connected': False}
-        try:
-            state = self.get_state()
-            return {
-                "connected": True,
-                "left": state.get('left', self.STATE_UNKNOWN),
-                "right": state.get('right', self.STATE_UNKNOWN),
-                "closed": state.get('closed', False),
-                "is_open": self.is_open(),
-                "is_moving": self.is_moving(),
-                "last_serial_chars": state.get('lastChars', [])
-            }
-        except Exception as e:
-            logger.error(f"Failed to get dome info: {e}")
-            return {"connected": True, "error": str(e)}
-
-    # ------------------------------------------------------------------
-    # Internal HTTP command helper
-    # ------------------------------------------------------------------
-
-    def _send_command(self, endpoint: str, timeout: Optional[int] = None) -> bool:
-        """
-        Internal - send a PUT command to a Node-RED dome endpoint.
-        Returns True on HTTP 200, False on any failure.
-        
-        NOTE: Command endpoints currently have no HTTP response nodes wired
-        in Node-RED - they will hang until response nodes are added by the team.
-        Do not call movement commands until this is confirmed resolved.
-        """
-        if not self.connected:
-            raise DomeError(f"Cannot send command {endpoint} - dome not connected")
-        if timeout is None:
-            timeout = self.timeout_command
-        try:
-            r = requests.put(
-                f"{self.base_url}{endpoint}",
-                timeout=timeout
-            )
-            r.raise_for_status()
-            logger.debug(f"Command {endpoint} → {r.status_code}")
-            return r.status_code == 200
-        except requests.exceptions.Timeout:
-            logger.error(f"Command {endpoint} timed out after {timeout}s")
-            return False
-        except requests.exceptions.ConnectionError:
-            logger.error(f"Command {endpoint} connection error")
-            return False
-        except Exception as e:
-            logger.error(f"Command {endpoint} failed: {e}")
-            return False
-
-    # ------------------------------------------------------------------
-    # Polling helper
-    # ------------------------------------------------------------------
-
-    def _wait_for_state(
-        self,
-        target_left: str,
-        target_right: str,
-        timeout: Optional[int] = None,
-        poll_interval: Optional[float] = None
-    ) -> bool:
-        """
-        Poll dome state until both panels reach target states or timeout.
-        Used after issuing movement commands to confirm completion.
-        """
-        if timeout is None:
-            timeout = self.timeout_move
-        if poll_interval is None:
-            poll_interval = self.poll_interval
-        logger.info(f"Waiting for dome state: left={target_left}, right={target_right}")
-        start = time.time()
-        while time.time() - start < timeout:
-            state = self.get_state()
-            left = state.get('left')
-            right = state.get('right')
-            logger.debug(f"  Dome state: left={left} | right={right}")
+            state = driver.get_state()
+            left  = state.get('left',  'unknown')
+            right = state.get('right', 'unknown')
+            elapsed = int(time.time() - start)
+            print(f"  [{elapsed:>3}s]  Left: {left:<16}  Right: {right}", end='\r')
             if left == target_left and right == target_right:
-                logger.info("Target dome state reached")
+                print()  # clear the \r line
+                print(f"\n  Target state reached after {elapsed}s")
                 return True
-            time.sleep(poll_interval)
-        logger.warning(f"Dome state timeout after {timeout}s - "
-                       f"left={left}, right={right}")
+        except DomeError as e:
+            print(f"\n  ERROR polling state: {e}")
+        time.sleep(poll_interval)
+    print()  # clear the \r line
+    print(f"\n  TIMEOUT after {timeout}s  |  Last: left={left}, right={right}")
+    return False
+
+def run_test(label: str, fn, *args) -> bool:
+    """
+    Run a single test function, print result, return success bool.
+    fn should return True on success.
+    """
+    print(f"\n  Running: {label}...")
+    try:
+        result = fn(*args)
+        if result:
+            print(f"  PASSED: {label}")
+        else:
+            print(f"  FAILED: {label}")
+        return result
+    except Exception as e:
+        print(f"  ERROR: {label} raised exception: {e}")
         return False
 
-    # ------------------------------------------------------------------
-    # Dome commands
-    # NOTE: These will hang until HTTP response nodes are added to Node-RED.
-    #       Confirm with team before calling any of these methods.
-    #       Pre/post state checks are included for safety.
-    # ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Test sections
+# ---------------------------------------------------------------------------
 
-    def open(self) -> bool:
-        """
-        Open both dome panels.
-        Checks current state before commanding and polls for completion.
-        """
-        if not self.is_connected():
-            logger.error("Cannot open dome - not connected")
-            return False
-        try:
-            state = self.get_state()
-            if state.get('closed') is False and self.is_open():
-                logger.info("Dome already open - no action taken")
-                return True
+def test_status_checks(driver: DomeDriver) -> bool:
+    """Run all read-only status checks. Returns True if all pass."""
+    section("SECTION 1: STATUS CHECKS (read-only, no movement)")
 
-            logger.info("Opening dome (both panels)...")
-            success = self._send_command("/dome/true")
-            if not success:
+    all_passed = True
+
+    step("1.1  Connection check")
+    connected = driver.is_connected()
+    print(f"  is_connected() : {connected}")
+    if not connected:
+        print("  FAILED: Not connected - cannot continue")
+        return False
+    print("  PASSED")
+
+    step("1.2  Raw state")
+    try:
+        state = driver.get_state()
+        print(f"  Raw state dict : {state}")
+        print("  PASSED")
+    except DomeError as e:
+        print(f"  FAILED: {e}")
+        all_passed = False
+
+    step("1.3  Individual state methods")
+    try:
+        print(f"  get_left_state()  : {driver.get_left_state()}")
+        print(f"  get_right_state() : {driver.get_right_state()}")
+        print(f"  is_open()         : {driver.is_open()}")
+        print(f"  is_closed()       : {driver.is_closed()}")
+        print(f"  is_moving()       : {driver.is_moving()}")
+        print("  PASSED")
+    except DomeError as e:
+        print(f"  FAILED: {e}")
+        all_passed = False
+
+    step("1.4  Full dome info dict")
+    try:
+        info = driver.get_dome_info()
+        for k, v in info.items():
+            print(f"  {k:<22} : {v}")
+        print("  PASSED")
+    except Exception as e:
+        print(f"  FAILED: {e}")
+        all_passed = False
+
+    step("1.5  Disconnect and reconnect cycle")
+    try:
+        config = driver.config
+        print("  Disconnecting...")
+        driver.disconnect()
+        print(f"  is_connected() after disconnect : {driver.is_connected()}")
+        print("  Reconnecting...")
+        reconnected = driver.connect(config)
+        print(f"  Reconnected : {reconnected}")
+        print(f"  is_connected() after reconnect : {driver.is_connected()}")
+        if reconnected:
+            print("  PASSED")
+        else:
+            print("  FAILED: Could not reconnect")
+            all_passed = False
+    except Exception as e:
+        print(f"  FAILED: {e}")
+        all_passed = False
+
+    return all_passed
+
+
+def test_left_panel(driver: DomeDriver) -> bool:
+    """Test left panel open and close. Returns True if all pass."""
+    section("SECTION 2: LEFT PANEL TESTS")
+
+    print("\n  Current dome state:")
+    print_state(driver)
+
+    print(f"\n  This will open and close the LEFT panel only.")
+    print(f"  Right panel will remain unchanged.")
+    if not ask_proceed("Proceed with left panel tests?"):
+        print("  Skipped by user.")
+        return True     # skipped not failed
+
+    all_passed = True
+
+    # --- Open left ---
+    step("2.1  Open left panel")
+    print("\n  Sending open left command...")
+    try:
+        success = driver._send_command("/dome/left/true")
+        if not success:
+            print("  Command returned failure")
+            all_passed = False
+            if not ask_continue_after_failure():
                 return False
-            return self._wait_for_state(self.STATE_OPEN, self.STATE_OPEN)
-
-        except Exception as e:
-            logger.error(f"Dome open failed: {e}")
+        else:
+            print("  Command accepted, polling for state change...")
+            reached = wait_with_progress(
+                driver,
+                target_left=DomeDriver.STATE_OPEN,
+                target_right=driver.get_right_state(),
+                timeout=driver.timeout_move
+            )
+            if reached:
+                print("  PASSED: Left panel opened")
+            else:
+                print("  FAILED: Left panel did not reach open state")
+                all_passed = False
+                if not ask_continue_after_failure():
+                    return False
+    except Exception as e:
+        print(f"  ERROR: {e}")
+        all_passed = False
+        if not ask_continue_after_failure():
             return False
 
-    def close(self) -> bool:
-        """
-        Close both dome panels.
-        Checks current state before commanding and polls for completion.
-        """
-        if not self.is_connected():
-            logger.error("Cannot close dome - not connected")
-            return False
+    print("\n  Current dome state:")
+    print_state(driver)
+
+    # --- Close left ---
+    step("2.2  Close left panel")
+    if not ask_proceed("Proceed with closing left panel?"):
+        print("  Skipped by user.")
+    else:
+        print("\n  Sending close left command...")
         try:
-            if self.is_closed():
-                logger.info("Dome already closed - no action taken")
-                return True
-
-            logger.info("Closing dome (both panels)...")
-            success = self._send_command("/dome/false")
+            success = driver._send_command("/dome/left/false")
             if not success:
-                return False
-            return self._wait_for_state(self.STATE_CLOSED, self.STATE_CLOSED)
-
+                print("  Command returned failure")
+                all_passed = False
+                if not ask_continue_after_failure():
+                    return False
+            else:
+                print("  Command accepted, polling for state change...")
+                reached = wait_with_progress(
+                    driver,
+                    target_left=DomeDriver.STATE_CLOSED,
+                    target_right=driver.get_right_state(),
+                    timeout=driver.timeout_move
+                )
+                if reached:
+                    print("  PASSED: Left panel closed")
+                else:
+                    print("  FAILED: Left panel did not reach closed state")
+                    all_passed = False
+                    if not ask_continue_after_failure():
+                        return False
         except Exception as e:
-            logger.error(f"Dome close failed: {e}")
+            print(f"  ERROR: {e}")
+            all_passed = False
+            if not ask_continue_after_failure():
+                return False
+
+    print("\n  Current dome state:")
+    print_state(driver)
+
+    return all_passed
+
+
+def test_right_panel(driver: DomeDriver) -> bool:
+    """Test right panel open and close. Returns True if all pass."""
+    section("SECTION 3: RIGHT PANEL TESTS")
+
+    print("\n  Current dome state:")
+    print_state(driver)
+
+    print(f"\n  This will open and close the RIGHT panel only.")
+    print(f"  Left panel will remain unchanged.")
+    if not ask_proceed("Proceed with right panel tests?"):
+        print("  Skipped by user.")
+        return True
+
+    all_passed = True
+
+    # --- Open right ---
+    step("3.1  Open right panel")
+    print("\n  Sending open right command...")
+    try:
+        success = driver._send_command("/dome/right/true")
+        if not success:
+            print("  Command returned failure")
+            all_passed = False
+            if not ask_continue_after_failure():
+                return False
+        else:
+            print("  Command accepted, polling for state change...")
+            reached = wait_with_progress(
+                driver,
+                target_left=driver.get_left_state(),
+                target_right=DomeDriver.STATE_OPEN,
+                timeout=driver.timeout_move
+            )
+            if reached:
+                print("  PASSED: Right panel opened")
+            else:
+                print("  FAILED: Right panel did not reach open state")
+                all_passed = False
+                if not ask_continue_after_failure():
+                    return False
+    except Exception as e:
+        print(f"  ERROR: {e}")
+        all_passed = False
+        if not ask_continue_after_failure():
             return False
 
-    def open_left(self) -> bool:
-        """Open left panel only."""
-        if not self.is_connected():
-            logger.error("Cannot open left panel - not connected")
-            return False
+    print("\n  Current dome state:")
+    print_state(driver)
+
+    # --- Close right ---
+    step("3.2  Close right panel")
+    if not ask_proceed("Proceed with closing right panel?"):
+        print("  Skipped by user.")
+    else:
+        print("\n  Sending close right command...")
         try:
-            if self.get_left_state() == self.STATE_OPEN:
-                logger.info("Left panel already open - no action taken")
-                return True
-
-            logger.info("Opening left panel...")
-            success = self._send_command("/dome/left/true")
+            success = driver._send_command("/dome/right/false")
             if not success:
-                return False
-            right_state = self.get_right_state()    # right panel unchanged
-            return self._wait_for_state(self.STATE_OPEN, right_state)
-
+                print("  Command returned failure")
+                all_passed = False
+                if not ask_continue_after_failure():
+                    return False
+            else:
+                print("  Command accepted, polling for state change...")
+                reached = wait_with_progress(
+                    driver,
+                    target_left=driver.get_left_state(),
+                    target_right=DomeDriver.STATE_CLOSED,
+                    timeout=driver.timeout_move
+                )
+                if reached:
+                    print("  PASSED: Right panel closed")
+                else:
+                    print("  FAILED: Right panel did not reach closed state")
+                    all_passed = False
+                    if not ask_continue_after_failure():
+                        return False
         except Exception as e:
-            logger.error(f"Open left panel failed: {e}")
+            print(f"  ERROR: {e}")
+            all_passed = False
+            if not ask_continue_after_failure():
+                return False
+
+    print("\n  Current dome state:")
+    print_state(driver)
+
+    return all_passed
+
+
+def test_full_dome(driver: DomeDriver) -> bool:
+    """Test full dome open and close. Returns True if all pass."""
+    section("SECTION 4: FULL DOME TESTS")
+
+    print("\n  Current dome state:")
+    print_state(driver)
+
+    print(f"\n  This will open BOTH panels fully, then close BOTH panels.")
+    if not ask_proceed("Proceed with full dome open/close test?"):
+        print("  Skipped by user.")
+        return True
+
+    all_passed = True
+
+    # --- Full open ---
+    step("4.1  Open both panels")
+    print("\n  Sending full dome open command...")
+    try:
+        success = driver._send_command("/dome/true")
+        if not success:
+            print("  Command returned failure")
+            all_passed = False
+            if not ask_continue_after_failure():
+                return False
+        else:
+            print("  Command accepted, polling for state change...")
+            reached = wait_with_progress(
+                driver,
+                target_left=DomeDriver.STATE_OPEN,
+                target_right=DomeDriver.STATE_OPEN,
+                timeout=driver.timeout_move
+            )
+            if reached:
+                print("  PASSED: Both panels opened")
+            else:
+                print("  FAILED: Dome did not reach fully open state")
+                all_passed = False
+                if not ask_continue_after_failure():
+                    return False
+    except Exception as e:
+        print(f"  ERROR: {e}")
+        all_passed = False
+        if not ask_continue_after_failure():
             return False
 
-    def close_left(self) -> bool:
-        """Close left panel only."""
-        if not self.is_connected():
-            logger.error("Cannot close left panel - not connected")
-            return False
+    print("\n  Current dome state:")
+    print_state(driver)
+
+    # --- Full close ---
+    step("4.2  Close both panels")
+    if not ask_proceed("Proceed with closing both panels?"):
+        print("  Skipped by user.")
+    else:
+        print("\n  Sending full dome close command...")
         try:
-            if self.get_left_state() == self.STATE_CLOSED:
-                logger.info("Left panel already closed - no action taken")
-                return True
-
-            logger.info("Closing left panel...")
-            success = self._send_command("/dome/left/false")
+            success = driver._send_command("/dome/false")
             if not success:
+                print("  Command returned failure")
+                all_passed = False
+                if not ask_continue_after_failure():
+                    return False
+            else:
+                print("  Command accepted, polling for state change...")
+                reached = wait_with_progress(
+                    driver,
+                    target_left=DomeDriver.STATE_CLOSED,
+                    target_right=DomeDriver.STATE_CLOSED,
+                    timeout=driver.timeout_move
+                )
+                if reached:
+                    print("  PASSED: Both panels closed")
+                else:
+                    print("  FAILED: Dome did not reach fully closed state")
+                    all_passed = False
+                    if not ask_continue_after_failure():
+                        return False
+        except Exception as e:
+            print(f"  ERROR: {e}")
+            all_passed = False
+            if not ask_continue_after_failure():
                 return False
-            right_state = self.get_right_state()    # right panel unchanged
-            return self._wait_for_state(self.STATE_CLOSED, right_state)
 
-        except Exception as e:
-            logger.error(f"Close left panel failed: {e}")
-            return False
+    print("\n  Current dome state:")
+    print_state(driver)
 
-    def open_right(self) -> bool:
-        """Open right panel only."""
-        if not self.is_connected():
-            logger.error("Cannot open right panel - not connected")
-            return False
-        try:
-            if self.get_right_state() == self.STATE_OPEN:
-                logger.info("Right panel already open - no action taken")
-                return True
+    return all_passed
 
-            logger.info("Opening right panel...")
-            success = self._send_command("/dome/right/true")
-            if not success:
-                return False
-            left_state = self.get_left_state()      # left panel unchanged
-            return self._wait_for_state(left_state, self.STATE_OPEN)
 
-        except Exception as e:
-            logger.error(f"Open right panel failed: {e}")
-            return False
+def ensure_closed(driver: DomeDriver):
+    """Always attempt to close the dome at the end of testing."""
+    section("FINAL: ENSURING DOME IS CLOSED")
+    print("\n  Checking current state...")
+    print_state(driver)
 
-    def close_right(self) -> bool:
-        """Close right panel only."""
-        if not self.is_connected():
-            logger.error("Cannot close right panel - not connected")
-            return False
-        try:
-            if self.get_right_state() == self.STATE_CLOSED:
-                logger.info("Right panel already closed - no action taken")
-                return True
+    if driver.is_closed():
+        print("\n  Dome is already closed. Nothing to do.")
+        return
 
-            logger.info("Closing right panel...")
-            success = self._send_command("/dome/right/false")
-            if not success:
-                return False
-            left_state = self.get_left_state()      # left panel unchanged
-            return self._wait_for_state(left_state, self.STATE_CLOSED)
+    print("\n  Dome is not fully closed. Sending close command...")
+    try:
+        success = driver._send_command("/dome/false")
+        if not success:
+            print("  WARNING: Close command returned failure - check dome manually!")
+            return
+        print("  Waiting for dome to close...")
+        reached = wait_with_progress(
+            driver,
+            target_left=DomeDriver.STATE_CLOSED,
+            target_right=DomeDriver.STATE_CLOSED,
+            timeout=driver.timeout_move
+        )
+        if reached:
+            print("  Dome confirmed closed.")
+        else:
+            print("  WARNING: Dome did not confirm closed state - check dome manually!")
+    except Exception as e:
+        print(f"  ERROR during close: {e}")
+        print("  WARNING: Check dome state manually!")
 
-        except Exception as e:
-            logger.error(f"Close right panel failed: {e}")
-            return False
 
-    def abort(self) -> bool:
-        """
-        Send abort command to dome.
-        Sets dome_abort global flag in Node-RED for 10 seconds, blocking movement.
-        Note: Node-RED flow has a 10s delay before returning 200.
-        """
-        if not self.is_connected():
-            logger.error("Cannot abort - dome not connected")
-            return False
-        try:
-            logger.warning("Sending dome abort command...")
-            return self._send_command("/dome/abort", timeout=self.timeout_abort)
-        except Exception as e:
-            logger.error(f"Dome abort failed: {e}")
-            return False
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def main():
 
-    def reset_motor(self) -> bool:
-        """
-        Reset dome motor.
-        NOTE: Confirm exact hardware behaviour with team before using.
-        """
-        if not self.is_connected():
-            logger.error("Cannot reset motor - dome not connected")
-            return False
-        try:
-            logger.warning("Sending dome motor reset command...")
-            return self._send_command("/dome/reset")
-        except Exception as e:
-            logger.error(f"Dome motor reset failed: {e}")
-            return False
+    # Load devices.yaml
+    config_path = Path(__file__).parent.parent.parent / 'config' / 'devices.yaml'
+    if not config_path.exists():
+        print(f"ERROR: devices.yaml not found at {config_path}")
+        sys.exit(1)
 
-    def set_locked(self, locked: bool = True) -> bool:
-        """
-        Set dome locked state.
-        NOTE: Exact behaviour of /dome/locked endpoint TBC - confirm with team.
-        """
-        if not self.is_connected():
-            logger.error("Cannot set lock - dome not connected")
-            return False
-        try:
-            logger.info(f"Setting dome locked = {locked}")
-            # TODO: confirm endpoint and method with team
-            return self._send_command("/dome/locked")
-        except Exception as e:
-            logger.error(f"Dome lock command failed: {e}")
-            return False
+    with open(config_path) as f:
+        devices = yaml.safe_load(f)
+
+    if TEST_DOME_KEY not in devices:
+        print(f"ERROR: '{TEST_DOME_KEY}' not found in devices.yaml")
+        sys.exit(1)
+
+    dome_config = devices[TEST_DOME_KEY]
+    dome_id     = dome_config.get('dome_id', TEST_DOME_KEY)
+
+    # Title
+    separator("=", 60)
+    print(f"  MT KENT OBSERVATORY - DOME ACTION TEST SCRIPT")
+    print(f"  {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  Target dome : {dome_id}  ({TEST_DOME_KEY})")
+    separator("=", 60)
+    print()
+    print("  !! This script commands REAL hardware !!")
+    print("  !! Ensure the dome area is clear before proceeding !!")
+    print("  !! The dome will always be closed at the end !!")
+
+    if not ask_proceed("\nReady to begin? Start with status checks only"):
+        print("\n  Aborted by user.")
+        sys.exit(0)
+
+    # Connect
+    section("CONNECTING")
+    print(f"\n  Connecting to {dome_id}...")
+    driver = DomeDriver()
+    connected = driver.connect(dome_config)
+    if not connected:
+        print(f"  ERROR: Could not connect to {dome_id}. Exiting.")
+        sys.exit(1)
+    print(f"  Connected to {dome_id}")
+
+    # Track results
+    results = {}
+
+    # --- Status checks (always run) ---
+    results['status'] = test_status_checks(driver)
+
+    # --- Movement tests ---
+    section("MOVEMENT TESTS")
+    print("\n  Status checks complete.")
+    print("  The following sections will command physical dome movement.")
+    print("  You will be prompted before each test.")
+
+    if not ask_proceed("Proceed to movement tests?"):
+        print("\n  Movement tests skipped by user.")
+    else:
+        results['left_panel']  = test_left_panel(driver)
+        results['right_panel'] = test_right_panel(driver)
+        results['full_dome']   = test_full_dome(driver)
+
+    # --- Always close at end ---
+    ensure_closed(driver)
+
+    # --- Disconnect ---
+    section("DISCONNECTING")
+    driver.disconnect()
+    print("  Disconnected.")
+
+    # --- Summary ---
+    section("TEST SUMMARY")
+    print()
+    all_passed = True
+    for test_name, passed in results.items():
+        status = "PASSED" if passed else "FAILED"
+        print(f"  {test_name:<20} : {status}")
+        if not passed:
+            all_passed = False
+    print()
+    separator("=")
+    if all_passed:
+        print("  ALL TESTS PASSED")
+    else:
+        print("  SOME TESTS FAILED - review output above")
+    separator("=")
+    print()
+
+if __name__ == "__main__":
+    main()
