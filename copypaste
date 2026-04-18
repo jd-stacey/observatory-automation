@@ -1,573 +1,1155 @@
+#!/usr/bin/env python3
 """
-Comprehensive end-to-end test script for dome operations.
-Covers status checks and physical movement tests with user confirmation
-at each step. Always attempts to leave the dome closed at the end.
-
-!! IMPORTANT: This script commands REAL hardware. Read each prompt carefully !!
-
-Usage:
-    python testraptordome.py
-
-Configuration:
-    Change TEST_DOME_KEY below to test a different dome.
-    Key must match an entry in devices.yaml.
-
-Location:
-    testingcode/actions/testraptordome.py
+Observatory Control System — Raptor (T2)
+Modern dark-themed tkinter GUI for telescope, covers, dome, and rotator control.
+Connects via ALPACA HTTP (telescope/covers/rotator) and Node-RED HTTP (dome).
 """
-
-from pathlib import Path
-import sys
-import yaml
+ 
+import tkinter as tk
+from tkinter import font as tkfont
+import threading
 import time
-
-# ---------------------------------------------------------------------------
-# Path setup - actions/ is inside testingcode/, src is three levels up
-# ---------------------------------------------------------------------------
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
-from autopho.devices.drivers.nodered_dome import DomeDriver, DomeError
-
-# ---------------------------------------------------------------------------
-# Configuration - change this to test a different dome
-# ---------------------------------------------------------------------------
-TEST_DOME_KEY = "dome_t2"
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def separator(char="-", width=60):
-    print(char * width)
-
-def section(title: str):
-    print()
-    separator("=")
-    print(f"  {title}")
-    separator("=")
-
-def step(title: str):
-    print()
-    separator()
-    print(f"  {title}")
-    separator()
-
-def ask_proceed(prompt: str = "Proceed?") -> bool:
-    """Ask user yes/no. Returns True if yes."""
-    while True:
-        response = input(f"\n  {prompt} [y/n]: ").strip().lower()
-        if response in ('y', 'yes'):
-            return True
-        if response in ('n', 'no'):
+import requests
+import logging
+import sys
+import os
+from datetime import datetime, timezone
+from typing import Optional, Dict, Any
+ 
+# ── Try importing device drivers ───────────────────────────────────────────────
+try:
+    from alpaca_telescope import AlpacaTelescopeDriver, AlpacaTelescopeError
+    TELESCOPE_DRIVER = True
+except ImportError:
+    TELESCOPE_DRIVER = False
+ 
+try:
+    from alpaca_rotator import AlpacaRotatorDriver, AlpacaRotatorError
+    ROTATOR_DRIVER = True
+except ImportError:
+    ROTATOR_DRIVER = False
+ 
+try:
+    from alpaca_cover import AlpacaCoverDriver, AlpacaCoverError
+    COVER_DRIVER = True
+except ImportError:
+    COVER_DRIVER = False
+ 
+try:
+    from nodered_dome import DomeDriver, DomeError
+    DOME_DRIVER = True
+except ImportError:
+    DOME_DRIVER = False
+ 
+ 
+# ── Colour palette ─────────────────────────────────────────────────────────────
+BG          = "#0B0F14"
+SURFACE     = "#121821"
+PANEL       = "#171E2A"
+BORDER      = "#26303A"
+ACCENT      = "#00E5FF"
+GREEN       = "#22C55E"
+RED         = "#EF4444"
+AMBER       = "#F59E0B"
+TEXT_PRI    = "#E6EDF3"
+TEXT_SEC    = "#8B949E"
+INACTIVE    = "#2A313B"
+ 
+# ── Device configs (match devices.yaml) ───────────────────────────────────────
+DEVICE_CONFIGS = {
+    "telescope": {"address": "127.0.0.1:11111", "device_number": 0, "settle_time": 2.0},
+    "rotator":   {"address": "127.0.0.1:11112", "device_number": 0, "settle_time": 0.1,
+                  "mechanical_limits": {"min_deg": 94.0, "max_deg": 320.0}},
+    "cover":     {"address": "127.0.0.1:11112", "device_number": 0,
+                  "operation_timeout": 30.0, "settle_time": 15.0},
+    "dome":      {"host": "192.168.249.27", "port": 1880, "dome_id": "DOME",
+                  "timeout_status": 2, "timeout_move": 75, "timeout_command": 5,
+                  "poll_interval": 2.0, "max_retries": 3},
+}
+ 
+ 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Canvas icon drawers
+# ══════════════════════════════════════════════════════════════════════════════
+ 
+def draw_telescope(canvas, cx, cy, color):
+    """Draw telescope icon centred at cx, cy."""
+    canvas.delete("all")
+    c = color
+    # tripod legs
+    canvas.create_line(cx, cy+8, cx-12, cy+22, fill=c, width=2, capstyle="round")
+    canvas.create_line(cx, cy+8, cx+12, cy+22, fill=c, width=2, capstyle="round")
+    canvas.create_line(cx, cy+8, cx, cy+22,    fill=c, width=2, capstyle="round")
+    canvas.create_line(cx-14, cy+22, cx+14, cy+22, fill=c, width=2, capstyle="round")
+    # tube
+    canvas.create_rectangle(cx-16, cy-10, cx+16, cy+8, outline=c, width=2)
+    # objective lens cap (circle at left end)
+    canvas.create_oval(cx-20, cy-6, cx-14, cy+4, outline=c, width=2)
+    # eyepiece stub (right end)
+    canvas.create_rectangle(cx+16, cy-4, cx+22, cy+2, outline=c, width=2)
+    # finder scope (small tube on top)
+    canvas.create_rectangle(cx-10, cy-16, cx+8, cy-10, outline=c, width=1)
+    canvas.create_line(cx-10, cy-13, cx-16, cy-8, fill=c, width=1)
+    canvas.create_line(cx+8,  cy-13, cx+14, cy-8, fill=c, width=1)
+ 
+ 
+def draw_covers(canvas, cx, cy, color):
+    canvas.delete("all")
+    c = color
+    r = 20
+    canvas.create_oval(cx-r, cy-r, cx+r, cy+r, outline=c, width=2)
+    # left panel
+    canvas.create_arc(cx-r, cy-r, cx+r, cy+r, start=90, extent=180,
+                      outline=c, fill=PANEL, width=2, style="chord")
+    # right panel
+    canvas.create_arc(cx-r, cy-r, cx+r, cy+r, start=270, extent=180,
+                      outline=c, fill=PANEL, width=2, style="chord")
+    # centre divider
+    canvas.create_line(cx, cy-r, cx, cy+r, fill=c, width=2)
+    # hinge dots
+    canvas.create_oval(cx-3, cy-3, cx+3, cy+3, outline=c, width=2)
+    # bracket lines (L/R)
+    for dx in (-r-6, r+6):
+        canvas.create_line(cx+dx, cy-6, cx+dx, cy+6, fill=c, width=2)
+        canvas.create_line(cx+dx-3, cy-6, cx+dx+3, cy-6, fill=c, width=1)
+        canvas.create_line(cx+dx-3, cy+6, cx+dx+3, cy+6, fill=c, width=1)
+ 
+ 
+def draw_dome(canvas, cx, cy, color):
+    canvas.delete("all")
+    c = color
+    # dome arc
+    canvas.create_arc(cx-22, cy-14, cx+22, cy+18, start=0, extent=180,
+                      outline=c, fill=PANEL, width=2, style="arc")
+    # walls
+    canvas.create_rectangle(cx-22, cy+2, cx+22, cy+12, outline=c, width=2)
+    # door slit
+    canvas.create_rectangle(cx-7, cy+2, cx+7, cy+12, outline=c, width=1)
+    # base
+    canvas.create_rectangle(cx-26, cy+12, cx+26, cy+16, outline=c, width=1)
+ 
+ 
+def draw_rotator(canvas, cx, cy, color, accent=ACCENT):
+    canvas.delete("all")
+    c = color
+    ac = accent if color != TEXT_SEC else "#4A5568"
+    # outer ring
+    canvas.create_oval(cx-20, cy-20, cx+20, cy+20, outline=c, width=2)
+    # inner ring
+    canvas.create_oval(cx-9,  cy-9,  cx+9,  cy+9,  outline=c, width=2)
+    # centre dot
+    canvas.create_oval(cx-3, cy-3, cx+3, cy+3, fill=c, outline=c)
+    # rotation arrows (left arc)
+    canvas.create_arc(cx-26, cy-14, cx-6, cy+14, start=210, extent=120,
+                      outline=ac, width=2, style="arc")
+    # arrowhead left
+    canvas.create_line(cx-26, cy+2, cx-22, cy-4, fill=ac, width=2)
+    canvas.create_line(cx-26, cy+2, cx-20, cy+4, fill=ac, width=2)
+    # rotation arrows (right arc)
+    canvas.create_arc(cx+6, cy-14, cx+26, cy+14, start=330, extent=120,
+                      outline=ac, width=2, style="arc")
+    # arrowhead right
+    canvas.create_line(cx+26, cy+2, cx+22, cy-4, fill=ac, width=2)
+    canvas.create_line(cx+26, cy+2, cx+20, cy+4, fill=ac, width=2)
+ 
+ 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Reusable widgets
+# ══════════════════════════════════════════════════════════════════════════════
+ 
+class Lamp(tk.Canvas):
+    """Small circular status lamp. Click to trigger callback."""
+    def __init__(self, parent, callback=None, **kw):
+        super().__init__(parent, width=11, height=11, bg=PANEL,
+                         highlightthickness=0, cursor="hand2", **kw)
+        self._cb = callback
+        self._state = "off"
+        self._anim_id = None
+        self._bright = True
+        self._draw()
+        if callback:
+            self.bind("<Button-1>", lambda e: callback())
+ 
+    def _draw(self):
+        self.delete("all")
+        colors = {"connected": GREEN, "disconnected": RED, "connecting": AMBER, "off": INACTIVE}
+        c = colors.get(self._state, INACTIVE)
+        if self._state != "off":
+            # glow ring
+            self.create_oval(1, 1, 10, 10, fill=c, outline=c)
+        else:
+            self.create_oval(1, 1, 10, 10, fill=INACTIVE, outline=BORDER)
+ 
+    def set_state(self, state):
+        self._state = state
+        if self._anim_id:
+            self.after_cancel(self._anim_id)
+            self._anim_id = None
+        if state == "connecting":
+            self._pulse()
+        else:
+            self._draw()
+ 
+    def _pulse(self):
+        self._bright = not self._bright
+        self.delete("all")
+        c = AMBER if self._bright else BORDER
+        self.create_oval(1, 1, 10, 10, fill=c, outline=c)
+        self._anim_id = self.after(500, self._pulse)
+ 
+ 
+class SmallButton(tk.Frame):
+    """Compact action button matching the futuristic aesthetic."""
+    def __init__(self, parent, text, command=None, danger=False, **kw):
+        super().__init__(parent, bg=PANEL, **kw)
+        border_c = RED if danger else BORDER
+        self._danger = danger
+        self._cmd = command
+        self._btn = tk.Label(
+            self, text=text,
+            font=("Consolas", 8, "bold"),
+            fg=RED if danger else TEXT_SEC,
+            bg=PANEL,
+            padx=8, pady=3,
+            relief="flat",
+            cursor="hand2" if command else "arrow",
+        )
+        self._btn.pack()
+        self.config(highlightbackground=border_c, highlightthickness=1, highlightcolor=border_c)
+        if command:
+            self._btn.bind("<Enter>", self._on_enter)
+            self._btn.bind("<Leave>", self._on_leave)
+            self._btn.bind("<Button-1>", lambda e: command() if self._enabled else None)
+        self._enabled = True
+ 
+    def _on_enter(self, e):
+        if self._enabled:
+            self._btn.config(fg=ACCENT, bg="#1E2A38")
+            self.config(highlightbackground=ACCENT)
+ 
+    def _on_leave(self, e):
+        self._btn.config(fg=RED if self._danger else TEXT_SEC, bg=PANEL)
+        self.config(highlightbackground=RED if self._danger else BORDER)
+ 
+    def set_enabled(self, enabled: bool):
+        self._enabled = enabled
+        self._btn.config(
+            fg=(RED if self._danger else TEXT_SEC) if enabled else "#3A4555",
+            cursor="hand2" if enabled else "arrow"
+        )
+ 
+ 
+class InfoBlock(tk.Frame):
+    """Label/value pair row."""
+    def __init__(self, parent, label, **kw):
+        super().__init__(parent, bg=PANEL, **kw)
+        tk.Label(self, text=label.upper(), font=("Consolas", 7, "bold"),
+                 fg=TEXT_SEC, bg=PANEL, anchor="w").pack(side="left")
+        self._val = tk.Label(self, text="—", font=("Consolas", 9),
+                             fg=TEXT_PRI, bg=PANEL, anchor="e")
+        self._val.pack(side="right")
+ 
+    def set(self, text, color=None):
+        self._val.config(text=text, fg=color or TEXT_PRI)
+ 
+ 
+class StatusBadge(tk.Label):
+    def __init__(self, parent, **kw):
+        super().__init__(parent, text="OFFLINE", font=("Consolas", 8, "bold"),
+                         fg=TEXT_SEC, bg=PANEL, padx=0, pady=0, **kw)
+ 
+    def set(self, text, color=TEXT_SEC):
+        self.config(text=text.upper(), fg=color)
+ 
+ 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Device Card — the main repeating unit
+# ══════════════════════════════════════════════════════════════════════════════
+ 
+class DeviceCard(tk.Frame):
+    """
+    A bordered card containing:
+      [icon box 80×80] | [status + info rows] | [action buttons]
+    All cards are the same fixed height so status columns line up.
+    """
+    CARD_HEIGHT = 110
+    ICON_SIZE   = 80    # fixed square for icon area
+ 
+    def __init__(self, parent, title: str, draw_fn, **kw):
+        super().__init__(parent, bg=PANEL,
+                         highlightbackground=BORDER, highlightthickness=1, **kw)
+        self._draw_fn = draw_fn
+        self._title   = title
+        self._conn    = False
+ 
+        # ── Left: icon box (fixed size) ────────────────────────────────────
+        icon_frame = tk.Frame(self, bg=SURFACE, width=self.ICON_SIZE,
+                              height=self.CARD_HEIGHT)
+        icon_frame.pack(side="left", fill="y")
+        icon_frame.pack_propagate(False)
+ 
+        self.icon_canvas = tk.Canvas(icon_frame, width=self.ICON_SIZE,
+                                     height=self.ICON_SIZE - 22,
+                                     bg=SURFACE, highlightthickness=0)
+        self.icon_canvas.pack(pady=(8, 0))
+ 
+        tk.Label(icon_frame, text=title, font=("Consolas", 7, "bold"),
+                 fg=TEXT_SEC, bg=SURFACE, letterSpacing=2).pack()
+ 
+        lamp_row = tk.Frame(icon_frame, bg=SURFACE)
+        lamp_row.pack(pady=3)
+        self.lamp_a = Lamp(lamp_row, bg=SURFACE)
+        self.lamp_a.pack(side="left", padx=3)
+        self.lamp_b = Lamp(lamp_row, bg=SURFACE)
+        self.lamp_b.pack(side="left", padx=3)
+ 
+        # ── Thin vertical separator ────────────────────────────────────────
+        sep = tk.Frame(self, bg=BORDER, width=1)
+        sep.pack(side="left", fill="y")
+ 
+        # ── Middle: info area ──────────────────────────────────────────────
+        self.info_frame = tk.Frame(self, bg=PANEL)
+        self.info_frame.pack(side="left", fill="both", expand=True, padx=10, pady=8)
+ 
+        self.badge = StatusBadge(self.info_frame)
+        self.badge.pack(anchor="w", pady=(0, 5))
+ 
+        self.rows_frame = tk.Frame(self.info_frame, bg=PANEL)
+        self.rows_frame.pack(fill="both", expand=True)
+ 
+        # ── Right: action buttons ──────────────────────────────────────────
+        self.btn_frame = tk.Frame(self, bg=PANEL)
+        self.btn_frame.pack(side="right", fill="y", padx=8, pady=8)
+ 
+        # Draw initial (dimmed) icon
+        self._redraw_icon(connected=False)
+ 
+    def _redraw_icon(self, connected: bool):
+        color = TEXT_PRI if connected else "#3A4555"
+        cx = self.ICON_SIZE // 2
+        cy = (self.ICON_SIZE - 22) // 2
+        self._draw_fn(self.icon_canvas, cx, cy, color)
+ 
+    def add_info_row(self, label: str) -> InfoBlock:
+        row = InfoBlock(self.rows_frame, label)
+        row.pack(fill="x", pady=1)
+        return row
+ 
+    def add_button(self, text: str, command=None, danger=False) -> SmallButton:
+        btn = SmallButton(self.btn_frame, text, command=command, danger=danger)
+        btn.pack(fill="x", pady=2)
+        return btn
+ 
+    def set_lamp(self, state: str):
+        self.lamp_a.set_state(state)
+        self.lamp_b.set_state(state)
+        self._redraw_icon(state == "connected")
+        self._conn = (state == "connected")
+ 
+    def set_lamp_a(self, state): self.lamp_a.set_state(state)
+    def set_lamp_b(self, state): self.lamp_b.set_state(state)
+ 
+    def connect_callback(self, cb):
+        self.lamp_a._cb = cb
+        self.lamp_a.bind("<Button-1>", lambda e: cb())
+        self.lamp_b._cb = cb
+        self.lamp_b.bind("<Button-1>", lambda e: cb())
+ 
+ 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Night Modal
+# ══════════════════════════════════════════════════════════════════════════════
+ 
+class NightModal(tk.Toplevel):
+    def __init__(self, parent, mode: str, on_confirm):
+        super().__init__(parent)
+        self.title("")
+        self.configure(bg=SURFACE)
+        self.resizable(False, False)
+        self.grab_set()
+        self._on_confirm = on_confirm
+        self._mode = mode
+ 
+        # Centre on parent
+        self.update_idletasks()
+        px = parent.winfo_rootx() + parent.winfo_width()//2
+        py = parent.winfo_rooty() + parent.winfo_height()//2
+        self.geometry(f"340x280+{px-170}+{py-140}")
+ 
+        # Border frame
+        outer = tk.Frame(self, bg=ACCENT, padx=1, pady=1)
+        outer.pack(fill="both", expand=True)
+        inner = tk.Frame(outer, bg=SURFACE)
+        inner.pack(fill="both", expand=True)
+ 
+        # Title
+        c = GREEN if mode == "start" else RED
+        label = "◆  START NIGHT" if mode == "start" else "◆  END NIGHT"
+        tk.Label(inner, text=label, font=("Consolas", 11, "bold"),
+                 fg=c, bg=SURFACE).pack(pady=(14, 4))
+ 
+        desc = ("Select operations to perform at session start:" if mode == "start"
+                else "Select shutdown operations to perform:")
+        tk.Label(inner, text=desc, font=("Consolas", 8),
+                 fg=TEXT_SEC, bg=SURFACE, wraplength=290).pack(pady=(0, 10))
+ 
+        # Checkboxes
+        opts = ([("Open dome panels", "dome"),
+                 ("Open telescope covers", "covers"),
+                 ("Enable telescope motors", "motors")]
+                if mode == "start" else
+                [("Park telescope", "park"),
+                 ("Close telescope covers", "covers"),
+                 ("Close dome panels", "dome")])
+ 
+        self._vars = {}
+        opt_frame = tk.Frame(inner, bg=SURFACE)
+        opt_frame.pack(fill="x", padx=24)
+        for label_text, key in opts:
+            var = tk.BooleanVar(value=True)
+            self._vars[key] = var
+            row = tk.Frame(opt_frame, bg=SURFACE)
+            row.pack(fill="x", pady=3)
+            cb = tk.Checkbutton(row, text=label_text.upper(),
+                                variable=var,
+                                font=("Consolas", 8, "bold"),
+                                fg=TEXT_PRI, bg=SURFACE,
+                                selectcolor=PANEL,
+                                activebackground=SURFACE,
+                                activeforeground=ACCENT,
+                                highlightthickness=0)
+            cb.pack(side="left")
+ 
+        # Buttons
+        btn_row = tk.Frame(inner, bg=SURFACE)
+        btn_row.pack(pady=14)
+ 
+        cancel = tk.Label(btn_row, text="CANCEL", font=("Consolas", 8, "bold"),
+                          fg=TEXT_SEC, bg=SURFACE, cursor="hand2", padx=12, pady=5)
+        cancel.pack(side="left", padx=6)
+        cancel.bind("<Button-1>", lambda e: self.destroy())
+        cancel.bind("<Enter>", lambda e: cancel.config(fg=TEXT_PRI))
+        cancel.bind("<Leave>", lambda e: cancel.config(fg=TEXT_SEC))
+ 
+        exec_lbl = "EXECUTE" if mode == "start" else "SHUTDOWN"
+        exec_btn = tk.Label(btn_row, text=exec_lbl, font=("Consolas", 8, "bold"),
+                            fg=c, bg=PANEL, cursor="hand2", padx=12, pady=5,
+                            highlightbackground=c, highlightthickness=1)
+        exec_btn.pack(side="left", padx=6)
+        exec_btn.bind("<Button-1>", self._execute)
+        exec_btn.bind("<Enter>", lambda e: exec_btn.config(bg=SURFACE))
+        exec_btn.bind("<Leave>", lambda e: exec_btn.config(bg=PANEL))
+ 
+    def _execute(self, e=None):
+        opts = {k: v.get() for k, v in self._vars.items()}
+        self.destroy()
+        self._on_confirm(self._mode, opts)
+ 
+ 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Log Console
+# ══════════════════════════════════════════════════════════════════════════════
+ 
+class LogConsole(tk.Frame):
+    COLOURS = {"INFO": ACCENT, "WARN": AMBER, "ERROR": RED, "OK": GREEN, "SYS": TEXT_SEC}
+ 
+    def __init__(self, parent, **kw):
+        super().__init__(parent, bg=BG, **kw)
+        self._text = tk.Text(self, bg=BG, fg=TEXT_PRI,
+                             font=("Consolas", 8),
+                             state="disabled", wrap="word",
+                             relief="flat", highlightthickness=0,
+                             padx=8, pady=6, height=8)
+        scroll = tk.Scrollbar(self, command=self._text.yview, bg=SURFACE,
+                              troughcolor=BG, highlightthickness=0)
+        self._text.config(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        self._text.pack(side="left", fill="both", expand=True)
+ 
+        for tag, color in self.COLOURS.items():
+            self._text.tag_config(f"lvl_{tag}", foreground=color)
+        self._text.tag_config("ts", foreground="#3D4A57")
+ 
+    def log(self, level: str, msg: str):
+        ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        self._text.config(state="normal")
+        self._text.insert("end", ts + "  ", "ts")
+        self._text.insert("end", f"[{level:4s}]  ", f"lvl_{level}")
+        self._text.insert("end", msg + "\n")
+        self._text.see("end")
+        self._text.config(state="disabled")
+ 
+    def clear(self):
+        self._text.config(state="normal")
+        self._text.delete("1.0", "end")
+        self._text.config(state="disabled")
+ 
+ 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Main Application
+# ══════════════════════════════════════════════════════════════════════════════
+ 
+class ObservatoryControl:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("RAPTOR / T2  —  Observatory Control")
+        self.root.configure(bg=BG)
+        self.root.minsize(680, 700)
+ 
+        # Device driver instances (created fresh each connect)
+        self.tel_driver  = None
+        self.rot_driver  = None
+        self.cov_driver  = None
+        self.dome_driver = None
+ 
+        # Build UI
+        self._build_ui()
+        self._start_clock()
+ 
+        # Greet
+        self.log("SYS", "Observatory Control System ready")
+        self.log("INFO", "Ensure Autoslew and ASCOM Remote are running before connecting")
+ 
+    # ── Build UI ───────────────────────────────────────────────────────────────
+ 
+    def _build_ui(self):
+        root = self.root
+ 
+        # ── Header ────────────────────────────────────────────────────────────
+        header = tk.Frame(root, bg=BG)
+        header.pack(fill="x", padx=16, pady=(14, 0))
+ 
+        left_hdr = tk.Frame(header, bg=BG)
+        left_hdr.pack(side="left")
+        tk.Label(left_hdr, text="RAPTOR / T2", font=("Consolas", 18, "bold"),
+                 fg=ACCENT, bg=BG).pack(anchor="w")
+        tk.Label(left_hdr, text="OBSERVATORY CONTROL SYSTEM",
+                 font=("Consolas", 7, "bold"), fg=TEXT_SEC, bg=BG,
+                 letterSpacing=3).pack(anchor="w")
+ 
+        right_hdr = tk.Frame(header, bg=BG)
+        right_hdr.pack(side="right")
+        self.clock_lbl = tk.Label(right_hdr, text="00:00:00",
+                                  font=("Consolas", 16, "bold"),
+                                  fg=TEXT_PRI, bg=BG)
+        self.clock_lbl.pack(anchor="e")
+        tk.Label(right_hdr, text="UTC", font=("Consolas", 7),
+                 fg=TEXT_SEC, bg=BG).pack(anchor="e")
+ 
+        # ── Divider ───────────────────────────────────────────────────────────
+        tk.Frame(root, bg=ACCENT, height=1).pack(fill="x", padx=16, pady=8)
+ 
+        # ── Top controls row ──────────────────────────────────────────────────
+        ctrl = tk.Frame(root, bg=BG)
+        ctrl.pack(fill="x", padx=16, pady=(0, 8))
+ 
+        # Connect All
+        conn_frame = tk.Frame(ctrl, bg=ACCENT, padx=1, pady=1)
+        conn_frame.pack(side="left")
+        self.conn_btn = tk.Label(
+            conn_frame, text="⏻  CONNECT ALL",
+            font=("Consolas", 9, "bold"), fg=ACCENT, bg=SURFACE,
+            padx=14, pady=7, cursor="hand2"
+        )
+        self.conn_btn.pack()
+        self.conn_btn.bind("<Button-1>", lambda e: self._connect_all())
+        self.conn_btn.bind("<Enter>", lambda e: self.conn_btn.config(
+            bg="#1A2530", fg=TEXT_PRI))
+        self.conn_btn.bind("<Leave>", lambda e: self.conn_btn.config(
+            bg=SURFACE, fg=ACCENT))
+ 
+        # Night buttons (right side)
+        end_btn = tk.Label(ctrl, text="☽  END NIGHT",
+                           font=("Consolas", 9, "bold"), fg=RED, bg=BG,
+                           padx=14, pady=7, cursor="hand2",
+                           highlightbackground=RED, highlightthickness=1)
+        end_btn.pack(side="right", padx=(4, 0))
+        end_btn.bind("<Button-1>", lambda e: self._night_modal("end"))
+        end_btn.bind("<Enter>",  lambda e: end_btn.config(bg="#1A1010"))
+        end_btn.bind("<Leave>",  lambda e: end_btn.config(bg=BG))
+ 
+        start_btn = tk.Label(ctrl, text="☀  START NIGHT",
+                             font=("Consolas", 9, "bold"), fg=GREEN, bg=BG,
+                             padx=14, pady=7, cursor="hand2",
+                             highlightbackground=GREEN, highlightthickness=1)
+        start_btn.pack(side="right", padx=(0, 4))
+        start_btn.bind("<Button-1>", lambda e: self._night_modal("start"))
+        start_btn.bind("<Enter>",  lambda e: start_btn.config(bg="#0E1A12"))
+        start_btn.bind("<Leave>",  lambda e: start_btn.config(bg=BG))
+ 
+        # ── Thin rule ─────────────────────────────────────────────────────────
+        tk.Frame(root, bg=BORDER, height=1).pack(fill="x", padx=16, pady=(0, 10))
+ 
+        # ── Device cards ──────────────────────────────────────────────────────
+        cards_frame = tk.Frame(root, bg=BG)
+        cards_frame.pack(fill="x", padx=16)
+ 
+        # TELESCOPE card
+        self.tel_card = DeviceCard(cards_frame, "TELESCOPE", draw_telescope)
+        self.tel_card.pack(fill="x", pady=4)
+        self.tel_card.connect_callback(lambda: self._connect_device("telescope"))
+        self._tel_ra  = self.tel_card.add_info_row("RA")
+        self._tel_dec = self.tel_card.add_info_row("DEC")
+        self._tel_alt = self.tel_card.add_info_row("ALT")
+        self._tel_az  = self.tel_card.add_info_row("AZ")
+        self._tel_status = self.tel_card.add_info_row("STATUS")
+        self._park_btn  = self.tel_card.add_button("PARK",  self._park_telescope)
+        self._abort_btn = self.tel_card.add_button("ABORT", self._abort_slew, danger=True)
+        self._park_btn.set_enabled(False)
+        self._abort_btn.set_enabled(False)
+ 
+        # COVERS card
+        self.cov_card = DeviceCard(cards_frame, "COVERS", draw_covers)
+        self.cov_card.pack(fill="x", pady=4)
+        self.cov_card.connect_callback(lambda: self._connect_device("cover"))
+        self._cov_state   = self.cov_card.add_info_row("COVER STATE")
+        self._cov_moving  = self.cov_card.add_info_row("MOVING")
+        self._cov_open_btn  = self.cov_card.add_button("OPEN",  lambda: self._covers_action("open"))
+        self._cov_close_btn = self.cov_card.add_button("CLOSE", lambda: self._covers_action("close"))
+        self._cov_open_btn.set_enabled(False)
+        self._cov_close_btn.set_enabled(False)
+ 
+        # DOME card
+        self.dome_card = DeviceCard(cards_frame, "DOME", draw_dome)
+        self.dome_card.pack(fill="x", pady=4)
+        self.dome_card.connect_callback(lambda: self._connect_device("dome"))
+        self._dome_left   = self.dome_card.add_info_row("LEFT PANEL")
+        self._dome_right  = self.dome_card.add_info_row("RIGHT PANEL")
+        self._dome_overall = self.dome_card.add_info_row("OVERALL")
+        self._dome_open_btn  = self.dome_card.add_button("OPEN",  lambda: self._dome_action("open"))
+        self._dome_close_btn = self.dome_card.add_button("CLOSE", lambda: self._dome_action("close"))
+        self._dome_abort_btn = self.dome_card.add_button("ABORT", self._dome_abort, danger=True)
+        for b in (self._dome_open_btn, self._dome_close_btn, self._dome_abort_btn):
+            b.set_enabled(False)
+ 
+        # ROTATOR card
+        self.rot_card = DeviceCard(cards_frame, "ROTATOR", draw_rotator)
+        self.rot_card.pack(fill="x", pady=4)
+        self.rot_card.connect_callback(lambda: self._connect_device("rotator"))
+        self._rot_pos    = self.rot_card.add_info_row("POSITION")
+        self._rot_moving = self.rot_card.add_info_row("MOVING")
+        self._rot_mech   = self.rot_card.add_info_row("MECH LIMITS")
+ 
+        # ── Divider ───────────────────────────────────────────────────────────
+        log_hdr = tk.Frame(root, bg=BG)
+        log_hdr.pack(fill="x", padx=16, pady=(10, 2))
+        tk.Label(log_hdr, text="SYSTEM LOG", font=("Consolas", 7, "bold"),
+                 fg=TEXT_SEC, bg=BG).pack(side="left")
+        clear_btn = tk.Label(log_hdr, text="CLEAR", font=("Consolas", 7, "bold"),
+                             fg=TEXT_SEC, bg=BG, cursor="hand2")
+        clear_btn.pack(side="right")
+        clear_btn.bind("<Button-1>", lambda e: self.console.clear())
+        clear_btn.bind("<Enter>", lambda e: clear_btn.config(fg=TEXT_PRI))
+        clear_btn.bind("<Leave>", lambda e: clear_btn.config(fg=TEXT_SEC))
+ 
+        tk.Frame(root, bg=BORDER, height=1).pack(fill="x", padx=16)
+ 
+        self.console = LogConsole(root)
+        self.console.pack(fill="x", padx=16, pady=(0, 12))
+ 
+    # ── Clock ──────────────────────────────────────────────────────────────────
+ 
+    def _start_clock(self):
+        def tick():
+            self.clock_lbl.config(
+                text=datetime.now(timezone.utc).strftime("%H:%M:%S"))
+            self.root.after(1000, tick)
+        tick()
+ 
+    # ── Logging ────────────────────────────────────────────────────────────────
+ 
+    def log(self, level: str, msg: str):
+        self.root.after(0, lambda: self.console.log(level, msg))
+ 
+    # ── State colour helper ────────────────────────────────────────────────────
+ 
+    @staticmethod
+    def _sc(s: str) -> str:
+        if not s or s in ("—", "UNKNOWN", "OFFLINE", "N/A"): return TEXT_SEC
+        if s in ("OPEN",):       return AMBER
+        if s in ("CLOSED", "PARKED"): return GREEN
+        if s in ("OPENING", "CLOSING", "PARKING", "MOVING"): return AMBER
+        if s in ("TRACKING", "ONLINE", "SLEWING"): return GREEN
+        return TEXT_PRI
+ 
+    # ── HTTP helpers (ALPACA) ─────────────────────────────────────────────────
+ 
+    def _alpaca_get(self, address, device_type, device_number, prop, timeout=5):
+        try:
+            r = requests.get(
+                f"http://{address}/api/v1/{device_type}/{device_number}/{prop}",
+                timeout=timeout)
+            if r.status_code == 200:
+                return r.json().get("Value"), None
+            return None, f"HTTP {r.status_code}"
+        except Exception as e:
+            return None, str(e)
+ 
+    def _alpaca_connected(self, address, device_type, device_number) -> bool:
+        val, _ = self._alpaca_get(address, device_type, device_number, "connected")
+        return bool(val)
+ 
+    # ── Connect All ───────────────────────────────────────────────────────────
+ 
+    def _connect_all(self):
+        self.conn_btn.config(text="CONNECTING...", fg=AMBER)
+        self.log("SYS", "Initiating connection to all devices...")
+        self.log("INFO", "Ensure Autoslew and ASCOM Remote are running")
+ 
+        def worker():
+            for dev in ("telescope", "cover", "dome", "rotator"):
+                self._connect_device(dev)
+                time.sleep(0.3)
+            self.root.after(0, lambda: self.conn_btn.config(
+                text="⏻  CONNECT ALL", fg=ACCENT))
+            self.log("OK", "Connection sequence complete")
+ 
+        threading.Thread(target=worker, daemon=True).start()
+ 
+    # ── Individual Connect ────────────────────────────────────────────────────
+ 
+    def _connect_device(self, device: str):
+        threading.Thread(
+            target=self._connect_worker, args=(device,), daemon=True).start()
+ 
+    def _connect_worker(self, device: str):
+        names = {"telescope": "Telescope", "cover": "Covers",
+                 "dome": "Dome", "rotator": "Rotator"}
+        name  = names.get(device, device)
+        card_map = {"telescope": self.tel_card, "cover": self.cov_card,
+                    "dome": self.dome_card, "rotator": self.rot_card}
+        card = card_map[device]
+ 
+        self.root.after(0, lambda: card.set_lamp("connecting"))
+        self.root.after(0, lambda: card.badge.set("CONNECTING", AMBER))
+        self.log("SYS", f"Connecting to {name}...")
+ 
+        ok = False
+        try:
+            if device == "telescope":
+                ok = self._do_connect_telescope()
+            elif device == "cover":
+                ok = self._do_connect_cover()
+            elif device == "dome":
+                ok = self._do_connect_dome()
+            elif device == "rotator":
+                ok = self._do_connect_rotator()
+        except Exception as e:
+            self.log("ERROR", f"{name}: {e}")
+ 
+        state = "connected" if ok else "disconnected"
+        self.root.after(0, lambda: card.set_lamp(state))
+        if not ok:
+            self.root.after(0, lambda: card.badge.set("FAILED", RED))
+            self.log("ERROR", f"{name} connection failed")
+        else:
+            self.log("OK", f"{name} connected")
+ 
+    def _do_connect_telescope(self) -> bool:
+        cfg = DEVICE_CONFIGS["telescope"]
+        addr, dn = cfg["address"], cfg["device_number"]
+ 
+        if not self._alpaca_connected(addr, "telescope", dn):
+            self.log("WARN", "Telescope ALPACA reports not connected")
+            self.root.after(0, lambda: self.tel_card.badge.set("NOT CONNECTED", RED))
             return False
-        print("  Please enter y or n.")
-
-def ask_continue_after_failure() -> bool:
-    """Ask user whether to continue after a test failure."""
-    print("\n  !! TEST STEP FAILED !!")
-    return ask_proceed("Continue to next test anyway?")
-
-def print_state(driver: DomeDriver):
-    """Print current dome state in a readable format."""
-    try:
-        state = driver.get_state()
-        print(f"  Left panel  : {state.get('left',  '???')}")
-        print(f"  Right panel : {state.get('right', '???')}")
-        print(f"  Closed      : {state.get('closed', '???')}")
-        last = "".join(state.get('lastChars', []))[-10:]
-        if last:
-            print(f"  Last chars  : {last}")
-    except DomeError as e:
-        print(f"  ERROR reading state: {e}")
-
-def wait_with_progress(driver: DomeDriver, target_left: str, target_right: str,
-                       timeout: int, poll_interval: float = 2.0) -> tuple[bool, float]:
-    """
-    Poll dome state with printed progress until target reached or timeout.
-    Returns (success, elapsed_seconds).
-    Used for status read timing test and ensure_closed only.
-    Movement steps use driver methods directly which handle polling internally.
-    """
-    print(f"\n  Waiting for: left={target_left}, right={target_right}")
-    print(f"  Timeout: {timeout}s  |  Polling every {poll_interval}s")
-    print()
-    start = time.time()
-    left = right = "unknown"
-    while time.time() - start < timeout:
-        try:
-            state = driver.get_state()
-            left  = state.get('left',  'unknown')
-            right = state.get('right', 'unknown')
-            elapsed = int(time.time() - start)
-            print(f"  [{elapsed:>3}s]  Left: {left:<16}  Right: {right}", end='\r')
-            if left == target_left and right == target_right:
-                elapsed_final = time.time() - start
-                print()
-                print(f"\n  Target state reached after {elapsed_final:.1f}s")
-                return True, elapsed_final
-        except DomeError as e:
-            print(f"\n  ERROR polling state: {e}")
-        time.sleep(poll_interval)
-    elapsed_final = time.time() - start
-    print()
-    print(f"\n  TIMEOUT after {timeout}s  |  Last: left={left}, right={right}")
-    return False, elapsed_final
-
-# ---------------------------------------------------------------------------
-# Test sections
-# ---------------------------------------------------------------------------
-
-def test_status_checks(driver: DomeDriver, timings: dict) -> bool:
-    """Run all read-only status checks. Returns True if all pass."""
-    section("SECTION 1: STATUS CHECKS (read-only, no movement)")
-
-    all_passed = True
-
-    step("1.1  Connection check")
-    connected = driver.is_connected()
-    print(f"  is_connected() : {connected}")
-    if not connected:
-        print("  FAILED: Not connected - cannot continue")
-        return False
-    print("  PASSED")
-
-    step("1.2  Raw state")
-    try:
-        state = driver.get_state()
-        print(f"  Raw state dict : {state}")
-        print("  PASSED")
-    except DomeError as e:
-        print(f"  FAILED: {e}")
-        all_passed = False
-
-    step("1.3  Individual state methods")
-    try:
-        print(f"  get_left_state()  : {driver.get_left_state()}")
-        print(f"  get_right_state() : {driver.get_right_state()}")
-        print(f"  is_open()         : {driver.is_open()}")
-        print(f"  is_closed()       : {driver.is_closed()}")
-        print(f"  is_moving()       : {driver.is_moving()}")
-        print("  PASSED")
-    except DomeError as e:
-        print(f"  FAILED: {e}")
-        all_passed = False
-
-    step("1.4  Full dome info dict")
-    try:
-        info = driver.get_dome_info()
-        for k, v in info.items():
-            print(f"  {k:<22} : {v}")
-        print("  PASSED")
-    except Exception as e:
-        print(f"  FAILED: {e}")
-        all_passed = False
-
-    step("1.5  Disconnect and reconnect cycle")
-    try:
-        config = driver.config
-        print("  Disconnecting...")
-        driver.disconnect()
-        print(f"  is_connected() after disconnect : {driver.is_connected()}")
-        print("  Reconnecting...")
-        reconnected = driver.connect(config)
-        print(f"  Reconnected : {reconnected}")
-        print(f"  is_connected() after reconnect : {driver.is_connected()}")
-        if reconnected:
-            print("  PASSED")
-        else:
-            print("  FAILED: Could not reconnect")
-            all_passed = False
-    except Exception as e:
-        print(f"  FAILED: {e}")
-        all_passed = False
-
-    step("1.6  Status read response time")
-    try:
-        times = []
-        for i in range(5):
-            t_start = time.time()
-            driver.get_state()
-            times.append(time.time() - t_start)
-        avg = sum(times) / len(times)
-        print(f"  5 consecutive reads: {[f'{t:.2f}s' for t in times]}")
-        print(f"  Average            : {avg:.2f}s")
-        print(f"  Max                : {max(times):.2f}s")
-        timings['status_read_avg'] = avg
-        timings['status_read_max'] = max(times)
-        print("  PASSED")
-    except Exception as e:
-        print(f"  FAILED: {e}")
-        all_passed = False
-
-    return all_passed
-
-
-def test_left_panel(driver: DomeDriver, timings: dict) -> bool:
-    """Test left panel open and close. Returns True if all pass."""
-    section("SECTION 2: LEFT PANEL TESTS")
-
-    print("\n  Current dome state:")
-    print_state(driver)
-
-    print(f"\n  This will open and close the LEFT panel only.")
-    print(f"  Right panel will remain unchanged.")
-    if not ask_proceed("Proceed with left panel tests?"):
-        print("  Skipped by user.")
-        return True     # skipped not failed
-
-    all_passed = True
-
-    # --- Open left ---
-    step("2.1  Open left panel")
-    print("\n  Current dome state:")
-    print_state(driver)
-    if not ask_proceed("Send open left panel command?"):
-        print("  Skipped by user.")
-    else:
-        print("\n  Calling driver.open_left()...")
-        try:
-            t_cmd = time.time()
-            success = driver.open_left()
-            elapsed = time.time() - t_cmd
-            if success:
-                print(f"  PASSED: Left panel opened in {elapsed:.1f}s")
-                timings['open_left'] = elapsed
-            else:
-                print(f"  FAILED: Left panel did not reach open state ({elapsed:.1f}s)")
-                all_passed = False
-                if not ask_continue_after_failure():
-                    return False
-        except Exception as e:
-            print(f"  ERROR: {e}")
-            all_passed = False
-            if not ask_continue_after_failure():
-                return False
-
-    print("\n  Current dome state:")
-    print_state(driver)
-
-    # --- Close left ---
-    step("2.2  Close left panel")
-    print("\n  Current dome state:")
-    print_state(driver)
-    if not ask_proceed("Send close left panel command?"):
-        print("  Skipped by user.")
-    else:
-        print("\n  Calling driver.close_left()...")
-        try:
-            t_cmd = time.time()
-            success = driver.close_left()
-            elapsed = time.time() - t_cmd
-            if success:
-                print(f"  PASSED: Left panel closed in {elapsed:.1f}s")
-                timings['close_left'] = elapsed
-            else:
-                print(f"  FAILED: Left panel did not reach closed state ({elapsed:.1f}s)")
-                all_passed = False
-                if not ask_continue_after_failure():
-                    return False
-        except Exception as e:
-            print(f"  ERROR: {e}")
-            all_passed = False
-            if not ask_continue_after_failure():
-                return False
-
-    print("\n  Current dome state:")
-    print_state(driver)
-
-    return all_passed
-
-
-def test_right_panel(driver: DomeDriver, timings: dict) -> bool:
-    """Test right panel open and close. Returns True if all pass."""
-    section("SECTION 3: RIGHT PANEL TESTS")
-
-    print("\n  Current dome state:")
-    print_state(driver)
-
-    print(f"\n  This will open and close the RIGHT panel only.")
-    print(f"  Left panel will remain unchanged.")
-    if not ask_proceed("Proceed with right panel tests?"):
-        print("  Skipped by user.")
+ 
+        ra,    _ = self._alpaca_get(addr, "telescope", dn, "rightascension")
+        dec,   _ = self._alpaca_get(addr, "telescope", dn, "declination")
+        alt,   _ = self._alpaca_get(addr, "telescope", dn, "altitude")
+        az,    _ = self._alpaca_get(addr, "telescope", dn, "azimuth")
+        parked,_ = self._alpaca_get(addr, "telescope", dn, "atpark")
+        slewing,_= self._alpaca_get(addr, "telescope", dn, "slewing")
+ 
+        def _fmt_ra(v):
+            if v is None: return "—"
+            h = int(v); m = int((v-h)*60); s = ((v-h)*60-m)*60
+            return f"{h:02d}h {m:02d}m {s:04.1f}s"
+ 
+        def _fmt_dec(v):
+            if v is None: return "—"
+            sign = "+" if v >= 0 else "-"; v = abs(v)
+            d = int(v); m = int((v-d)*60); s = ((v-d)*60-m)*60
+            return f"{sign}{d:02d}° {m:02d}′ {s:04.1f}″"
+ 
+        status = ("PARKED" if parked else "SLEWING" if slewing else "TRACKING")
+ 
+        def _upd():
+            self.tel_card.badge.set(status, self._sc(status))
+            self._tel_ra.set(_fmt_ra(ra))
+            self._tel_dec.set(_fmt_dec(dec))
+            self._tel_alt.set(f"{alt:.2f}°" if alt is not None else "—")
+            self._tel_az.set( f"{az:.2f}°"  if az  is not None else "—")
+            self._tel_status.set(status, self._sc(status))
+            self._park_btn.set_enabled(not bool(parked))
+            self._abort_btn.set_enabled(True)
+ 
+        self.root.after(0, _upd)
+ 
+        # Start live poll
+        self._start_tel_poll()
         return True
-
-    all_passed = True
-
-    # --- Open right ---
-    step("3.1  Open right panel")
-    print("\n  Current dome state:")
-    print_state(driver)
-    if not ask_proceed("Send open right panel command?"):
-        print("  Skipped by user.")
-    else:
-        print("\n  Calling driver.open_right()...")
-        try:
-            t_cmd = time.time()
-            success = driver.open_right()
-            elapsed = time.time() - t_cmd
-            if success:
-                print(f"  PASSED: Right panel opened in {elapsed:.1f}s")
-                timings['open_right'] = elapsed
-            else:
-                print(f"  FAILED: Right panel did not reach open state ({elapsed:.1f}s)")
-                all_passed = False
-                if not ask_continue_after_failure():
-                    return False
-        except Exception as e:
-            print(f"  ERROR: {e}")
-            all_passed = False
-            if not ask_continue_after_failure():
-                return False
-
-    print("\n  Current dome state:")
-    print_state(driver)
-
-    # --- Close right ---
-    step("3.2  Close right panel")
-    print("\n  Current dome state:")
-    print_state(driver)
-    if not ask_proceed("Send close right panel command?"):
-        print("  Skipped by user.")
-    else:
-        print("\n  Calling driver.close_right()...")
-        try:
-            t_cmd = time.time()
-            success = driver.close_right()
-            elapsed = time.time() - t_cmd
-            if success:
-                print(f"  PASSED: Right panel closed in {elapsed:.1f}s")
-                timings['close_right'] = elapsed
-            else:
-                print(f"  FAILED: Right panel did not reach closed state ({elapsed:.1f}s)")
-                all_passed = False
-                if not ask_continue_after_failure():
-                    return False
-        except Exception as e:
-            print(f"  ERROR: {e}")
-            all_passed = False
-            if not ask_continue_after_failure():
-                return False
-
-    print("\n  Current dome state:")
-    print_state(driver)
-
-    return all_passed
-
-
-def test_full_dome(driver: DomeDriver, timings: dict) -> bool:
-    """Test full dome open and close. Returns True if all pass."""
-    section("SECTION 4: FULL DOME TESTS")
-
-    print("\n  Current dome state:")
-    print_state(driver)
-
-    print(f"\n  This will open BOTH panels fully, then close BOTH panels.")
-    if not ask_proceed("Proceed with full dome open/close test?"):
-        print("  Skipped by user.")
+ 
+    def _do_connect_cover(self) -> bool:
+        cfg = DEVICE_CONFIGS["cover"]
+        addr, dn = cfg["address"], cfg["device_number"]
+ 
+        connected = self._alpaca_connected(addr, "covercalibrator", dn)
+        if not connected:
+            self.root.after(0, lambda: self.cov_card.badge.set("NOT CONNECTED", RED))
+            return False
+ 
+        state_map = {0: "UNKNOWN", 1: "CLOSED", 2: "MOVING", 3: "OPEN", 4: "ERROR"}
+        val, _ = self._alpaca_get(addr, "covercalibrator", dn, "coverstate")
+        state = state_map.get(val, "UNKNOWN")
+ 
+        def _upd():
+            self.cov_card.badge.set(state, self._sc(state))
+            self._cov_state.set(state, self._sc(state))
+            self._cov_moving.set("NO")
+            self._cov_open_btn.set_enabled(True)
+            self._cov_close_btn.set_enabled(True)
+ 
+        self.root.after(0, _upd)
+        self._start_cover_poll()
         return True
-
-    all_passed = True
-
-    # --- Full open ---
-    step("4.1  Open both panels")
-    print("\n  Current dome state:")
-    print_state(driver)
-    if not ask_proceed("Send open both panels command?"):
-        print("  Skipped by user.")
-    else:
-        print("\n  Calling driver.open()...")
-        try:
-            t_cmd = time.time()
-            success = driver.open()
-            elapsed = time.time() - t_cmd
-            if success:
-                print(f"  PASSED: Both panels opened in {elapsed:.1f}s")
-                timings['open_full'] = elapsed
-            else:
-                print(f"  FAILED: Dome did not reach fully open state ({elapsed:.1f}s)")
-                all_passed = False
-                if not ask_continue_after_failure():
+ 
+    def _do_connect_dome(self) -> bool:
+        if not DOME_DRIVER:
+            # fall back to raw HTTP
+            try:
+                r = requests.get(
+                    f"http://{DEVICE_CONFIGS['dome']['host']}:{DEVICE_CONFIGS['dome']['port']}/dome/state",
+                    timeout=3)
+                if r.status_code != 200:
                     return False
-        except Exception as e:
-            print(f"  ERROR: {e}")
-            all_passed = False
-            if not ask_continue_after_failure():
+                data = r.json()
+                left  = (data.get("left",  "unknown")).upper()
+                right = (data.get("right", "unknown")).upper()
+                overall = "CLOSED" if data.get("closed") else "OPEN"
+ 
+                def _upd():
+                    self.dome_card.badge.set(overall, self._sc(overall))
+                    self._dome_left.set(left, self._sc(left))
+                    self._dome_right.set(right, self._sc(right))
+                    self._dome_overall.set(overall, self._sc(overall))
+                    for b in (self._dome_open_btn, self._dome_close_btn, self._dome_abort_btn):
+                        b.set_enabled(True)
+ 
+                self.root.after(0, _upd)
+                self._start_dome_poll()
+                return True
+            except Exception as e:
+                self.log("ERROR", f"Dome HTTP: {e}")
                 return False
-
-    print("\n  Current dome state:")
-    print_state(driver)
-
-    # --- Full close ---
-    step("4.2  Close both panels")
-    print("\n  Current dome state:")
-    print_state(driver)
-    if not ask_proceed("Send close both panels command?"):
-        print("  Skipped by user.")
-    else:
-        print("\n  Calling driver.close()...")
-        try:
-            t_cmd = time.time()
-            success = driver.close()
-            elapsed = time.time() - t_cmd
-            if success:
-                print(f"  PASSED: Both panels closed in {elapsed:.1f}s")
-                timings['close_full'] = elapsed
+ 
+        # Use DomeDriver
+        self.dome_driver = DomeDriver()
+        if not self.dome_driver.connect(DEVICE_CONFIGS["dome"]):
+            self.dome_driver = None
+            return False
+ 
+        info = self.dome_driver.get_dome_info()
+        left    = str(info.get("left",  "unknown")).upper()
+        right   = str(info.get("right", "unknown")).upper()
+        overall = "CLOSED" if info.get("closed") else "OPEN"
+ 
+        def _upd():
+            self.dome_card.badge.set(overall, self._sc(overall))
+            self._dome_left.set(left, self._sc(left))
+            self._dome_right.set(right, self._sc(right))
+            self._dome_overall.set(overall, self._sc(overall))
+            for b in (self._dome_open_btn, self._dome_close_btn, self._dome_abort_btn):
+                b.set_enabled(True)
+ 
+        self.root.after(0, _upd)
+        self._start_dome_poll()
+        return True
+ 
+    def _do_connect_rotator(self) -> bool:
+        cfg = DEVICE_CONFIGS["rotator"]
+        addr, dn = cfg["address"], cfg["device_number"]
+ 
+        connected = self._alpaca_connected(addr, "rotator", dn)
+        if not connected:
+            self.root.after(0, lambda: self.rot_card.badge.set("NOT CONNECTED", RED))
+            return False
+ 
+        pos,     _ = self._alpaca_get(addr, "rotator", dn, "position")
+        moving,  _ = self._alpaca_get(addr, "rotator", dn, "ismoving")
+        lim = cfg.get("mechanical_limits", {})
+        lim_str = f"{lim.get('min_deg','?')}°–{lim.get('max_deg','?')}°" if lim else "N/A"
+ 
+        def _upd():
+            self.rot_card.badge.set("ONLINE", GREEN)
+            self._rot_pos.set(f"{pos:.2f}°" if pos is not None else "—")
+            self._rot_moving.set("YES" if moving else "NO",
+                                 AMBER if moving else TEXT_SEC)
+            self._rot_mech.set(lim_str)
+ 
+        self.root.after(0, _upd)
+        self._start_rotator_poll()
+        return True
+ 
+    # ── Polling loops ─────────────────────────────────────────────────────────
+ 
+    def _start_tel_poll(self):
+        def poll():
+            cfg = DEVICE_CONFIGS["telescope"]
+            addr, dn = cfg["address"], cfg["device_number"]
+            if not self._alpaca_connected(addr, "telescope", dn):
+                self.root.after(0, lambda: self.tel_card.set_lamp("disconnected"))
+                return
+            ra,    _ = self._alpaca_get(addr, "telescope", dn, "rightascension")
+            dec,   _ = self._alpaca_get(addr, "telescope", dn, "declination")
+            alt,   _ = self._alpaca_get(addr, "telescope", dn, "altitude")
+            az,    _ = self._alpaca_get(addr, "telescope", dn, "azimuth")
+            parked,_ = self._alpaca_get(addr, "telescope", dn, "atpark")
+            slewing,_= self._alpaca_get(addr, "telescope", dn, "slewing")
+ 
+            def _fmt_ra(v):
+                if v is None: return "—"
+                h=int(v); m=int((v-h)*60); s=((v-h)*60-m)*60
+                return f"{h:02d}h {m:02d}m {s:04.1f}s"
+            def _fmt_dec(v):
+                if v is None: return "—"
+                sign="+" if v>=0 else "-"; v=abs(v)
+                d=int(v); m=int((v-d)*60); s=((v-d)*60-m)*60
+                return f"{sign}{d:02d}° {m:02d}′ {s:04.1f}″"
+ 
+            status = ("PARKED" if parked else "SLEWING" if slewing else "TRACKING")
+ 
+            def _upd():
+                self._tel_ra.set(_fmt_ra(ra))
+                self._tel_dec.set(_fmt_dec(dec))
+                self._tel_alt.set(f"{alt:.2f}°" if alt is not None else "—")
+                self._tel_az.set( f"{az:.2f}°"  if az  is not None else "—")
+                self._tel_status.set(status, self._sc(status))
+                self.tel_card.badge.set(status, self._sc(status))
+                self._park_btn.set_enabled(not bool(parked))
+ 
+            self.root.after(0, _upd)
+            self.root.after(5000, lambda: threading.Thread(target=poll, daemon=True).start())
+ 
+        threading.Thread(target=poll, daemon=True).start()
+ 
+    def _start_cover_poll(self):
+        def poll():
+            cfg = DEVICE_CONFIGS["cover"]
+            addr, dn = cfg["address"], cfg["device_number"]
+            state_map = {0:"UNKNOWN",1:"CLOSED",2:"MOVING",3:"OPEN",4:"ERROR"}
+            val, _ = self._alpaca_get(addr, "covercalibrator", dn, "coverstate")
+            state  = state_map.get(val, "UNKNOWN")
+            moving = (state == "MOVING")
+ 
+            def _upd():
+                self._cov_state.set(state, self._sc(state))
+                self._cov_moving.set("YES" if moving else "NO",
+                                     AMBER if moving else TEXT_SEC)
+                self.cov_card.badge.set(state, self._sc(state))
+ 
+            self.root.after(0, _upd)
+            self.root.after(3000, lambda: threading.Thread(target=poll, daemon=True).start())
+ 
+        threading.Thread(target=poll, daemon=True).start()
+ 
+    def _start_dome_poll(self):
+        def poll():
+            try:
+                cfg = DEVICE_CONFIGS["dome"]
+                r = requests.get(
+                    f"http://{cfg['host']}:{cfg['port']}/dome/state",
+                    timeout=cfg.get("timeout_status", 2))
+                data = r.json()
+                left  = str(data.get("left",  "unknown")).upper()
+                right = str(data.get("right", "unknown")).upper()
+                closed = data.get("closed", False)
+                left_moving  = left  in ("OPENING","CLOSING")
+                right_moving = right in ("OPENING","CLOSING")
+                moving = left_moving or right_moving
+                overall = "CLOSED" if closed else ("MOVING" if moving else "OPEN")
+ 
+                def _upd():
+                    self._dome_left.set(left, self._sc(left))
+                    self._dome_right.set(right, self._sc(right))
+                    self._dome_overall.set(overall, self._sc(overall))
+                    self.dome_card.badge.set(overall, self._sc(overall))
+ 
+                self.root.after(0, _upd)
+            except Exception:
+                pass
+            self.root.after(3000, lambda: threading.Thread(target=poll, daemon=True).start())
+ 
+        threading.Thread(target=poll, daemon=True).start()
+ 
+    def _start_rotator_poll(self):
+        def poll():
+            cfg = DEVICE_CONFIGS["rotator"]
+            addr, dn = cfg["address"], cfg["device_number"]
+            pos,    _ = self._alpaca_get(addr, "rotator", dn, "position")
+            moving, _ = self._alpaca_get(addr, "rotator", dn, "ismoving")
+ 
+            def _upd():
+                self._rot_pos.set(f"{pos:.2f}°" if pos is not None else "—")
+                self._rot_moving.set("YES" if moving else "NO",
+                                     AMBER if moving else TEXT_SEC)
+ 
+            self.root.after(0, _upd)
+            self.root.after(5000, lambda: threading.Thread(target=poll, daemon=True).start())
+ 
+        threading.Thread(target=poll, daemon=True).start()
+ 
+    # ── Actions ───────────────────────────────────────────────────────────────
+ 
+    def _park_telescope(self):
+        self.log("INFO", "Parking telescope...")
+        self._park_btn.set_enabled(False)
+ 
+        def worker():
+            try:
+                cfg = DEVICE_CONFIGS["telescope"]
+                addr, dn = cfg["address"], cfg["device_number"]
+                if TELESCOPE_DRIVER:
+                    drv = AlpacaTelescopeDriver()
+                    if drv.connect(cfg):
+                        drv.park(max_wait=120)
+                        drv.disconnect()
+                        self.log("OK", "Telescope parked")
+                    else:
+                        self.log("ERROR", "Park: could not connect to telescope")
+                else:
+                    requests.put(
+                        f"http://{addr}/api/v1/telescope/{dn}/park",
+                        json={"ClientID": 1, "ClientTransactionID": 1}, timeout=120)
+                    self.log("OK", "Park command sent")
+            except Exception as e:
+                self.log("ERROR", f"Park failed: {e}")
+ 
+        threading.Thread(target=worker, daemon=True).start()
+ 
+    def _abort_slew(self):
+        self.log("WARN", "Sending abort slew command...")
+        def worker():
+            try:
+                cfg = DEVICE_CONFIGS["telescope"]
+                addr, dn = cfg["address"], cfg["device_number"]
+                requests.put(
+                    f"http://{addr}/api/v1/telescope/{dn}/abortslew",
+                    json={"ClientID": 1, "ClientTransactionID": 1}, timeout=10)
+                self.log("OK", "Abort slew sent")
+            except Exception as e:
+                self.log("ERROR", f"Abort failed: {e}")
+        threading.Thread(target=worker, daemon=True).start()
+ 
+    def _covers_action(self, action: str):
+        label = "Opening" if action == "open" else "Closing"
+        self.log("INFO", f"{label} covers...")
+        self._cov_open_btn.set_enabled(False)
+        self._cov_close_btn.set_enabled(False)
+ 
+        def worker():
+            try:
+                cfg = DEVICE_CONFIGS["cover"]
+                addr, dn = cfg["address"], cfg["device_number"]
+                if COVER_DRIVER:
+                    drv = AlpacaCoverDriver()
+                    if drv.connect(cfg):
+                        if action == "open":  drv.open_cover()
+                        else:                 drv.close_cover()
+                        drv.disconnect()
+                        self.log("OK", f"Covers {action}ed")
+                    else:
+                        self.log("ERROR", "Cover: connection failed")
+                else:
+                    endpoint = "opencover" if action == "open" else "closecover"
+                    requests.put(
+                        f"http://{addr}/api/v1/covercalibrator/{dn}/{endpoint}",
+                        json={"ClientID": 1, "ClientTransactionID": 1},
+                        timeout=cfg.get("operation_timeout", 30))
+                    self.log("OK", f"Cover {action} command sent")
+            except Exception as e:
+                self.log("ERROR", f"Cover {action} failed: {e}")
+            finally:
+                self.root.after(0, lambda: self._cov_open_btn.set_enabled(True))
+                self.root.after(0, lambda: self._cov_close_btn.set_enabled(True))
+ 
+        threading.Thread(target=worker, daemon=True).start()
+ 
+    def _dome_action(self, action: str):
+        label = "Opening" if action == "open" else "Closing"
+        self.log("INFO", f"{label} dome panels...")
+        for b in (self._dome_open_btn, self._dome_close_btn):
+            b.set_enabled(False)
+ 
+        def worker():
+            try:
+                cfg = DEVICE_CONFIGS["dome"]
+                if DOME_DRIVER and self.dome_driver:
+                    ok = (self.dome_driver.open() if action == "open"
+                          else self.dome_driver.close())
+                    self.log("OK" if ok else "ERROR",
+                             f"Dome {action}: {'success' if ok else 'failed'}")
+                else:
+                    endpoint = "/dome/true" if action == "open" else "/dome/false"
+                    requests.put(
+                        f"http://{cfg['host']}:{cfg['port']}{endpoint}",
+                        timeout=cfg.get("timeout_move", 75))
+                    self.log("OK", f"Dome {action} command sent")
+            except Exception as e:
+                self.log("ERROR", f"Dome {action} failed: {e}")
+            finally:
+                self.root.after(0, lambda: self._dome_open_btn.set_enabled(True))
+                self.root.after(0, lambda: self._dome_close_btn.set_enabled(True))
+ 
+        threading.Thread(target=worker, daemon=True).start()
+ 
+    def _dome_abort(self):
+        self.log("WARN", "Sending dome abort...")
+        def worker():
+            try:
+                cfg = DEVICE_CONFIGS["dome"]
+                if DOME_DRIVER and self.dome_driver:
+                    self.dome_driver.abort()
+                else:
+                    requests.put(
+                        f"http://{cfg['host']}:{cfg['port']}/dome/abort",
+                        timeout=cfg.get("timeout_abort", 20))
+                self.log("OK", "Dome abort sent")
+            except Exception as e:
+                self.log("ERROR", f"Dome abort failed: {e}")
+        threading.Thread(target=worker, daemon=True).start()
+ 
+    # ── Night modal ───────────────────────────────────────────────────────────
+ 
+    def _night_modal(self, mode: str):
+        NightModal(self.root, mode, self._execute_night)
+ 
+    def _execute_night(self, mode: str, opts: Dict[str, bool]):
+        label = "START NIGHT" if mode == "start" else "END NIGHT"
+        self.log("SYS", f"▶ {label} sequence initiated")
+ 
+        def worker():
+            if mode == "start":
+                if opts.get("dome"):    self._dome_action("open");    time.sleep(5)
+                if opts.get("covers"):  self._covers_action("open");  time.sleep(5)
+                if opts.get("motors"):
+                    self.log("INFO", "Telescope motors enable — manual via Autoslew if needed")
             else:
-                print(f"  FAILED: Dome did not reach fully closed state ({elapsed:.1f}s)")
-                all_passed = False
-                if not ask_continue_after_failure():
-                    return False
-        except Exception as e:
-            print(f"  ERROR: {e}")
-            all_passed = False
-            if not ask_continue_after_failure():
-                return False
-
-    print("\n  Current dome state:")
-    print_state(driver)
-
-    return all_passed
-
-
-def ensure_closed(driver: DomeDriver):
-    """Always attempt to close the dome at the end of testing."""
-    section("FINAL: ENSURING DOME IS CLOSED")
-    print("\n  Checking current state...")
-    print_state(driver)
-
-    if driver.is_closed():
-        print("\n  Dome is already closed. Nothing to do.")
-        return
-
-    print("\n  Dome is not fully closed. Calling driver.close()...")
-    try:
-        t_cmd = time.time()
-        success = driver.close()
-        elapsed = time.time() - t_cmd
-        if success:
-            print(f"  Dome confirmed closed in {elapsed:.1f}s")
-        else:
-            print("  WARNING: Dome did not confirm closed state - check dome manually!")
-    except Exception as e:
-        print(f"  ERROR during close: {e}")
-        print("  WARNING: Check dome state manually!")
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-def main():
-
-    # Load devices.yaml
-    config_path = Path(__file__).parent.parent.parent / 'config' / 'devices.yaml'
-    if not config_path.exists():
-        print(f"ERROR: devices.yaml not found at {config_path}")
-        sys.exit(1)
-
-    with open(config_path) as f:
-        devices = yaml.safe_load(f)
-
-    if TEST_DOME_KEY not in devices:
-        print(f"ERROR: '{TEST_DOME_KEY}' not found in devices.yaml")
-        sys.exit(1)
-
-    dome_config = devices[TEST_DOME_KEY]
-    dome_id     = dome_config.get('dome_id', TEST_DOME_KEY)
-
-    # Title
-    separator("=", 60)
-    print(f"  MT KENT OBSERVATORY - DOME ACTION TEST SCRIPT")
-    print(f"  {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"  Target dome : {dome_id}  ({TEST_DOME_KEY})")
-    separator("=", 60)
-    print()
-    print("  !! This script commands REAL hardware !!")
-    print("  !! Ensure the dome area is clear before proceeding !!")
-    print("  !! The dome will always be closed at the end !!")
-
-    if not ask_proceed("\nReady to begin? Start with status checks only"):
-        print("\n  Aborted by user.")
-        sys.exit(0)
-
-    # Connect
-    section("CONNECTING")
-    print(f"\n  Connecting to {dome_id}...")
-    driver = DomeDriver()
-    connected = driver.connect(dome_config)
-    if not connected:
-        print(f"  ERROR: Could not connect to {dome_id}. Exiting.")
-        sys.exit(1)
-    print(f"  Connected to {dome_id}")
-
-    # Track results and timings
-    results = {}
-    timings = {}
-
-    # --- Status checks (always run) ---
-    results['status'] = test_status_checks(driver, timings)
-
-    # --- Movement tests ---
-    section("MOVEMENT TESTS")
-    print("\n  Status checks complete.")
-    print("  The following sections will command physical dome movement.")
-    print("  You will be prompted before each test.")
-
-    if not ask_proceed("Proceed to movement tests?"):
-        print("\n  Movement tests skipped by user.")
-    else:
-        results['left_panel']  = test_left_panel(driver, timings)
-        results['right_panel'] = test_right_panel(driver, timings)
-        results['full_dome']   = test_full_dome(driver, timings)
-
-    # --- Always close at end ---
-    ensure_closed(driver)
-
-    # --- Disconnect ---
-    section("DISCONNECTING")
-    driver.disconnect()
-    print("  Disconnected.")
-
-    # --- Summary ---
-    section("TEST SUMMARY")
-    print()
-    all_passed = True
-    for test_name, passed in results.items():
-        status = "PASSED" if passed else "FAILED"
-        print(f"  {test_name:<20} : {status}")
-        if not passed:
-            all_passed = False
-
-    if timings:
-        print()
-        separator()
-        print("  STATUS READ TIMINGS")
-        separator()
-        for k in ['status_read_avg', 'status_read_max']:
-            if k in timings:
-                print(f"  {k:<25} : {timings[k]:.2f}s")
-        print(f"\n  Note: timeout_status in devices.yaml is currently {driver.timeout_status}s")
-
-        move_keys = [k for k in timings if k in
-                     ('open_left', 'close_left', 'open_right',
-                      'close_right', 'open_full', 'close_full')]
-        if move_keys:
-            print()
-            separator()
-            print("  MOVEMENT TIMINGS  (includes full open/close sequence)")
-            separator()
-            for k in move_keys:
-                print(f"  {k:<25} : {timings[k]:.1f}s")
-            slowest = max(timings[k] for k in move_keys)
-            print(f"\n  Note: timeout_move in devices.yaml is currently {driver.timeout_move}s")
-            print(f"  Recommend setting to at least {slowest * 1.5:.0f}s based on observed times")
-
-    print()
-    separator("=")
-    if all_passed:
-        print("  ALL TESTS PASSED")
-    else:
-        print("  SOME TESTS FAILED - review output above")
-    separator("=")
-    print()
-
+                if opts.get("park"):    self._park_telescope();       time.sleep(10)
+                if opts.get("covers"):  self._covers_action("close"); time.sleep(5)
+                if opts.get("dome"):    self._dome_action("close");   time.sleep(5)
+            self.log("OK", f"▶ {label} complete")
+ 
+        threading.Thread(target=worker, daemon=True).start()
+ 
+    # ── Run ───────────────────────────────────────────────────────────────────
+ 
+    def run(self):
+        self.root.mainloop()
+ 
+ 
+# ══════════════════════════════════════════════════════════════════════════════
+ 
 if __name__ == "__main__":
-    main()
+    app = ObservatoryControl()
+    app.run()
